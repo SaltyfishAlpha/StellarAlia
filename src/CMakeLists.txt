@@ -8,6 +8,10 @@ file(GLOB_RECURSE CORE_SOURCES
     "core/*.cpp"
 )
 
+file(GLOB_RECURSE PLATFORM_SOURCES
+    "platform/*.cpp"
+)
+
 file(GLOB_RECURSE RESOURCE_SOURCES
     "resource/*.cpp"
 )
@@ -20,6 +24,11 @@ file(GLOB_RECURSE FUNCTION_SOURCES
 file(GLOB_RECURSE CORE_HEADERS
     "core/*.h"
     "core/*.hpp"
+)
+
+file(GLOB_RECURSE PLATFORM_HEADERS
+    "platform/*.h"
+    "platform/*.hpp"
 )
 
 file(GLOB_RECURSE RESOURCE_HEADERS
@@ -35,9 +44,11 @@ file(GLOB_RECURSE FUNCTION_HEADERS
 # Combine all sources
 set(ALL_RUNTIME_SOURCES
     ${CORE_SOURCES}
+    ${PLATFORM_SOURCES}
     ${RESOURCE_SOURCES}
     ${FUNCTION_SOURCES}
     ${CORE_HEADERS}
+    ${PLATFORM_HEADERS}
     ${RESOURCE_HEADERS}
     ${FUNCTION_HEADERS}
 )
@@ -100,23 +111,6 @@ target_link_libraries(StellarAliaRuntime
     PUBLIC
         spdlog::spdlog
 )
-
-# Link SDL2 if available
-if(TARGET SDL2::SDL2-static)
-    target_link_libraries(StellarAliaRuntime
-        PUBLIC
-            SDL2::SDL2-static
-    )
-    message(STATUS "Linking against SDL2::SDL2-static")
-elseif(TARGET SDL2::SDL2)
-    target_link_libraries(StellarAliaRuntime
-        PUBLIC
-            SDL2::SDL2
-    )
-    message(STATUS "Linking against SDL2::SDL2 (shared)")
-else()
-    message(WARNING "SDL2 target not found. SDL2 window backend will not be available.")
-endif()
 
 # Link volk if available
 if(TARGET volk::volk)

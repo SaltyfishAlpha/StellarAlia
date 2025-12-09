@@ -21,26 +21,6 @@ else()
 endif()
 
 # ============================================================================
-# SDL2 - Simple DirectMedia Layer (Window management and input)
-# ============================================================================
-# SDL2 is included as a local copy in third_party/SDL2/
-
-# Set SDL2 options
-set(SDL_SHARED OFF CACHE BOOL "" FORCE)
-set(SDL_STATIC ON CACHE BOOL "" FORCE)
-set(SDL_STATIC_PIC ON CACHE BOOL "" FORCE)
-set(SDL_TEST OFF CACHE BOOL "" FORCE)
-set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
-
-# Add SDL2 subdirectory
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/SDL2/CMakeLists.txt)
-    add_subdirectory(SDL2)
-    message(STATUS "SDL2: Using local copy at ${CMAKE_CURRENT_SOURCE_DIR}/SDL2")
-else()
-    message(FATAL_ERROR "SDL2 not found. Please clone it to third_party/SDL2/")
-endif()
-
-# ============================================================================
 # GLFW - Graphics Library Framework (Window management and input)
 # ============================================================================
 # GLFW is included as a local copy in third_party/GLFW/

@@ -1,4 +1,6 @@
 .token_note
 .idea
+.clang-format
+
 cmake-build-debug
 cmake-build-release

@@ -3,10 +3,12 @@
 /**
  * @file GraphicsContext.hpp
  * @brief Abstract graphics API interface
- * 
- * This provides an abstraction layer for different graphics APIs (Vulkan, OpenGL, DirectX, etc.).
- * Implementations should inherit from this interface.
+ *
+ * This provides an abstraction layer for different graphics APIs (Vulkan,
+ * OpenGL, DirectX, etc.). Implementations should inherit from this interface.
  */
+
+#include "WindowSystem.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -27,7 +29,7 @@ namespace StellarAlia::Function::Graphics {
 
     // Forward declaration
     namespace Window {
-        class Window;
+        class WindowSystem;
     }
 
     /**
@@ -35,11 +37,8 @@ namespace StellarAlia::Function::Graphics {
      */
     struct GraphicsContextCreateInfo {
         GraphicsAPI api = GraphicsAPI::Vulkan;
-        uint32_t width = 1280;
-        uint32_t height = 720;
-        const char* applicationName = "StellarAlia Application";
         bool enableValidation = true;
-        Window::Window* window = nullptr;  // Abstract window interface
+        std::shared_ptr<WindowSystem> window = nullptr;  // Abstract window system interface
     };
 
     /**

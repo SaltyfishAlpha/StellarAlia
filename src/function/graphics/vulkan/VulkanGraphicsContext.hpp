@@ -4,12 +4,16 @@
  * @file VulkanGraphicsContext.hpp
  * @brief Vulkan implementation of GraphicsContext
  * 
- * This implementation uses the abstract Window interface for window and surface management.
- * Supports both SDL2 and GLFW backends.
+ * This implementation uses the window system for window and surface management (GLFW-only).
  */
 
-#include "function/graphics/GraphicsContext.hpp"
+#ifndef VK_NO_PROTOTYPES
+#define VK_NO_PROTOTYPES
+#endif
+
 #include <volk.h>
+
+#include "function/graphics/GraphicsContext.hpp"
 #include <vma/vk_mem_alloc.h>
 #include <vector>
 #include <string>
@@ -86,6 +90,8 @@ namespace StellarAlia::Function::Graphics {
         std::vector<VkSemaphore> m_renderFinishedSemaphores;
         std::vector<VkFence> m_inFlightFences;
         size_t m_currentFrame = 0;
+        uint32_t m_currentImageIndex = 0;
+        bool m_hasAcquiredImage = false;
 
         // Surface (platform-specific)
         VkSurfaceKHR m_surface = VK_NULL_HANDLE;
@@ -97,7 +103,7 @@ namespace StellarAlia::Function::Graphics {
         VmaAllocator m_allocator = VK_NULL_HANDLE;
 
         // Window reference (for checking resize)
-        Window::Window* m_window = nullptr;
+        WindowSystem* m_window = nullptr;
 
         // State
         bool m_initialized = false;
@@ -109,6 +115,7 @@ namespace StellarAlia::Function::Graphics {
         bool CreateInstance(const GraphicsContextCreateInfo& createInfo);
         bool SetupDebugMessenger();
         bool CreateSurface(const GraphicsContextCreateInfo& createInfo);
+        bool CreateSurfaceFromWindow(const GraphicsContextCreateInfo& createInfo);
         bool PickPhysicalDevice();
         bool CreateLogicalDevice();
         bool CreateSwapchain();

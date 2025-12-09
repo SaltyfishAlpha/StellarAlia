@@ -2,21 +2,17 @@
 #include <chrono>
 #include <memory>
 
+#include "resource/config_manager/ConfigManager.hpp"
 #include "core/logs/Log.hpp"
 #include "function/graphics/GraphicsContext.hpp"
 #include "function/graphics/vulkan/VulkanGraphicsContext.hpp"
-#include "function/graphics/window/Window.hpp"
-#include "function/graphics/window/sdl2/SDL2Window.hpp"
-#include "function/graphics/window/glfw/GLFWWindow.hpp"
+#include "function/graphics/WindowSystem.hpp"
 
 using namespace StellarAlia::Function::Graphics;
-// Don't use "using namespace Window" to avoid Windows API macro conflicts
-// Window is a macro on Windows (from windows.h), so we use fully qualified names
-using StellarAlia::Function::Graphics::Window::WindowBackend;
-using StellarAlia::Function::Graphics::Window::WindowCreateInfo;
+using StellarAlia::Function::Graphics::WindowSystemCreateInfo;
 
 // Type alias to avoid Windows macro conflict
-using WindowType = StellarAlia::Function::Graphics::Window::Window;
+using WindowType = StellarAlia::Function::Graphics::WindowSystem;
 
 int main(int argc, char* argv[]) {
     // Initialize the logging system
@@ -26,26 +22,20 @@ int main(int argc, char* argv[]) {
     SA_LOG_INFO("Testing window and graphics context initialization");
     
     // ============================================================================
-    // Test 1: Window Creation (Direct Instantiation)
+    // Test 1: Window Creation (set up window system)
     // ============================================================================
-    SA_LOG_INFO("\n[Test 1] Creating window...");
-    
-    WindowCreateInfo windowInfo;
+    SA_LOG_INFO("\n[Test 1] Creating window system...");
+
+    const auto& appConfig = StellarAlia::Resource::ConfigManager::Get();
+    WindowSystemCreateInfo windowInfo;
     windowInfo.width = 1280;
     windowInfo.height = 720;
-    windowInfo.title = "StellarAlia Graphics Test";
+    windowInfo.title = appConfig.windowTitle.c_str();
     windowInfo.resizable = true;
     
-    // Direct instantiation: choose SDL2 or GLFW explicitly
-    // Use type alias to avoid Windows API macro conflicts (Window is a macro on Windows)
-    std::unique_ptr<WindowType> window;
-    #if 1  // Change to 0 to use GLFW instead
-        window = std::make_unique<StellarAlia::Function::Graphics::Window::SDL2Window>();
-        SA_LOG_INFO("Using SDL2 window backend");
-    #else
-        window = std::make_unique<StellarAlia::Function::Graphics::Window::GLFWWindow>();
-        SA_LOG_INFO("Using GLFW window backend");
-    #endif
+    // Shared ownership so we can pass the window to the render system safely
+    std::shared_ptr<WindowType> window = std::make_shared<WindowType>();
+    SA_LOG_INFO("Using GLFW window backend");
     
     if (!window->Initialize(windowInfo)) {
         SA_LOG_ERROR("Failed to initialize window!");
@@ -54,22 +44,17 @@ int main(int argc, char* argv[]) {
     }
     
     SA_LOG_INFO("Window created successfully!");
-    const char* backendName = (window->GetBackend() == WindowBackend::SDL2) ? "SDL2" : 
-                              (window->GetBackend() == WindowBackend::GLFW) ? "GLFW" : "Unknown";
-    SA_LOG_INFO("  Backend: {}", backendName);
+    SA_LOG_INFO("  Backend: GLFW");
     SA_LOG_INFO("  Size: {}x{}", window->GetWidth(), window->GetHeight());
-    
+
     // ============================================================================
-    // Test 2: Graphics Context Creation (Direct Instantiation)
+    // Test 2: Render System Creation (graphics context)
     // ============================================================================
-    SA_LOG_INFO("\n[Test 2] Creating graphics context...");
-    
+    SA_LOG_INFO("\n[Test 2] Creating render system (graphics context)...");
+
     GraphicsContextCreateInfo contextInfo;
-    contextInfo.width = windowInfo.width;
-    contextInfo.height = windowInfo.height;
-    contextInfo.applicationName = "StellarAlia Graphics Test";
     contextInfo.enableValidation = true;
-    contextInfo.window = window.get();  // Pass the window instance
+    contextInfo.window = window;  // Pass shared window to graphics context
     
     // Verify window is valid before proceeding
     if (!contextInfo.window) {
@@ -79,10 +64,10 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
-    SA_LOG_INFO("Window pointer is valid: {}", static_cast<void*>(contextInfo.window));
+    SA_LOG_INFO("Window pointer is valid: {}", static_cast<void*>(contextInfo.window.get()));
     
-    // Direct instantiation: create VulkanGraphicsContext directly
-    std::unique_ptr<GraphicsContext> graphicsContext = std::make_unique<VulkanGraphicsContext>();
+    // Shared render system so lifetime can be managed alongside the window
+    std::shared_ptr<GraphicsContext> graphicsContext = std::make_shared<VulkanGraphicsContext>();
 
     if (!graphicsContext) {
         SA_LOG_ERROR("Failed to create VulkanGraphicsContext instance!");

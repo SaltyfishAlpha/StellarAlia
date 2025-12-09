@@ -1,10 +1,14 @@
 #include "function/graphics/vulkan/VulkanGraphicsContext.hpp"
-#include "function/graphics/window/Window.hpp"
+#include "function/graphics/WindowSystem.hpp"
 #include "core/logs/Log.hpp"
-#include <stdexcept>
+
 #include <set>
 #include <algorithm>
 #include <cstring>
+
+#include <volk.h>
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
 
 namespace StellarAlia::Function::Graphics {
 
@@ -34,10 +38,10 @@ namespace StellarAlia::Function::Graphics {
             return false;
         }
 
-        m_width = createInfo.width;
-        m_height = createInfo.height;
+        m_width = createInfo.window->GetWidth();
+        m_height = createInfo.window->GetHeight();
         m_enableValidation = createInfo.enableValidation;
-        m_window = createInfo.window;
+        m_window = createInfo.window.get();
 
         SA_LOG_INFO("Initializing Vulkan graphics context...");
         SA_LOG_INFO("  API: Vulkan");
@@ -209,11 +213,14 @@ namespace StellarAlia::Function::Graphics {
             return;
         }
 
+        m_currentImageIndex = imageIndex;
+        m_hasAcquiredImage = true;
+
         // Reset fence
         vkResetFences(m_device, 1, &m_inFlightFences[m_currentFrame]);
 
         // Reset command buffer
-        vkResetCommandBuffer(m_commandBuffers[imageIndex], 0);
+        vkResetCommandBuffer(m_commandBuffers[m_currentImageIndex], 0);
     }
 
     void VulkanGraphicsContext::EndFrame() {
@@ -222,11 +229,9 @@ namespace StellarAlia::Function::Graphics {
     }
 
     void VulkanGraphicsContext::Present() {
-        if (!m_initialized) {
+        if (!m_initialized || !m_hasAcquiredImage) {
             return;
         }
-
-        uint32_t imageIndex = static_cast<uint32_t>(m_currentFrame);
 
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -237,7 +242,7 @@ namespace StellarAlia::Function::Graphics {
         submitInfo.pWaitSemaphores = waitSemaphores;
         submitInfo.pWaitDstStageMask = waitStages;
         submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &m_commandBuffers[imageIndex];
+        submitInfo.pCommandBuffers = &m_commandBuffers[m_currentImageIndex];
 
         VkSemaphore signalSemaphores[] = { m_renderFinishedSemaphores[m_currentFrame] };
         submitInfo.signalSemaphoreCount = 1;
@@ -254,7 +259,7 @@ namespace StellarAlia::Function::Graphics {
         presentInfo.pWaitSemaphores = signalSemaphores;
         presentInfo.swapchainCount = 1;
         presentInfo.pSwapchains = &m_swapchain;
-        presentInfo.pImageIndices = &imageIndex;
+        presentInfo.pImageIndices = &m_currentImageIndex;
 
         VkResult result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
@@ -268,6 +273,7 @@ namespace StellarAlia::Function::Graphics {
         }
 
         m_currentFrame = (m_currentFrame + 1) % m_inFlightFences.size();
+        m_hasAcquiredImage = false;
     }
 
     void VulkanGraphicsContext::WaitIdle() {
@@ -310,7 +316,7 @@ namespace StellarAlia::Function::Graphics {
     bool VulkanGraphicsContext::CreateInstance(const GraphicsContextCreateInfo& createInfo) {
         VkApplicationInfo appInfo{};
         appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-        appInfo.pApplicationName = createInfo.applicationName;
+        appInfo.pApplicationName = "StellarAlia-Renderer";
         appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
         appInfo.pEngineName = "StellarAlia";
         appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
@@ -369,13 +375,19 @@ namespace StellarAlia::Function::Graphics {
             return false;
         }
 
-        if (!createInfo.window->CreateVulkanSurface(m_instance, nullptr, &m_surface)) {
-            SA_LOG_ERROR("Failed to create Vulkan surface from window");
+        return CreateSurfaceFromWindow(createInfo);
+    }
+
+    bool VulkanGraphicsContext::CreateSurfaceFromWindow(const GraphicsContextCreateInfo& createInfo) {
+        VkResult result = glfwCreateWindowSurface(m_instance,
+                                                  createInfo.window->GetNativeHandle(),
+                                                  nullptr, &m_surface);
+        if (result != VK_SUCCESS) {
+            SA_LOG_ERROR("Failed to create Vulkan surface from GLFW window: VkResult = {}", static_cast<int>(result));
             return false;
         }
 
-        SA_LOG_INFO("Vulkan surface created successfully using {}", 
-            createInfo.window->GetBackend() == Window::WindowBackend::SDL2 ? "SDL2" : "GLFW");
+        SA_LOG_INFO("Vulkan surface created successfully using GLFW");
         return true;
     }
 
@@ -779,27 +791,20 @@ namespace StellarAlia::Function::Graphics {
     std::vector<const char*> VulkanGraphicsContext::GetRequiredExtensions(const GraphicsContextCreateInfo& createInfo) {
         std::vector<const char*> extensions;
 
-        // Get required extensions from window
+        // Get required extensions using GLFW
         if (!createInfo.window) {
             SA_LOG_ERROR("Window is required to get Vulkan instance extensions");
             return extensions;  // Return empty, will fail later with better error message
         }
 
-        uint32_t extensionCount = 0;
-        const char* const* windowExtensions = createInfo.window->GetVulkanInstanceExtensions(&extensionCount);
-        
-        if (!windowExtensions || extensionCount == 0) {
-            SA_LOG_ERROR("Failed to get Vulkan instance extensions from window (windowExtensions is {}, count={})", 
-                windowExtensions ? "valid" : "null", extensionCount);
-            return extensions;  // Return empty, will fail later with better error message
+        uint32_t count = 0;
+        const char** glfwExts = glfwGetRequiredInstanceExtensions(&count);
+        if (!glfwExts || count == 0) {
+            SA_LOG_ERROR("Failed to get Vulkan extensions from GLFW window");
+            return extensions;
         }
 
-        extensions.reserve(extensionCount + (m_enableValidation ? 1 : 0));
-        for (uint32_t i = 0; i < extensionCount; i++) {
-            if (windowExtensions[i]) {
-                extensions.push_back(windowExtensions[i]);
-            }
-        }
+        extensions.insert(extensions.end(), glfwExts, glfwExts + count);
 
         if (m_enableValidation) {
             extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
