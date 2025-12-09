@@ -7,6 +7,7 @@
 [submodule "third_party/SDL2"]
 	path = third_party/SDL2
 	url = https://github.com/libsdl-org/SDL.git
+	branch = SDL2
 [submodule "third_party/spdlog"]
 	path = third_party/spdlog
 	url = https://github.com/gabime/spdlog.git

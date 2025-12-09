@@ -48,6 +48,20 @@ else()
     message(STATUS "Multi-config generator detected - TRACE/DEBUG enabled for Debug/RelWithDebInfo")
 endif()
 
+# Vulkan configuration - use pre-built libraries from lib/vulkan
+# Check for pre-built Vulkan libraries
+set(VULKAN_LIB_DIR ${CMAKE_SOURCE_DIR}/lib/vulkan)
+if(EXISTS ${VULKAN_LIB_DIR})
+    message(STATUS "Vulkan library directory found: ${VULKAN_LIB_DIR}")
+else()
+    message(WARNING "Vulkan library directory not found at ${VULKAN_LIB_DIR}")
+    message(WARNING "Please place pre-built Vulkan libraries (vulkan-1.lib, libvulkan.so, etc.) in lib/vulkan/")
+endif()
+
+# Shader compilation
+include(cmake/CompileShaders.cmake)
+set_property(GLOBAL PROPERTY SHADER_OUTPUTS "")
+
 # Add third-party dependencies
 add_subdirectory(third_party)
 
@@ -74,3 +88,6 @@ add_executable(${PROJECT_NAME}
 target_link_libraries(${PROJECT_NAME} 
     PRIVATE StellarAliaRuntime
 )
+
+# Setup shader compilation (after all targets are defined)
+setup_shader_compilation()

@@ -1,27 +1,187 @@
 #include <iostream>
+#include <chrono>
+#include <memory>
+
 #include "core/logs/Log.hpp"
+#include "function/graphics/GraphicsContext.hpp"
+#include "function/graphics/vulkan/VulkanGraphicsContext.hpp"
+#include "function/graphics/window/Window.hpp"
+#include "function/graphics/window/sdl2/SDL2Window.hpp"
+#include "function/graphics/window/glfw/GLFWWindow.hpp"
 
-// Example includes from the runtime library
-// #include "core/math/Math.hpp"
-// #include "resource/filesystem/FileSystem.hpp"
-// #include "function/graphics/GraphicsPipeline.hpp"
+using namespace StellarAlia::Function::Graphics;
+// Don't use "using namespace Window" to avoid Windows API macro conflicts
+// Window is a macro on Windows (from windows.h), so we use fully qualified names
+using StellarAlia::Function::Graphics::Window::WindowBackend;
+using StellarAlia::Function::Graphics::Window::WindowCreateInfo;
 
-int main() {
+// Type alias to avoid Windows macro conflict
+using WindowType = StellarAlia::Function::Graphics::Window::Window;
+
+int main(int argc, char* argv[]) {
     // Initialize the logging system
     StellarAlia::Core::Log::Initialize();
     
-    // Test logging functionality
-    SA_LOG_INFO("StellarAlia Sandbox - Testing Runtime Library");
-    SA_LOG_INFO("This is a test project to verify the engine functionality.");
+    SA_LOG_INFO("=== StellarAlia Graphics Framework Test ===");
+    SA_LOG_INFO("Testing window and graphics context initialization");
     
-    SA_LOG_TRACE("This is a trace message");
-    SA_LOG_DEBUG("This is a debug message");
-    SA_LOG_WARN("This is a warning message");
-    SA_LOG_ERROR("This is an error message");
+    // ============================================================================
+    // Test 1: Window Creation (Direct Instantiation)
+    // ============================================================================
+    SA_LOG_INFO("\n[Test 1] Creating window...");
+    
+    WindowCreateInfo windowInfo;
+    windowInfo.width = 1280;
+    windowInfo.height = 720;
+    windowInfo.title = "StellarAlia Graphics Test";
+    windowInfo.resizable = true;
+    
+    // Direct instantiation: choose SDL2 or GLFW explicitly
+    // Use type alias to avoid Windows API macro conflicts (Window is a macro on Windows)
+    std::unique_ptr<WindowType> window;
+    #if 1  // Change to 0 to use GLFW instead
+        window = std::make_unique<StellarAlia::Function::Graphics::Window::SDL2Window>();
+        SA_LOG_INFO("Using SDL2 window backend");
+    #else
+        window = std::make_unique<StellarAlia::Function::Graphics::Window::GLFWWindow>();
+        SA_LOG_INFO("Using GLFW window backend");
+    #endif
+    
+    if (!window->Initialize(windowInfo)) {
+        SA_LOG_ERROR("Failed to initialize window!");
+        StellarAlia::Core::Log::Shutdown();
+        return 1;
+    }
+    
+    SA_LOG_INFO("Window created successfully!");
+    const char* backendName = (window->GetBackend() == WindowBackend::SDL2) ? "SDL2" : 
+                              (window->GetBackend() == WindowBackend::GLFW) ? "GLFW" : "Unknown";
+    SA_LOG_INFO("  Backend: {}", backendName);
+    SA_LOG_INFO("  Size: {}x{}", window->GetWidth(), window->GetHeight());
+    
+    // ============================================================================
+    // Test 2: Graphics Context Creation (Direct Instantiation)
+    // ============================================================================
+    SA_LOG_INFO("\n[Test 2] Creating graphics context...");
+    
+    GraphicsContextCreateInfo contextInfo;
+    contextInfo.width = windowInfo.width;
+    contextInfo.height = windowInfo.height;
+    contextInfo.applicationName = "StellarAlia Graphics Test";
+    contextInfo.enableValidation = true;
+    contextInfo.window = window.get();  // Pass the window instance
+    
+    // Verify window is valid before proceeding
+    if (!contextInfo.window) {
+        SA_LOG_ERROR("Window pointer is null! Cannot create graphics context.");
+        window->Shutdown();
+        StellarAlia::Core::Log::Shutdown();
+        return 1;
+    }
+    
+    SA_LOG_INFO("Window pointer is valid: {}", static_cast<void*>(contextInfo.window));
+    
+    // Direct instantiation: create VulkanGraphicsContext directly
+    std::unique_ptr<GraphicsContext> graphicsContext = std::make_unique<VulkanGraphicsContext>();
+
+    if (!graphicsContext) {
+        SA_LOG_ERROR("Failed to create VulkanGraphicsContext instance!");
+        window->Shutdown();
+        StellarAlia::Core::Log::Shutdown();
+        return 1;
+    }
+
+    SA_LOG_INFO("About to initialize graphics context...");
+    if (!graphicsContext->Initialize(contextInfo)) {
+        SA_LOG_ERROR("Failed to initialize graphics context!");
+        window->Shutdown();
+        StellarAlia::Core::Log::Shutdown();
+        return 1;
+    }
+    
+    SA_LOG_INFO("Graphics context initialized successfully!");
+    SA_LOG_INFO("  API: {}", 
+        graphicsContext->GetAPI() == GraphicsAPI::Vulkan ? "Vulkan" : "Unknown");
+    SA_LOG_INFO("  Resolution: {}x{}", 
+        graphicsContext->GetWidth(), graphicsContext->GetHeight());
+    SA_LOG_INFO("  Initialized: {}", graphicsContext->IsInitialized());
+    
+    // ============================================================================
+    // Test 3: Render Loop
+    // ============================================================================
+    SA_LOG_INFO("\n[Test 3] Starting render loop (10 seconds)...");
+    SA_LOG_INFO("Close the window or wait for timeout to exit");
+    
+    auto startTime = std::chrono::steady_clock::now();
+    const auto testDuration = std::chrono::seconds(10);
+    uint32_t frameCount = 0;
+    bool running = true;
+    
+    while (running) {
+        // Check if window should close
+        if (!window->PollEvents() || window->ShouldClose()) {
+            SA_LOG_INFO("Window close requested");
+            running = false;
+            break;
+        }
+        
+        // Check timeout
+        auto currentTime = std::chrono::steady_clock::now();
+        if (currentTime - startTime >= testDuration) {
+            SA_LOG_INFO("Test duration reached");
+            running = false;
+            break;
+        }
+        
+        // Render frame
+        graphicsContext->BeginFrame();
+        graphicsContext->EndFrame();
+        graphicsContext->Present();
+        
+        frameCount++;
+        
+        // Log FPS every second
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            currentTime - startTime).count();
+        if (elapsed > 0 && frameCount % 60 == 0) {
+            float fps = (frameCount * 1000.0f) / elapsed;
+            SA_LOG_DEBUG("FPS: {:.2f} (Frame: {})", fps, frameCount);
+        }
+    }
+    
+    float totalTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - startTime).count() / 1000.0f;
+    float avgFps = frameCount / totalTime;
+    
+    SA_LOG_INFO("\nRender loop completed:");
+    SA_LOG_INFO("  Total frames: {}", frameCount);
+    SA_LOG_INFO("  Total time: {:.2f} seconds", totalTime);
+    SA_LOG_INFO("  Average FPS: {:.2f}", avgFps);
+    
+    // ============================================================================
+    // Test 4: Cleanup
+    // ============================================================================
+    SA_LOG_INFO("\n[Test 4] Cleaning up...");
+    
+    graphicsContext->WaitIdle();
+    graphicsContext->Shutdown();
+    SA_LOG_INFO("Graphics context shut down");
+    
+    window->Shutdown();
+    SA_LOG_INFO("Window shut down");
+    
+    // ============================================================================
+    // Test Summary
+    // ============================================================================
+    SA_LOG_INFO("\n=== Test Summary ===");
+    SA_LOG_INFO("Window creation and initialization: PASSED");
+    SA_LOG_INFO("Graphics context creation and initialization: PASSED");
+    SA_LOG_INFO("Render loop execution: PASSED");
+    SA_LOG_INFO("Cleanup: PASSED");
+    SA_LOG_INFO("\nAll tests completed successfully!");
     
     // Shutdown logging
     StellarAlia::Core::Log::Shutdown();
     
     return 0;
 }
-
