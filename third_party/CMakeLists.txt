@@ -79,23 +79,31 @@ endif()
 # ============================================================================
 # volk is a meta-loader for Vulkan that provides better control over Vulkan loading
 
-# Set volk options
-set(VOLK_INSTALL OFF CACHE BOOL "" FORCE)
-set(VOLK_HEADERS_ONLY OFF CACHE BOOL "" FORCE)
-set(VOLK_PULL_IN_VULKAN ON CACHE BOOL "" FORCE)
+set(VOLK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/VulkanSDK/include/Volk)
 
-# Set Vulkan headers path if available
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/VulkanSDK/include/vulkan/vulkan.h)
-    set(VULKAN_HEADERS_INSTALL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/VulkanSDK CACHE PATH "" FORCE)
-endif()
+if(EXISTS ${VOLK_DIR}/volk.h AND EXISTS ${VOLK_DIR}/volk.c)
+    add_library(volk STATIC ${VOLK_DIR}/volk.c)
 
-# Add volk subdirectory
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/volk/CMakeLists.txt)
-    add_subdirectory(volk)
-    message(STATUS "volk: Using local copy at ${CMAKE_CURRENT_SOURCE_DIR}/volk")
+    target_include_directories(volk
+        PUBLIC
+            ${VOLK_DIR}
+            ${CMAKE_CURRENT_SOURCE_DIR}/VulkanSDK/include
+    )
+
+    # volk loads Vulkan symbols at runtime — do not link vulkan-1 at link time
+    target_compile_definitions(volk PUBLIC VK_NO_PROTOTYPES)
+
+    if(WIN32)
+        target_compile_definitions(volk PUBLIC VK_USE_PLATFORM_WIN32_KHR)
+    elseif(UNIX AND NOT APPLE)
+        target_compile_definitions(volk PUBLIC VK_USE_PLATFORM_XLIB_KHR)
+    endif()
+
+    add_library(volk::volk ALIAS volk)
+    message(STATUS "volk: Using files from ${VOLK_DIR}")
 else()
-    message(WARNING "volk not found. Please ensure volk submodule is initialized.")
-    message(WARNING "Run: git submodule update --init --recursive")
+    message(FATAL_ERROR "volk not found at ${VOLK_DIR}. "
+                        "Expected volk.h and volk.c under third_party/VulkanSDK/include/Volk/")
 endif()
 
 # ============================================================================
@@ -110,4 +118,79 @@ else()
     message(WARNING "VMA header not found. Please ensure vk_mem_alloc.h exists at:")
     message(WARNING "  - third_party/VulkanSDK/include/vma/vk_mem_alloc.h")
     message(WARNING "  - or third_party/VMA/include/vk_mem_alloc.h")
+endif()
+
+# ============================================================================
+# GLM - OpenGL Mathematics library (header-only)
+# Preferred: git submodule at third_party/glm/
+# Fallback:  FetchContent (requires network on first configure)
+# ============================================================================
+set(GLM_ENABLE_CXX_20 ON CACHE BOOL "" FORCE)
+set(GLM_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
+
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/glm/CMakeLists.txt)
+    add_subdirectory(glm)
+    message(STATUS "GLM: Using local submodule at third_party/glm")
+else()
+    include(FetchContent)
+    FetchContent_Declare(
+        glm
+        GIT_REPOSITORY https://github.com/g-truc/glm.git
+        GIT_TAG        1.0.1
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(glm)
+    message(WARNING "GLM: submodule not found — fetched via network. "
+                    "Run: git submodule add https://github.com/g-truc/glm.git third_party/glm")
+endif()
+
+# ============================================================================
+# stb - Single-header libraries (image loading, etc.)
+# ============================================================================
+if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/stb/stb_image.h)
+    file(DOWNLOAD
+        https://raw.githubusercontent.com/nothings/stb/master/stb_image.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/stb/stb_image.h
+        STATUS download_status
+        SHOW_PROGRESS
+    )
+    list(GET download_status 0 download_code)
+    if(download_code EQUAL 0)
+        message(STATUS "stb_image: Downloaded to ${CMAKE_CURRENT_SOURCE_DIR}/stb/stb_image.h")
+    else()
+        message(WARNING "stb_image: Download failed. Image loading may not work.")
+    endif()
+else()
+    message(STATUS "stb_image: Using existing header at ${CMAKE_CURRENT_SOURCE_DIR}/stb/stb_image.h")
+endif()
+
+# Create interface target for stb
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/stb/stb_image.h)
+    add_library(stb INTERFACE)
+    target_include_directories(stb INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/stb)
+endif()
+
+# ============================================================================
+# tinygltf - glTF 2.0 loader (header-only, bundles nlohmann/json)
+# Preferred: git submodule at third_party/tinygltf/
+# Fallback:  FetchContent (requires network on first configure)
+# ============================================================================
+set(TINYGLTF_BUILD_LOADER_EXAMPLE OFF CACHE BOOL "" FORCE)
+set(TINYGLTF_HEADER_ONLY          ON  CACHE BOOL "" FORCE)
+set(TINYGLTF_INSTALL              OFF CACHE BOOL "" FORCE)
+
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tinygltf/CMakeLists.txt)
+    add_subdirectory(tinygltf)
+    message(STATUS "tinygltf: Using local submodule at third_party/tinygltf")
+else()
+    include(FetchContent)
+    FetchContent_Declare(
+        tinygltf
+        GIT_REPOSITORY https://github.com/syoyo/tinygltf.git
+        GIT_TAG        v2.9.3
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(tinygltf)
+    message(WARNING "tinygltf: submodule not found — fetched via network. "
+                    "Run: git submodule add https://github.com/syoyo/tinygltf.git third_party/tinygltf")
 endif()

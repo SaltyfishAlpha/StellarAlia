@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(StellarAlia VERSION 0.1.0 LANGUAGES CXX)
+project(StellarAlia VERSION 0.1.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -58,8 +58,10 @@ else()
     message(WARNING "Please place pre-built Vulkan libraries (vulkan-1.lib, libvulkan.so, etc.) in lib/vulkan/")
 endif()
 
-# Shader compilation
+# Shader compilation + asset pipeline
 include(cmake/CompileShaders.cmake)
+include(cmake/Assets.cmake)
+include(cmake/CookAssets.cmake)
 set_property(GLOBAL PROPERTY SHADER_OUTPUTS "")
 
 # Add third-party dependencies
@@ -68,8 +70,19 @@ add_subdirectory(third_party)
 # Add runtime library subdirectory
 add_subdirectory(src)
 
+# Add cook tool (must come before setup_cook and cook-dependent examples)
+add_subdirectory(tools/cook)
+
+# Wire the project-wide asset cook into the build
+setup_cook()
+
 # Add example projects
 add_subdirectory(examples/sandbox)
+add_subdirectory(examples/rhi_interface_demo)
+add_subdirectory(examples/rendergraph_demo)
+add_subdirectory(examples/asset_load_demo)
+add_subdirectory(examples/cook_demo)
+add_subdirectory(examples/gpu_resource_demo)
 
 # Tool layer source files
 file(GLOB_RECURSE TOOL_SOURCES
@@ -89,5 +102,6 @@ target_link_libraries(${PROJECT_NAME}
     PRIVATE StellarAliaRuntime
 )
 
-# Setup shader compilation (after all targets are defined)
-setup_shader_compilation()
+# Setup built-in assets: compile assets/shaders/builtin/ → bin/assets/shaders/builtin/
+# and copy textures/models/hdri to the runtime output directory.
+setup_assets()

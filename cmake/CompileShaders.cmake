@@ -1,94 +1,116 @@
 # CompileShaders.cmake
-# CMake script for compiling GLSL shaders to SPIR-V
+# GLSL → SPIR-V compilation via glslc
 
-# Function to compile a single shader file
-function(compile_shader shader_file output_dir)
-    get_filename_component(shader_name ${shader_file} NAME_WE)
-    get_filename_component(shader_ext ${shader_file} EXT)
-    
-    # Determine shader stage based on extension
-    if(shader_ext STREQUAL ".vert")
-        set(stage "vert")
-    elseif(shader_ext STREQUAL ".frag")
-        set(stage "frag")
-    elseif(shader_ext STREQUAL ".comp")
-        set(stage "comp")
-    elseif(shader_ext STREQUAL ".geom")
-        set(stage "geom")
-    elseif(shader_ext STREQUAL ".tesc")
-        set(stage "tesc")
-    elseif(shader_ext STREQUAL ".tese")
-        set(stage "tese")
-    else()
-        message(WARNING "Unknown shader extension: ${shader_ext}")
-        return()
+# ===========================================================================
+# Locate glslc ONCE at include time (cache variable, searched once per config)
+# Users can override: cmake -DGLSLC_EXECUTABLE=<path> ..
+# ===========================================================================
+set(GLSLC_EXECUTABLE "" CACHE FILEPATH "Path to glslc shader compiler (auto-detected if empty)")
+
+if(NOT GLSLC_EXECUTABLE)
+    set(_hints "")
+
+    if(DEFINED ENV{VULKAN_SDK})
+        list(APPEND _hints "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")
     endif()
-    
-    # Output file path
-    set(output_file "${output_dir}/${shader_name}.${stage}.spv")
-    
-    # Find glslc compiler (from Vulkan SDK)
-    # Check common Vulkan SDK locations
+
+    list(APPEND _hints
+        "${CMAKE_SOURCE_DIR}/lib/bin"
+        "${CMAKE_SOURCE_DIR}/third_party/VulkanSDK/Bin"
+        "${CMAKE_SOURCE_DIR}/third_party/tools/bin"
+    )
+
     if(WIN32)
-        set(GLSLC_PATHS
-            "$ENV{VULKAN_SDK}/Bin"
-            "$ENV{VULKAN_SDK}/bin"
-            "${CMAKE_SOURCE_DIR}/third_party/VulkanSDK/Bin"
-            "${CMAKE_SOURCE_DIR}/third_party/VulkanSDK/bin"
+        # Glob every installed Vulkan SDK version on Windows
+        file(GLOB _sdk_bins
+            "C:/VulkanSDK/*/Bin"
+            "D:/VulkanSDK/*/Bin"
         )
+        if(_sdk_bins)
+            list(SORT _sdk_bins ORDER DESCENDING)
+            list(APPEND _hints ${_sdk_bins})
+        endif()
     else()
-        set(GLSLC_PATHS
-            "$ENV{VULKAN_SDK}/bin"
-            "${CMAKE_SOURCE_DIR}/third_party/VulkanSDK/bin"
-            "/usr/bin"
-            "/usr/local/bin"
-        )
+        list(APPEND _hints "/usr/bin" "/usr/local/bin" "/opt/vulkan/bin")
     endif()
-    
-    find_program(GLSLC glslc
-        PATHS ${GLSLC_PATHS}
+
+    # Use a temp variable so find_program re-searches on every configure.
+    # (A cache variable is only searched once; adding glslc later would be ignored.)
+    unset(_glslc_auto CACHE)
+    find_program(_glslc_auto
+        NAMES glslc glslc.exe
+        HINTS ${_hints}
         NO_DEFAULT_PATH
     )
-    
-    if(NOT GLSLC)
-        # Try to find glslc in system PATH
-        find_program(GLSLC glslc)
+    if(_glslc_auto)
+        set(GLSLC_EXECUTABLE "${_glslc_auto}" CACHE FILEPATH
+            "Path to glslc shader compiler (auto-detected)" FORCE)
     endif()
-    
-    if(NOT GLSLC)
-        message(WARNING "glslc not found. Shader compilation will be skipped.")
-        message(WARNING "Please install Vulkan SDK or add glslc to PATH.")
-        message(WARNING "Searched in: ${GLSLC_PATHS}")
+    unset(_glslc_auto CACHE)
+endif()
+
+if(GLSLC_EXECUTABLE)
+    message(STATUS "glslc: ${GLSLC_EXECUTABLE}")
+else()
+    message(WARNING "glslc not found – shaders will NOT be compiled.\n"
+        "  Fix A: install the Vulkan SDK (vulkan.lunarg.com) and set VULKAN_SDK env var.\n"
+        "  Fix B: cmake -DGLSLC_EXECUTABLE=<full/path/to/glslc.exe> ..")
+endif()
+
+# ===========================================================================
+# compile_shader(shader_file output_dir)
+#   shader_file – relative to CMAKE_SOURCE_DIR  (e.g. "shaders/foo.vert")
+# ===========================================================================
+function(compile_shader shader_file output_dir)
+    if(NOT GLSLC_EXECUTABLE)
         return()
     endif()
-    
-    message(STATUS "Found glslc: ${GLSLC}")
-    
-    # Include directory for shader includes
-    set(include_dir "${CMAKE_SOURCE_DIR}/shaders/include")
-    
-    # Compile shader
+
+    get_filename_component(_name ${shader_file} NAME_WE)
+    get_filename_component(_ext  ${shader_file} EXT)
+
+    if(_ext STREQUAL ".vert")
+        set(_stage vert)
+    elseif(_ext STREQUAL ".frag")
+        set(_stage frag)
+    elseif(_ext STREQUAL ".comp")
+        set(_stage comp)
+    elseif(_ext STREQUAL ".geom")
+        set(_stage geom)
+    elseif(_ext STREQUAL ".tesc")
+        set(_stage tesc)
+    elseif(_ext STREQUAL ".tese")
+        set(_stage tese)
+    else()
+        message(WARNING "compile_shader: unknown extension '${_ext}' in ${shader_file}")
+        return()
+    endif()
+
+    set(_spv "${output_dir}/${_name}.${_stage}.spv")
+    file(MAKE_DIRECTORY "${output_dir}")
+
     add_custom_command(
-        OUTPUT ${output_file}
-        COMMAND ${GLSLC}
-            -fshader-stage=${stage}
-            -I${include_dir}
-            ${CMAKE_SOURCE_DIR}/${shader_file}
-            -o ${output_file}
-        DEPENDS ${CMAKE_SOURCE_DIR}/${shader_file}
-        COMMENT "Compiling shader: ${shader_file} -> ${output_file}"
+        OUTPUT  "${_spv}"
+        COMMAND "${GLSLC_EXECUTABLE}"
+                -fshader-stage=${_stage}
+                -I${CMAKE_SOURCE_DIR}/assets/shaders/common
+                "${CMAKE_SOURCE_DIR}/${shader_file}"
+                -o "${_spv}"
+        DEPENDS "${CMAKE_SOURCE_DIR}/${shader_file}"
+        COMMENT "Compiling ${shader_file}"
         VERBATIM
     )
-    
-    # Add output to custom target
-    get_property(SHADER_OUTPUTS GLOBAL PROPERTY SHADER_OUTPUTS)
-    list(APPEND SHADER_OUTPUTS ${output_file})
-    set_property(GLOBAL PROPERTY SHADER_OUTPUTS ${SHADER_OUTPUTS})
+
+    get_property(_outs GLOBAL PROPERTY SHADER_OUTPUTS)
+    list(APPEND _outs "${_spv}")
+    set_property(GLOBAL PROPERTY SHADER_OUTPUTS "${_outs}")
 endfunction()
 
-# Function to compile all shaders in a directory
+# ===========================================================================
+# compile_shaders_dir(shader_dir output_dir)
+# ===========================================================================
 function(compile_shaders_dir shader_dir output_dir)
-    file(GLOB_RECURSE shader_files
+    file(GLOB_RECURSE _files
         "${CMAKE_SOURCE_DIR}/${shader_dir}/*.vert"
         "${CMAKE_SOURCE_DIR}/${shader_dir}/*.frag"
         "${CMAKE_SOURCE_DIR}/${shader_dir}/*.comp"
@@ -96,50 +118,38 @@ function(compile_shaders_dir shader_dir output_dir)
         "${CMAKE_SOURCE_DIR}/${shader_dir}/*.tesc"
         "${CMAKE_SOURCE_DIR}/${shader_dir}/*.tese"
     )
-    
-    foreach(shader_file ${shader_files})
-        # Get relative path from shader_dir
-        file(RELATIVE_PATH rel_path "${CMAKE_SOURCE_DIR}/${shader_dir}" ${shader_file})
-        get_filename_component(rel_dir ${rel_path} DIRECTORY)
-        
-        # Create output subdirectory if needed
-        if(rel_dir)
-            set(output_subdir "${output_dir}/${rel_dir}")
+    foreach(_f ${_files})
+        file(RELATIVE_PATH _rel "${CMAKE_SOURCE_DIR}/${shader_dir}" "${_f}")
+        get_filename_component(_reldir "${_rel}" DIRECTORY)
+        if(_reldir)
+            set(_subdir "${output_dir}/${_reldir}")
         else()
-            set(output_subdir "${output_dir}")
+            set(_subdir "${output_dir}")
         endif()
-        
-        compile_shader("${shader_dir}/${rel_path}" "${output_subdir}")
+        compile_shader("${shader_dir}/${_rel}" "${_subdir}")
     endforeach()
 endfunction()
 
-# Create custom target for shader compilation
+# ===========================================================================
+# setup_shader_compilation()  – call once after all targets are defined
+#
+# Compiles all GLSL shaders under assets/shaders/ to SPIR-V.
+# Output mirrors the source tree: assets/shaders/builtin/foo.vert →
+#   <runtime_output>/shaders/builtin/foo.vert.spv
+# ===========================================================================
 function(setup_shader_compilation)
-    # Output directory in build folder
-    set(SHADER_OUTPUT_DIR "${CMAKE_BINARY_DIR}/shaders")
-    
-    # Compile all shaders
-    compile_shaders_dir("shaders" "${SHADER_OUTPUT_DIR}")
-    
-    # Get all shader outputs
-    get_property(SHADER_OUTPUTS GLOBAL PROPERTY SHADER_OUTPUTS)
-    
-    if(SHADER_OUTPUTS)
-        # Create custom target
-        add_custom_target(compile_shaders
-            DEPENDS ${SHADER_OUTPUTS}
-            COMMENT "Compiling all shaders"
+    set(_out "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/shaders")
+    compile_shaders_dir("assets/shaders" "${_out}")
+
+    get_property(_outs GLOBAL PROPERTY SHADER_OUTPUTS)
+    if(_outs)
+        add_custom_target(compile_shaders ALL
+            DEPENDS ${_outs}
+            COMMENT "Compiling shaders (assets/shaders → ${_out})"
         )
-        
-        # Make shader compilation a dependency of the main target
         add_dependencies(${PROJECT_NAME} compile_shaders)
-        
-        # Set output directory as a property for use in code
-        set_property(GLOBAL PROPERTY SHADER_OUTPUT_DIR "${SHADER_OUTPUT_DIR}")
-        
-        message(STATUS "Shader compilation enabled. Output directory: ${SHADER_OUTPUT_DIR}")
+        message(STATUS "Shader output: ${_out}")
     else()
-        message(STATUS "No shaders found to compile")
+        message(STATUS "No shaders found under assets/shaders/")
     endif()
 endfunction()
-

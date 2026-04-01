@@ -1,0 +1,18 @@
+#pragma once
+
+namespace StellarAlia {
+
+// Source asset root — GLSL sources, textures, models, HDRi.
+// Valid during development (points into the source tree).
+inline constexpr const char* ASSETS_SOURCE_DIR =
+    "@CMAKE_SOURCE_DIR@/assets";
+
+// Compiled shader output directory (.spv files built by CMake).
+inline constexpr const char* COMPILED_SHADERS_DIR =
+    "@CMAKE_RUNTIME_OUTPUT_DIRECTORY@/assets/shaders/builtin";
+
+// Runtime asset root relative to the executable.
+// Used in distribution builds where the source tree is unavailable.
+inline constexpr const char* ASSETS_RUNTIME_RELATIVE = "assets";
+
+} // namespace StellarAlia

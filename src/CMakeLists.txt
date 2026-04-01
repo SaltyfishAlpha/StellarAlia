@@ -87,6 +87,7 @@ endif()
 target_include_directories(StellarAliaRuntime
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
+        $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/generated>
         $<INSTALL_INTERFACE:include>
 )
 
@@ -94,13 +95,13 @@ target_include_directories(StellarAliaRuntime
 # Check VulkanSDK first (if VMA is included there), then fall back to separate VMA directory
 if(EXISTS ${CMAKE_SOURCE_DIR}/third_party/VulkanSDK/include/vma/vk_mem_alloc.h)
     target_include_directories(StellarAliaRuntime
-        PUBLIC
+        SYSTEM PUBLIC
             $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/third_party/VulkanSDK/include>
     )
     message(STATUS "VMA: Using header from VulkanSDK")
 elseif(EXISTS ${CMAKE_SOURCE_DIR}/third_party/VMA/include/vk_mem_alloc.h)
     target_include_directories(StellarAliaRuntime
-        PUBLIC
+        SYSTEM PUBLIC
             $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/third_party/VMA/include>
     )
     message(STATUS "VMA: Using header from separate VMA directory")
@@ -110,7 +111,14 @@ endif()
 target_link_libraries(StellarAliaRuntime
     PUBLIC
         spdlog::spdlog
+        glm::glm
+        tinygltf
 )
+
+# Link stb (header-only) if available
+if(TARGET stb)
+    target_link_libraries(StellarAliaRuntime PUBLIC stb)
+endif()
 
 # Link volk if available
 if(TARGET volk::volk)
@@ -132,9 +140,9 @@ endif()
 
 # Link Vulkan - use pre-built libraries from lib/vulkan
 if(EXISTS ${CMAKE_SOURCE_DIR}/third_party/VulkanSDK/include/vulkan/vulkan.h)
-    # Use local VulkanSDK headers
+    # Use local VulkanSDK headers (SYSTEM = lower include priority than submodule targets)
     target_include_directories(StellarAliaRuntime
-        PUBLIC
+        SYSTEM PUBLIC
             $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/third_party/VulkanSDK/include>
     )
     

@@ -4,3 +4,12 @@
 
 cmake-build-debug
 cmake-build-release
+build
+
+# VulkanSDK ships with its own glm copy — use the submodule at third_party/glm instead
+third_party/VulkanSDK/include/glm/
+
+# Cook cache — generated build artifacts, never commit
+cook_cache/
+
+.claude

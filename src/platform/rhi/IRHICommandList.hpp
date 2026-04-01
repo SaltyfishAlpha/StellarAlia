@@ -1,0 +1,84 @@
+#pragma once
+
+#include "platform/rhi/RHITypes.hpp"
+
+namespace StellarAlia::RHI {
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IRHICommandList
+//
+// Hardware-agnostic command recording interface.
+// One instance per frame (or per thread in a multi-threaded setup).
+// The concrete implementation (VulkanCommandList, D3D12CommandList...) wraps
+// the backend command buffer / command allocator.
+//
+// Lifetime contract:
+//   Obtained from IRHIDevice::BeginFrame().
+//   Valid until IRHIDevice::EndFrame() is called.
+//   Do NOT cache across frames.
+// ─────────────────────────────────────────────────────────────────────────────
+class IRHICommandList {
+public:
+    virtual ~IRHICommandList() = default;
+
+    // ── Render Pass ──────────────────────────────────────────────────────────
+    // Uses dynamic rendering (VK_KHR_dynamic_rendering / D3D12 render targets).
+    // No VkRenderPass / ID3D12RenderPass objects are exposed.
+
+    virtual void BeginRenderPass(const RHIRenderPassDesc& desc) = 0;
+    virtual void EndRenderPass()                                 = 0;
+
+    // ── Pipeline State ────────────────────────────────────────────────────────
+    virtual void SetViewport(const RHIViewport& viewport)                  = 0;
+    virtual void SetScissor(const RHIScissor& scissor)                     = 0;
+    virtual void SetPipeline(RHIPipelineHandle pipeline)                   = 0;
+    virtual void SetDescriptorSet(uint32_t set, RHIDescSetHandle ds)       = 0;
+    virtual void SetPushConstants(const void*   data,
+                                  uint32_t      size,
+                                  RHIShaderStage stages)                   = 0;
+
+    // ── Vertex / Index Buffers ────────────────────────────────────────────────
+    virtual void SetVertexBuffer(uint32_t       slot,
+                                 RHIBufferHandle buffer,
+                                 uint64_t        offset = 0)               = 0;
+    virtual void SetIndexBuffer(RHIBufferHandle buffer,
+                                uint64_t        offset  = 0,
+                                bool            use16bit = false)          = 0;
+
+    // ── Draw Calls ────────────────────────────────────────────────────────────
+    virtual void Draw(uint32_t vertexCount,
+                      uint32_t instanceCount = 1,
+                      uint32_t firstVertex   = 0,
+                      uint32_t firstInstance = 0)                          = 0;
+
+    virtual void DrawIndexed(uint32_t indexCount,
+                             uint32_t instanceCount = 1,
+                             uint32_t firstIndex    = 0,
+                             int32_t  vertexOffset  = 0,
+                             uint32_t firstInstance = 0)                   = 0;
+
+    // ── Compute ───────────────────────────────────────────────────────────────
+    virtual void Dispatch(uint32_t x, uint32_t y, uint32_t z) = 0;
+
+    // ── Resource Barriers ─────────────────────────────────────────────────────
+    // Called by RenderGraph::Execute() — not by Feature/Application code.
+    // The backend translates RHIResourceState pairs into the correct API barriers.
+
+    virtual void TransitionTexture(RHITextureHandle  texture,
+                                   RHIResourceState  from,
+                                   RHIResourceState  to)                   = 0;
+
+    // ── Copy ──────────────────────────────────────────────────────────────────
+    virtual void CopyBuffer(RHIBufferHandle src,
+                            RHIBufferHandle dst,
+                            uint64_t        srcOffset,
+                            uint64_t        dstOffset,
+                            uint64_t        size)                          = 0;
+
+    virtual void CopyBufferToTexture(RHIBufferHandle  src,
+                                     RHITextureHandle dst,
+                                     uint32_t         mipLevel = 0,
+                                     uint32_t         layer    = 0)        = 0;
+};
+
+} // namespace StellarAlia::RHI
