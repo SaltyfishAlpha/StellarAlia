@@ -14,13 +14,24 @@ namespace StellarAlia::RHI {
 // One descriptor binding slot as extracted from SPIR-V reflection.
 // Deserialized from a pre-compiled .refl file at runtime.
 // ─────────────────────────────────────────────────────────────────────────────
+// One member field inside a UBO or SSBO struct.
+struct ShaderMemberDesc {
+    std::string name;    // GLSL member name, e.g. "baseColorFactor"
+    uint32_t    offset;  // byte offset within the struct (from SPIR-V Offset decoration)
+    uint32_t    size;    // byte size of the member (not including std140 tail padding)
+};
+
 struct ShaderBindingDesc {
     uint32_t          set;
     uint32_t          binding;
     RHIDescriptorType type;
     RHIShaderStage    stages;      // Which stages reference this binding
     std::string       name;        // GLSL/HLSL variable name for name-based lookup
-    uint32_t          arraySize = 1;
+    uint32_t          arraySize  = 1;
+    uint32_t          blockSize  = 0;  // UBO/SSBO declared struct size in bytes (0 for non-buffer types)
+
+    // Per-member layout for UniformBuffer / StorageBuffer (empty for other types).
+    std::vector<ShaderMemberDesc> members;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

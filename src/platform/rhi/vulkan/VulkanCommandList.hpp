@@ -29,6 +29,7 @@ public:
     void SetScissor(const RHIScissor& sc)   override;
 
     void SetPipeline(RHIPipelineHandle pipeline)             override;
+    void SetComputePipeline(RHIPipelineHandle pipeline)      override;
     void SetDescriptorSet(uint32_t set, RHIDescSetHandle ds) override;
     void SetPushConstants(const void* data, uint32_t size,
                           RHIShaderStage stages)             override;
@@ -58,9 +59,10 @@ public:
                              uint32_t mipLevel, uint32_t layer) override;
 
 private:
-    VkCommandBuffer  m_cmd             = VK_NULL_HANDLE;
-    VulkanDevice*    m_device          = nullptr;
-    RHIPipelineHandle m_boundPipeline  = {};  // tracks bound pipeline for layout lookup
+    VkCommandBuffer  m_cmd                    = VK_NULL_HANDLE;
+    VulkanDevice*    m_device                 = nullptr;
+    RHIPipelineHandle m_boundPipeline         = {};   // tracks bound pipeline for layout lookup
+    bool             m_boundPipelineIsCompute = false; // selects VK_PIPELINE_BIND_POINT_COMPUTE
 };
 
 } // namespace StellarAlia::RHI

@@ -69,7 +69,7 @@ RHI::RHITextureHandle ResourceManager::LoadTexture(const AssetID& id) {
     RHI::RHITextureDesc texDesc{};
     texDesc.width     = cooked.width;
     texDesc.height    = cooked.height;
-    texDesc.mipLevels = cooked.mipLevels;
+    texDesc.mipLevels = std::max(1u, cooked.mipLevels);
     texDesc.format    = rhiFmt;
     texDesc.usage     = RHI::RHITextureUsage::Sampled;
 
@@ -79,11 +79,19 @@ RHI::RHITextureHandle ResourceManager::LoadTexture(const AssetID& id) {
         return {};
     }
 
-    // Upload mip 0 (single mip for now; additional mips uploaded in a later pass)
-    const void* pixels = cooked.MipData(0);
-    const size_t size  = cooked.MipSize(0);
-    if (pixels && size > 0)
-        m_device->UploadTextureData(handle, pixels, static_cast<uint64_t>(size));
+    // Upload all mip levels.
+    if (cooked.mipLevels > 1) {
+        std::vector<RHI::IRHIDevice::MipUpload> mipUploads;
+        mipUploads.reserve(cooked.mipLevels);
+        for (uint32_t m = 0; m < cooked.mipLevels; ++m)
+            mipUploads.push_back({cooked.MipData(m), cooked.MipSize(m)});
+        m_device->UploadTextureMips(handle, mipUploads);
+    } else {
+        const void*  pixels = cooked.MipData(0);
+        const size_t size   = cooked.MipSize(0);
+        if (pixels && size > 0)
+            m_device->UploadTextureData(handle, pixels, static_cast<uint64_t>(size));
+    }
 
     SA_LOG_INFO("ResourceManager: loaded texture {} ({}x{} mips={})",
                 id.ToString(), cooked.width, cooked.height, cooked.mipLevels);
@@ -155,10 +163,22 @@ const GPUMesh* ResourceManager::LoadMesh(const AssetID& id) {
     gpu.subMeshes.reserve(cooked.subMeshes.size());
     for (const auto& sm : cooked.subMeshes) {
         GPUSubMesh gsm;
-        gsm.firstIndex    = sm.indexOffset;
-        gsm.indexCount    = sm.indexCount;
-        gsm.vertexOffset  = static_cast<int32_t>(sm.vertexOffset);
-        gsm.materialIndex = sm.materialIndex;
+        gsm.firstIndex                = sm.indexOffset;
+        gsm.indexCount                = sm.indexCount;
+        gsm.vertexOffset              = static_cast<int32_t>(sm.vertexOffset);
+        gsm.materialIndex             = sm.materialIndex;
+        gsm.localTransform            = sm.localTransform;
+        gsm.baseColorTexture          = sm.baseColorTexture;
+        gsm.normalTexture             = sm.normalTexture;
+        gsm.metallicRoughnessTexture  = sm.metallicRoughnessTexture;
+        gsm.occlusionTexture          = sm.occlusionTexture;
+        gsm.emissiveTexture           = sm.emissiveTexture;
+        gsm.baseColorFactor           = sm.baseColorFactor;
+        gsm.roughnessFactor           = sm.roughnessFactor;
+        gsm.metallicFactor            = sm.metallicFactor;
+        gsm.normalScale               = sm.normalScale;
+        gsm.occlusionStrength         = sm.occlusionStrength;
+        gsm.emissiveFactor            = sm.emissiveFactor;
         gpu.subMeshes.push_back(gsm);
     }
 

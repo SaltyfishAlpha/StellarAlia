@@ -73,6 +73,13 @@ add_subdirectory(src)
 # Add cook tool (must come before setup_cook and cook-dependent examples)
 add_subdirectory(tools/cook)
 
+# Add IBL bake tool (library + CLI; must come before ibl_demo)
+add_subdirectory(tools/ibl_bake)
+
+# Add shader reflection tool (must come before setup_assets so the .refl
+# add_custom_commands can reference $<TARGET_FILE:ShaderReflectTool>)
+add_subdirectory(tools/shader_reflect)
+
 # Wire the project-wide asset cook into the build
 setup_cook()
 
@@ -83,6 +90,12 @@ add_subdirectory(examples/rendergraph_demo)
 add_subdirectory(examples/asset_load_demo)
 add_subdirectory(examples/cook_demo)
 add_subdirectory(examples/gpu_resource_demo)
+add_subdirectory(examples/material_demo)
+add_subdirectory(examples/gltf_material_demo)
+add_subdirectory(examples/skybox_demo)
+add_subdirectory(examples/scene_demo)
+add_subdirectory(examples/ibl_demo)
+add_subdirectory(examples/compute_demo)
 
 # Tool layer source files
 file(GLOB_RECURSE TOOL_SOURCES

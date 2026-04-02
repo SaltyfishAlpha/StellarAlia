@@ -141,10 +141,11 @@ int main() {
 
     // ── Pipeline ──────────────────────────────────────────────────────────────
     RHIPipelineDesc pipeDesc{};
-    pipeDesc.vertShader        = vertShader;
-    pipeDesc.fragShader        = fragShader;
-    pipeDesc.descriptorLayout  = descLayout;
-    pipeDesc.colorFormats[0]   = device->GetSwapchainFormat();
+    pipeDesc.vertShader               = vertShader;
+    pipeDesc.fragShader               = fragShader;
+    pipeDesc.descriptorLayouts[0]     = descLayout;
+    pipeDesc.descriptorLayoutCount    = 1;
+    pipeDesc.colorFormats[0]          = device->GetSwapchainFormat();
     pipeDesc.colorFormatCount  = 1;
     pipeDesc.depthFormat       = RHIFormat::Undefined;
     pipeDesc.depthTest         = false;

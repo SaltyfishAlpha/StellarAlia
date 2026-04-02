@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <span>
 
 #include "platform/rhi/RHITypes.hpp"
@@ -23,9 +24,11 @@ struct RHIPipelineDesc {
     RHIShaderHandle     vertShader;
     RHIShaderHandle     fragShader;
 
-    // Layout built from MergeReflections(vert, frag).
-    // May be invalid for pipelines with no descriptor sets.
-    RHIDescLayoutHandle descriptorLayout;
+    // Ordered list of descriptor set layouts.
+    // Index i = set i in the pipeline layout (set=0, set=1, …).
+    // Set to invalid handles for unused slots; trailing invalid handles are ignored.
+    RHIDescLayoutHandle descriptorLayouts[4] = {};
+    uint32_t            descriptorLayoutCount = 0;
 
     uint32_t            pushConstantSize   = 0;
     RHIShaderStage      pushConstantStages = RHIShaderStage::None;
@@ -46,6 +49,20 @@ struct RHIPipelineDesc {
     bool                noVertexInput    = false;
 
     const char*         debugName        = nullptr;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Compute pipeline creation descriptor
+// ─────────────────────────────────────────────────────────────────────────────
+struct RHIComputePipelineDesc {
+    RHIShaderHandle     computeShader;
+
+    RHIDescLayoutHandle descriptorLayouts[4] = {};
+    uint32_t            descriptorLayoutCount = 0;
+
+    uint32_t            pushConstantSize   = 0;
+
+    const char*         debugName          = nullptr;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -90,6 +107,10 @@ public:
     [[nodiscard]] virtual RHIPipelineHandle CreatePipeline(
         const RHIPipelineDesc& desc) = 0;
 
+    // ── Compute Pipeline ──────────────────────────────────────────────────────
+    [[nodiscard]] virtual RHIPipelineHandle CreateComputePipeline(
+        const RHIComputePipelineDesc& desc) = 0;
+
     // ── Descriptor Set ────────────────────────────────────────────────────────
 
     [[nodiscard]] virtual RHIDescSetHandle AllocateDescriptorSet(
@@ -98,6 +119,19 @@ public:
     virtual void WriteDescriptorTexture(RHIDescSetHandle ds,
                                         uint32_t         binding,
                                         RHITextureHandle texture) = 0;
+
+    // Writes a texture as a storage image (VK_DESCRIPTOR_TYPE_STORAGE_IMAGE /
+    // VK_IMAGE_LAYOUT_GENERAL). Used for compute UAV bindings.
+    virtual void WriteDescriptorStorageImage(RHIDescSetHandle ds,
+                                             uint32_t         binding,
+                                             RHITextureHandle texture) = 0;
+
+    // Writes a single mip level of a texture as a storage image UAV.
+    // Used for per-mip compute writes (e.g. prefiltered env mip chain).
+    virtual void WriteDescriptorStorageImageMip(RHIDescSetHandle ds,
+                                                uint32_t         binding,
+                                                RHITextureHandle texture,
+                                                uint32_t         mipLevel) = 0;
 
     virtual void WriteDescriptorBuffer(RHIDescSetHandle ds,
                                        uint32_t         binding,
@@ -116,9 +150,18 @@ public:
 
     // Upload initial pixel data to a GPU-only texture via an internal staging buffer.
     // Allocs staging → memcpy → one-shot submit → transitions layout to ShaderRead → frees staging.
+    // Only uploads mip level 0. For multi-mip textures use UploadTextureMips.
     virtual void UploadTextureData(RHITextureHandle handle,
                                    const void*      data,
                                    uint64_t         size) = 0;
+
+    // Per-mip data span passed to UploadTextureMips.
+    struct MipUpload { const void* data; uint64_t size; };
+
+    // Upload all mip levels in a single command submit.
+    // mips[i] corresponds to mip level i; mips.size() must equal the texture's mipLevels.
+    virtual void UploadTextureMips(RHITextureHandle          handle,
+                                   std::span<const MipUpload> mips) = 0;
 
     // ── Resource Destruction ──────────────────────────────────────────────────
     // Safe to call with an invalid handle (no-op).
@@ -140,6 +183,13 @@ public:
     // Flush all GPU work. Use for shutdown or resource streaming.
     virtual void WaitIdle()  = 0;
 
+    // Submit one-shot compute work outside the frame loop.
+    // Records commands into an immediate command buffer, submits to the
+    // GPU queue, and waits for completion before returning.
+    // Use for startup initialization (IBL bake, asset streaming, etc.)
+    // that must complete before the first frame begins.
+    virtual void ImmediateCompute(std::function<void(IRHICommandList*)> fn) = 0;
+
     // ── Swapchain ─────────────────────────────────────────────────────────────
     // GetSwapchainTexture(): valid only between BeginFrame() and EndFrame().
     // Returns the back-buffer texture for the current in-flight frame.
@@ -153,6 +203,10 @@ public:
     // Called when the OS window is resized (e.g. from GLFWWindow resize callback).
     // The implementation recreates the swapchain and any size-dependent resources.
     virtual void ResizeSwapchain(uint32_t width, uint32_t height) = 0;
+
+    // Returns the current in-flight frame slot index [0..MAX_FRAMES-1].
+    // Valid after BeginFrame() returns a non-null command list.
+    [[nodiscard]] virtual uint32_t GetCurrentFrameIndex() const = 0;
 };
 
 } // namespace StellarAlia::RHI

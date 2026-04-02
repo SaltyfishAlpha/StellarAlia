@@ -58,6 +58,11 @@ public:
                              uint32_t firstInstance = 0)                   = 0;
 
     // ── Compute ───────────────────────────────────────────────────────────────
+    // Bind a compute pipeline (created via IRHIDevice::CreateComputePipeline).
+    // After this call, SetDescriptorSet and Dispatch operate on the compute
+    // bind point. SetPipeline (graphics) resets this back to graphics.
+    virtual void SetComputePipeline(RHIPipelineHandle pipeline) = 0;
+
     virtual void Dispatch(uint32_t x, uint32_t y, uint32_t z) = 0;
 
     // ── Resource Barriers ─────────────────────────────────────────────────────

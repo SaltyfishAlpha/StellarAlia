@@ -64,6 +64,21 @@ function(sa_compile_builtin_shaders)
             VERBATIM
         )
         list(APPEND _spv_outputs "${_spv}")
+
+        # ── Generate .refl sidecar via ShaderReflectTool ──────────────────────
+        if(TARGET ShaderReflectTool)
+            set(_refl "${SA_BUILTIN_SHADER_OUT}/${_stem}.${_stage}.refl")
+            add_custom_command(
+                OUTPUT  "${_refl}"
+                COMMAND "$<TARGET_FILE:ShaderReflectTool>"
+                        --spv "${_spv}"
+                        --out "${_refl}"
+                DEPENDS "${_spv}" ShaderReflectTool
+                COMMENT "Reflecting builtin shader: ${_stem}.${_stage}.spv → .refl"
+                VERBATIM
+            )
+            list(APPEND _spv_outputs "${_refl}")
+        endif()
     endforeach()
 
     if(_spv_outputs)

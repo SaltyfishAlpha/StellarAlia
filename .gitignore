@@ -13,3 +13,6 @@ third_party/VulkanSDK/include/glm/
 cook_cache/
 
 .claude
+
+# Local design docs / blueprints — not for upstream
+docs/

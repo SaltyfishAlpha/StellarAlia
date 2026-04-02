@@ -42,10 +42,16 @@ public:
     RHIDescLayoutHandle CreateDescriptorSetLayout(const ShaderReflection& merged,
                                                   uint32_t set) override;
     RHIPipelineHandle   CreatePipeline(const RHIPipelineDesc& desc) override;
+    RHIPipelineHandle   CreateComputePipeline(const RHIComputePipelineDesc& desc) override;
 
     RHIDescSetHandle AllocateDescriptorSet(RHIDescLayoutHandle layout) override;
     void WriteDescriptorTexture(RHIDescSetHandle ds, uint32_t binding,
                                 RHITextureHandle texture) override;
+    void WriteDescriptorStorageImage(RHIDescSetHandle ds, uint32_t binding,
+                                     RHITextureHandle texture) override;
+    void WriteDescriptorStorageImageMip(RHIDescSetHandle ds, uint32_t binding,
+                                        RHITextureHandle texture,
+                                        uint32_t         mipLevel) override;
     void WriteDescriptorBuffer(RHIDescSetHandle ds, uint32_t binding,
                                RHIBufferHandle buffer,
                                uint64_t offset = 0,
@@ -55,6 +61,8 @@ public:
                           uint64_t size, uint64_t offset = 0) override;
     void UploadTextureData(RHITextureHandle handle,
                            const void* data, uint64_t size) override;
+    void UploadTextureMips(RHITextureHandle           handle,
+                           std::span<const MipUpload> mips) override;
 
     void DestroyTexture(RHITextureHandle  handle) override;
     void DestroyBuffer(RHIBufferHandle   handle) override;
@@ -65,12 +73,14 @@ public:
     void             EndFrame()   override;
     void             Present()    override;
     void             WaitIdle()   override;
+    void             ImmediateCompute(std::function<void(IRHICommandList*)> fn) override;
 
-    RHITextureHandle GetSwapchainTexture() override;
-    RHIFormat        GetSwapchainFormat()  override;
-    uint32_t         GetSwapchainWidth()   override;
-    uint32_t         GetSwapchainHeight()  override;
+    RHITextureHandle GetSwapchainTexture()          override;
+    RHIFormat        GetSwapchainFormat()           override;
+    uint32_t         GetSwapchainWidth()            override;
+    uint32_t         GetSwapchainHeight()           override;
     void             ResizeSwapchain(uint32_t width, uint32_t height) override;
+    uint32_t         GetCurrentFrameIndex() const   override { return m_frameIdx; }
 
     // ── Internal helpers (used by VulkanCommandList) ──────────────────────────
     VkImage          GetVkImage         (RHITextureHandle  handle) const;
@@ -86,6 +96,10 @@ public:
 
     // Texture dimension query (used by CopyBufferToTexture).
     const RHITextureDesc* GetTextureDesc(RHITextureHandle handle) const;
+
+    // Returns true when the pipeline was created via CreateComputePipeline.
+    // Used by VulkanCommandList to select the correct bind point.
+    bool IsComputePipeline(RHIPipelineHandle handle) const;
 
 private:
     VulkanDevice() = default;
@@ -138,11 +152,14 @@ private:
     // ── Texture resource pool ─────────────────────────────────────────────────
     struct TextureEntry {
         VkImage        image      = VK_NULL_HANDLE;
-        VkImageView    view       = VK_NULL_HANDLE;
-        VmaAllocation  alloc      = VK_NULL_HANDLE; // null → swapchain-owned
+        VkImageView    view       = VK_NULL_HANDLE;  // full-mip view (all levels)
+        VmaAllocation  alloc      = VK_NULL_HANDLE;  // null → swapchain-owned
         RHITextureDesc desc       = {};
         bool           valid      = false;
         bool           swapchain  = false;
+        // Per-mip image views, lazily created by WriteDescriptorStorageImageMip.
+        // mipViews[m] is a single-level view for mip m only.
+        std::vector<VkImageView> mipViews;
     };
     std::vector<TextureEntry> m_textures;
 
@@ -169,6 +186,7 @@ private:
         VkPipelineLayout layout         = VK_NULL_HANDLE;
         uint32_t         pushConstSize  = 0;
         RHIShaderStage   pushConstStages= RHIShaderStage::None;
+        bool             isCompute      = false;
         bool             valid          = false;
     };
     std::vector<PipelineEntry> m_pipelines;

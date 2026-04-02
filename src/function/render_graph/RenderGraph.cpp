@@ -27,6 +27,15 @@ void RGPassBuilder::WriteDepth(RGTextureHandle tex) {
     m_writes.push_back({tex, RHI::RHIResourceState::DepthWrite});
 }
 
+void RGPassBuilder::WriteUAV(RGTextureHandle tex) {
+    m_writes.push_back({tex, RHI::RHIResourceState::UnorderedAccess});
+}
+
+void RGPassBuilder::ReadUAV(RGTextureHandle tex) {
+    // Same barrier as Read — ShaderRead covers both sampled and post-UAV reads.
+    m_reads.push_back(tex);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // RenderGraph
 // ─────────────────────────────────────────────────────────────────────────────
@@ -150,6 +159,12 @@ void RenderGraph::Execute(RHI::IRHIDevice& /*device*/, RHI::IRHICommandList& cmd
         if (m_textures[i].isImported)
             states[i] = m_textures[i].initState;
 
+    // Track which textures have been written by any previous pass this frame.
+    // Even when the target state hasn't changed (e.g. RenderTarget→RenderTarget),
+    // a barrier is required between two consecutive vkCmdBeginRendering blocks
+    // on the same attachment to establish a memory dependency.
+    std::vector<bool> writtenInPreviousPass(texCount, false);
+
     // Execute each pass in topological order.
     for (uint32_t pi : m_sortedPassIndices) {
         const auto& pass = m_passes[pi];
@@ -167,14 +182,20 @@ void RenderGraph::Execute(RHI::IRHIDevice& /*device*/, RHI::IRHICommandList& cmd
         }
 
         // Emit write barriers.
+        // Always barrier if (a) state needs to change OR (b) a previous pass
+        // already wrote this texture — even a same-layout transition acts as
+        // the memory dependency required between render pass instances.
         for (auto& we : pass.writes) {
             if (!we.handle.IsValid()) continue;
             auto rhi = resources.m_resolved[we.handle.index];
             if (!rhi.IsValid()) continue;
-            if (states[we.handle.index] != we.targetState) {
+            const bool stateChanges   = (states[we.handle.index] != we.targetState);
+            const bool needsMemoryDep = writtenInPreviousPass[we.handle.index];
+            if (stateChanges || needsMemoryDep) {
                 cmd.TransitionTexture(rhi, states[we.handle.index], we.targetState);
                 states[we.handle.index] = we.targetState;
             }
+            writtenInPreviousPass[we.handle.index] = true;
         }
 
         SA_LOG_DEBUG("RenderGraph: executing pass '{}'", pass.name);

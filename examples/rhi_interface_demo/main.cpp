@@ -73,6 +73,9 @@ public:
     void DrawIndexed(uint32_t idx, uint32_t inst, uint32_t, int32_t, uint32_t) override {
         SA_LOG_INFO("[CMD] DrawIndexed  indices={} instances={}", idx, inst);
     }
+    void SetComputePipeline(RHIPipelineHandle pipeline) override {
+        SA_LOG_INFO("[CMD] SetComputePipeline  handle={}", pipeline.index);
+    }
     void Dispatch(uint32_t x, uint32_t y, uint32_t z) override {
         SA_LOG_INFO("[CMD] Dispatch  ({},{},{})", x, y, z);
     }
@@ -164,11 +167,21 @@ public:
 
     RHIPipelineHandle CreatePipeline(const RHIPipelineDesc& desc) override {
         RHIPipelineHandle h{m_nextPipeline++};
-        SA_LOG_INFO("[DEV] CreatePipeline  handle={} vert={} frag={} layout={} pushBytes={}",
+        SA_LOG_INFO("[DEV] CreatePipeline  handle={} vert={} frag={} layouts={} pushBytes={}",
                     h.index,
                     desc.vertShader.index,
                     desc.fragShader.index,
-                    desc.descriptorLayout.index,
+                    desc.descriptorLayoutCount,
+                    desc.pushConstantSize);
+        return h;
+    }
+
+    RHIPipelineHandle CreateComputePipeline(const RHIComputePipelineDesc& desc) override {
+        RHIPipelineHandle h{m_nextPipeline++};
+        SA_LOG_INFO("[DEV] CreateComputePipeline  handle={} shader={} layouts={} pushBytes={}",
+                    h.index,
+                    desc.computeShader.index,
+                    desc.descriptorLayoutCount,
                     desc.pushConstantSize);
         return h;
     }
@@ -188,6 +201,21 @@ public:
                     ds.index, binding, texture.index);
     }
 
+    void WriteDescriptorStorageImage(RHIDescSetHandle ds,
+                                     uint32_t         binding,
+                                     RHITextureHandle texture) override {
+        SA_LOG_INFO("[DEV] WriteDescriptor  ds={} binding={} <- storageImage={}",
+                    ds.index, binding, texture.index);
+    }
+
+    void WriteDescriptorStorageImageMip(RHIDescSetHandle ds,
+                                        uint32_t         binding,
+                                        RHITextureHandle texture,
+                                        uint32_t         mipLevel) override {
+        SA_LOG_INFO("[DEV] WriteDescriptor  ds={} binding={} <- storageImage={} mip={}",
+                    ds.index, binding, texture.index, mipLevel);
+    }
+
     void WriteDescriptorBuffer(RHIDescSetHandle ds,
                                uint32_t         binding,
                                RHIBufferHandle  buffer,
@@ -202,6 +230,23 @@ public:
     void UploadBufferData(RHIBufferHandle buf, const void*, uint64_t size, uint64_t offset) override {
         SA_LOG_INFO("[DEV] UploadBufferData  buffer={} size={}B offset={}", buf.index, size, offset);
     }
+
+    void UploadTextureData(RHITextureHandle tex, const void*, uint64_t size) override {
+        SA_LOG_INFO("[DEV] UploadTextureData  texture={} size={}B", tex.index, size);
+    }
+
+    void UploadTextureMips(RHITextureHandle tex,
+                           std::span<const MipUpload> mips) override {
+        SA_LOG_INFO("[DEV] UploadTextureMips  texture={} mips={}", tex.index, mips.size());
+    }
+
+    void ImmediateCompute(std::function<void(IRHICommandList*)> fn) override {
+        SA_LOG_INFO("[DEV] ImmediateCompute  begin");
+        fn(&m_cmd);
+        SA_LOG_INFO("[DEV] ImmediateCompute  end");
+    }
+
+    uint32_t GetCurrentFrameIndex() const override { return 0; }
 
     // ── Destruction ───────────────────────────────────────────────────────────
 
@@ -422,16 +467,18 @@ int main() {
     // ── 6. Create pipeline ────────────────────────────────────────────────────
     SA_LOG_INFO("--- Pipeline creation ---");
 
-    RHIPipelineHandle geomPipeline = device.CreatePipeline({
-        .vertShader         = vertShader,
-        .fragShader         = fragShader,
-        .descriptorLayout   = set1Layout,   // Material set (set=1)
-        .pushConstantSize   = merged.pushConstantSize,
-        .pushConstantStages = merged.pushConstantStages,
-        .colorFormats       = {RHIFormat::RGBA8_UNORM},
-        .colorFormatCount   = 1,
-        .depthFormat        = RHIFormat::D32F,
-    });
+    RHIPipelineDesc pipeDesc{};
+    pipeDesc.vertShader              = vertShader;
+    pipeDesc.fragShader              = fragShader;
+    pipeDesc.descriptorLayouts[0]    = set0Layout;
+    pipeDesc.descriptorLayouts[1]    = set1Layout;
+    pipeDesc.descriptorLayoutCount   = 2;
+    pipeDesc.pushConstantSize        = merged.pushConstantSize;
+    pipeDesc.pushConstantStages      = merged.pushConstantStages;
+    pipeDesc.colorFormats[0]         = RHIFormat::RGBA8_UNORM;
+    pipeDesc.colorFormatCount        = 1;
+    pipeDesc.depthFormat             = RHIFormat::D32F;
+    RHIPipelineHandle geomPipeline = device.CreatePipeline(pipeDesc);
 
     // ── 7. Write descriptors using name-based binding lookup ──────────────────
     SA_LOG_INFO("--- Descriptor set writes ---");

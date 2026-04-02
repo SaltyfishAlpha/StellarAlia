@@ -102,9 +102,13 @@ VulkanDevice::~VulkanDevice() {
     // DescSets are freed when the pool is destroyed — no individual free needed.
     for (auto& e : m_buffers)
         if (e.valid) vmaDestroyBuffer(m_allocator, e.buffer, e.alloc);
-    for (auto& e : m_textures)
-        if (e.valid && !e.swapchain && e.alloc)
-            vmaDestroyImage(m_allocator, e.image, e.alloc);
+    for (auto& e : m_textures) {
+        if (!e.valid || e.swapchain) continue;
+        for (auto v : e.mipViews)
+            if (v) vkDestroyImageView(m_device, v, nullptr);
+        if (e.view)  vkDestroyImageView(m_device, e.view, nullptr);
+        if (e.alloc) vmaDestroyImage(m_allocator, e.image, e.alloc);
+    }
 
     if (m_samplerLinearRepeat)  vkDestroySampler(m_device, m_samplerLinearRepeat,  nullptr);
     if (m_samplerNearestRepeat) vkDestroySampler(m_device, m_samplerNearestRepeat, nullptr);
@@ -719,6 +723,14 @@ void VulkanDevice::InitDefaultSamplers() {
     vkCreateFence(m_device, &fenceCI, nullptr, &m_immFence);
 }
 
+void VulkanDevice::ImmediateCompute(std::function<void(IRHICommandList*)> fn) {
+    ImmediateSubmit([&](VkCommandBuffer cmd) {
+        m_cmdList.Bind(cmd, this);
+        fn(&m_cmdList);
+        m_cmdList.Bind(VK_NULL_HANDLE, nullptr);
+    });
+}
+
 void VulkanDevice::ImmediateSubmit(std::function<void(VkCommandBuffer)>&& fn) {
     vkResetCommandBuffer(m_immCmd, 0);
 
@@ -911,7 +923,6 @@ void VulkanDevice::UploadTextureData(RHITextureHandle handle,
     const auto& desc         = entry.desc;
     const uint32_t width     = desc.width;
     const uint32_t height    = desc.height;
-    const uint32_t mipLevels = desc.mipLevels;
     const uint32_t layers    = desc.arrayLayers;
 
     ImmediateSubmit([=](VkCommandBuffer cmd) {
@@ -938,10 +949,72 @@ void VulkanDevice::UploadTextureData(RHITextureHandle handle,
     DestroyBuffer(stagingH);
 }
 
+void VulkanDevice::UploadTextureMips(RHITextureHandle           handle,
+                                      std::span<const MipUpload> mips) {
+    if (!handle.IsValid() || handle.index >= m_textures.size() || mips.empty()) return;
+    auto& entry = m_textures[handle.index];
+    if (!entry.valid || entry.swapchain) return;
+
+    // One staging buffer for all mip data concatenated.
+    uint64_t totalSize = 0;
+    for (const auto& m : mips) totalSize += m.size;
+
+    RHIBufferDesc stagingDesc{};
+    stagingDesc.size       = totalSize;
+    stagingDesc.usage      = RHIBufferUsage::CopySrc;
+    stagingDesc.cpuVisible = true;
+    RHIBufferHandle stagingH = CreateBuffer(stagingDesc);
+
+    // Copy each mip into the staging buffer at the appropriate offset.
+    uint64_t offset = 0;
+    for (const auto& m : mips) {
+        UploadBufferData(stagingH, m.data, m.size, offset);
+        offset += m.size;
+    }
+    VkBuffer stagingBuf = GetVkBuffer(stagingH);
+
+    VkImage         img    = entry.image;
+    const uint32_t  layers = entry.desc.arrayLayers;
+
+    ImmediateSubmit([&](VkCommandBuffer cmd) {
+        // Transition entire image UNDEFINED → TRANSFER_DST
+        CmdTransitionImage(cmd, img,
+                           VK_IMAGE_LAYOUT_UNDEFINED,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+        uint64_t bufOffset = 0;
+        for (uint32_t m = 0; m < static_cast<uint32_t>(mips.size()); ++m) {
+            const uint32_t mipW = std::max(1u, entry.desc.width  >> m);
+            const uint32_t mipH = std::max(1u, entry.desc.height >> m);
+
+            VkBufferImageCopy region{};
+            region.bufferOffset                    = bufOffset;
+            region.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.mipLevel       = m;
+            region.imageSubresource.baseArrayLayer = 0;
+            region.imageSubresource.layerCount     = layers;
+            region.imageExtent                     = {mipW, mipH, 1};
+            vkCmdCopyBufferToImage(cmd, stagingBuf, img,
+                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            bufOffset += mips[m].size;
+        }
+
+        // Transition entire image TRANSFER_DST → SHADER_READ
+        CmdTransitionImage(cmd, img,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    });
+
+    DestroyBuffer(stagingH);
+}
+
 void VulkanDevice::DestroyTexture(RHITextureHandle handle) {
     if (!handle.IsValid() || handle.index >= m_textures.size()) return;
     auto& entry = m_textures[handle.index];
     if (!entry.valid || entry.swapchain) return;
+    for (auto v : entry.mipViews)
+        if (v) vkDestroyImageView(m_device, v, nullptr);
+    entry.mipViews.clear();
     if (entry.view)  vkDestroyImageView(m_device, entry.view, nullptr);
     if (entry.alloc) vmaDestroyImage(m_allocator, entry.image, entry.alloc);
     entry.valid = false;
@@ -1075,6 +1148,70 @@ void VulkanDevice::WriteDescriptorTexture(RHIDescSetHandle dsHandle,
     vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
 }
 
+void VulkanDevice::WriteDescriptorStorageImage(RHIDescSetHandle dsHandle,
+                                               uint32_t binding,
+                                               RHITextureHandle textureHandle) {
+    if (!dsHandle.IsValid()      || dsHandle.index      >= m_descSets.size())  return;
+    if (!textureHandle.IsValid() || textureHandle.index >= m_textures.size())  return;
+
+    VkDescriptorImageInfo imgInfo{};
+    imgInfo.sampler     = VK_NULL_HANDLE;
+    imgInfo.imageView   = m_textures[textureHandle.index].view;
+    imgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkWriteDescriptorSet write{};
+    write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet          = m_descSets[dsHandle.index].set;
+    write.dstBinding      = binding;
+    write.descriptorCount = 1;
+    write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    write.pImageInfo      = &imgInfo;
+    vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+}
+
+void VulkanDevice::WriteDescriptorStorageImageMip(RHIDescSetHandle dsHandle,
+                                                   uint32_t         binding,
+                                                   RHITextureHandle textureHandle,
+                                                   uint32_t         mipLevel) {
+    if (!dsHandle.IsValid()      || dsHandle.index      >= m_descSets.size())  return;
+    if (!textureHandle.IsValid() || textureHandle.index >= m_textures.size())  return;
+
+    auto& entry = m_textures[textureHandle.index];
+    if (!entry.valid) return;
+
+    // Lazily create the single-mip image view for the requested level.
+    if (entry.mipViews.size() <= mipLevel)
+        entry.mipViews.resize(mipLevel + 1, VK_NULL_HANDLE);
+
+    if (entry.mipViews[mipLevel] == VK_NULL_HANDLE) {
+        VkImageViewCreateInfo viewCI{};
+        viewCI.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewCI.image                           = entry.image;
+        viewCI.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+        viewCI.format                          = ToVkFormat(entry.desc.format);
+        viewCI.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewCI.subresourceRange.baseMipLevel   = mipLevel;
+        viewCI.subresourceRange.levelCount     = 1;
+        viewCI.subresourceRange.baseArrayLayer = 0;
+        viewCI.subresourceRange.layerCount     = 1;
+        vkCreateImageView(m_device, &viewCI, nullptr, &entry.mipViews[mipLevel]);
+    }
+
+    VkDescriptorImageInfo imgInfo{};
+    imgInfo.sampler     = VK_NULL_HANDLE;
+    imgInfo.imageView   = entry.mipViews[mipLevel];
+    imgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkWriteDescriptorSet write{};
+    write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet          = m_descSets[dsHandle.index].set;
+    write.dstBinding      = binding;
+    write.descriptorCount = 1;
+    write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    write.pImageInfo      = &imgInfo;
+    vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+}
+
 void VulkanDevice::WriteDescriptorBuffer(RHIDescSetHandle dsHandle,
                                           uint32_t binding,
                                           RHIBufferHandle bufferHandle,
@@ -1108,9 +1245,10 @@ void VulkanDevice::WriteDescriptorBuffer(RHIDescSetHandle dsHandle,
 RHIPipelineHandle VulkanDevice::CreatePipeline(const RHIPipelineDesc& desc) {
     // Collect descriptor set layouts into a VkPipelineLayout
     std::vector<VkDescriptorSetLayout> setLayouts;
-    if (desc.descriptorLayout.IsValid() &&
-        desc.descriptorLayout.index < m_descLayouts.size()) {
-        setLayouts.push_back(m_descLayouts[desc.descriptorLayout.index].layout);
+    for (uint32_t i = 0; i < desc.descriptorLayoutCount; ++i) {
+        const auto& h = desc.descriptorLayouts[i];
+        if (h.IsValid() && h.index < m_descLayouts.size() && m_descLayouts[h.index].valid)
+            setLayouts.push_back(m_descLayouts[h.index].layout);
     }
 
     VkPushConstantRange pushRange{};
@@ -1144,9 +1282,28 @@ RHIPipelineHandle VulkanDevice::CreatePipeline(const RHIPipelineDesc& desc) {
     addStage(desc.vertShader, VK_SHADER_STAGE_VERTEX_BIT);
     addStage(desc.fragShader, VK_SHADER_STAGE_FRAGMENT_BIT);
 
-    // Vertex input — empty when noVertexInput (fullscreen-tri trick)
+    // Vertex input
+    // Standard 48-byte interleaved layout: pos(vec3) + normal(vec3) + tangent(vec4) + uv(vec2)
+    VkVertexInputBindingDescription binding{};
+    binding.binding   = 0;
+    binding.stride    = 48;
+    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    const VkVertexInputAttributeDescription attribs[4] = {
+        {0, 0, VK_FORMAT_R32G32B32_SFLOAT,    0},   // a_Position
+        {1, 0, VK_FORMAT_R32G32B32_SFLOAT,   12},   // a_Normal
+        {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 24},  // a_Tangent
+        {3, 0, VK_FORMAT_R32G32_SFLOAT,       40},  // a_TexCoord0
+    };
+
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    if (!desc.noVertexInput) {
+        vertexInput.vertexBindingDescriptionCount   = 1;
+        vertexInput.pVertexBindingDescriptions      = &binding;
+        vertexInput.vertexAttributeDescriptionCount = 4;
+        vertexInput.pVertexAttributeDescriptions    = attribs;
+    }
 
     // Input assembly
     VkPipelineInputAssemblyStateCreateInfo inputAsm{};
@@ -1262,7 +1419,8 @@ RHIPipelineHandle VulkanDevice::CreatePipeline(const RHIPipelineDesc& desc) {
 
     RHIPipelineHandle h{static_cast<uint32_t>(m_pipelines.size())};
     m_pipelines.push_back({pipeline, layout,
-                           desc.pushConstantSize, desc.pushConstantStages, true});
+                           desc.pushConstantSize, desc.pushConstantStages,
+                           /*isCompute=*/false, /*valid=*/true});
     return h;
 }
 
@@ -1273,6 +1431,68 @@ void VulkanDevice::DestroyPipeline(RHIPipelineHandle handle) {
     if (entry.pipeline) vkDestroyPipeline(m_device, entry.pipeline, nullptr);
     if (entry.layout)   vkDestroyPipelineLayout(m_device, entry.layout, nullptr);
     entry.valid = false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CreateComputePipeline
+// ─────────────────────────────────────────────────────────────────────────────
+RHIPipelineHandle VulkanDevice::CreateComputePipeline(const RHIComputePipelineDesc& desc) {
+    // Pipeline layout (descriptor sets + push constants)
+    std::vector<VkDescriptorSetLayout> setLayouts;
+    for (uint32_t i = 0; i < desc.descriptorLayoutCount; ++i) {
+        const auto& h = desc.descriptorLayouts[i];
+        if (h.IsValid() && h.index < m_descLayouts.size() && m_descLayouts[h.index].valid)
+            setLayouts.push_back(m_descLayouts[h.index].layout);
+    }
+
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushRange.size       = desc.pushConstantSize;
+
+    VkPipelineLayoutCreateInfo layoutCI{};
+    layoutCI.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutCI.setLayoutCount         = static_cast<uint32_t>(setLayouts.size());
+    layoutCI.pSetLayouts            = setLayouts.data();
+    layoutCI.pushConstantRangeCount = (desc.pushConstantSize > 0) ? 1 : 0;
+    layoutCI.pPushConstantRanges    = (desc.pushConstantSize > 0) ? &pushRange : nullptr;
+
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    if (vkCreatePipelineLayout(m_device, &layoutCI, nullptr, &layout) != VK_SUCCESS) {
+        SA_LOG_ERROR("VulkanDevice::CreateComputePipeline — vkCreatePipelineLayout failed");
+        return {};
+    }
+
+    if (!desc.computeShader.IsValid() || desc.computeShader.index >= m_shaders.size()) {
+        SA_LOG_ERROR("VulkanDevice::CreateComputePipeline — invalid compute shader handle");
+        vkDestroyPipelineLayout(m_device, layout, nullptr);
+        return {};
+    }
+
+    VkPipelineShaderStageCreateInfo stageCI{};
+    stageCI.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stageCI.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+    stageCI.module = m_shaders[desc.computeShader.index].module;
+    stageCI.pName  = "main";
+
+    VkComputePipelineCreateInfo pipelineCI{};
+    pipelineCI.sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipelineCI.stage  = stageCI;
+    pipelineCI.layout = layout;
+
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    if (vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &pipelineCI,
+                                  nullptr, &pipeline) != VK_SUCCESS) {
+        SA_LOG_ERROR("VulkanDevice::CreateComputePipeline — vkCreateComputePipelines failed ({})",
+                     desc.debugName ? desc.debugName : "unnamed");
+        vkDestroyPipelineLayout(m_device, layout, nullptr);
+        return {};
+    }
+
+    RHIPipelineHandle h{static_cast<uint32_t>(m_pipelines.size())};
+    m_pipelines.push_back({pipeline, layout,
+                           desc.pushConstantSize, RHIShaderStage::Compute,
+                           /*isCompute=*/true, /*valid=*/true});
+    return h;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1301,6 +1521,11 @@ VkDescriptorSet VulkanDevice::GetVkDescriptorSet(RHIDescSetHandle handle) const 
 const RHITextureDesc* VulkanDevice::GetTextureDesc(RHITextureHandle handle) const {
     if (!handle.IsValid() || handle.index >= m_textures.size()) return nullptr;
     return m_textures[handle.index].valid ? &m_textures[handle.index].desc : nullptr;
+}
+
+bool VulkanDevice::IsComputePipeline(RHIPipelineHandle handle) const {
+    if (!handle.IsValid() || handle.index >= m_pipelines.size()) return false;
+    return m_pipelines[handle.index].isCompute;
 }
 
 uint32_t VulkanDevice::GetPushConstantSize(RHIPipelineHandle handle) const {

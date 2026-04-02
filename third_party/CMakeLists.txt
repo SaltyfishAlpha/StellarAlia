@@ -194,3 +194,99 @@ else()
     message(WARNING "tinygltf: submodule not found — fetched via network. "
                     "Run: git submodule add https://github.com/syoyo/tinygltf.git third_party/tinygltf")
 endif()
+
+# ============================================================================
+# SPIRV-Cross — SPIR-V reflection (build-time tool only, spirv-cross-core)
+#
+# Must be compiled from source with the same compiler as the rest of the
+# project (MinGW, MSVC, Clang, etc.) — the Vulkan SDK .lib files are MSVC-
+# only and cannot be used with MinGW.
+#
+# Preferred: git submodule at third_party/SPIRV-Cross/
+#   git submodule add https://github.com/KhronosGroup/SPIRV-Cross.git third_party/SPIRV-Cross
+#   git -C third_party/SPIRV-Cross checkout vulkan-sdk-1.3.296.0
+# Fallback:  FetchContent (requires network on first configure, then cached)
+# ============================================================================
+set(SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_SHARED                   OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_STATIC                   ON  CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_CLI                      OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_TESTS             OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_GLSL              OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_HLSL              OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_MSL               OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_CPP               OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_REFLECT           OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_UTIL              OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_INSTALL                  OFF CACHE BOOL "" FORCE)
+
+# ============================================================================
+# EnTT — header-only entity-component-system library
+# Preferred: git submodule at third_party/entt/
+#   git submodule add https://github.com/skypjack/entt.git third_party/entt
+# Fallback:  FetchContent
+# ============================================================================
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/entt/CMakeLists.txt)
+    # Disable EnTT's own tests and tooling
+    set(ENTT_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(ENTT_INCLUDE_NATVIS OFF CACHE BOOL "" FORCE)
+    add_subdirectory(entt EXCLUDE_FROM_ALL)
+    message(STATUS "EnTT: Using local submodule at third_party/entt")
+else()
+    include(FetchContent)
+    FetchContent_Declare(
+        entt
+        GIT_REPOSITORY https://github.com/skypjack/entt.git
+        GIT_TAG        v3.13.2
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(entt)
+    message(WARNING "EnTT: submodule not found — fetched via network.\n"
+                    "To pin locally: git submodule add "
+                    "https://github.com/skypjack/entt.git third_party/entt")
+endif()
+# Target available: EnTT::EnTT
+
+# ============================================================================
+# nlohmann/json — header-only JSON library (used by SceneSerializer)
+# Preferred: git submodule at third_party/nlohmann_json/
+#   git submodule add https://github.com/nlohmann/json.git third_party/nlohmann_json
+# Fallback:  FetchContent
+# ============================================================================
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/nlohmann_json/CMakeLists.txt)
+    set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+    set(JSON_Install    OFF CACHE BOOL "" FORCE)
+    add_subdirectory(nlohmann_json EXCLUDE_FROM_ALL)
+    message(STATUS "nlohmann/json: Using local submodule at third_party/nlohmann_json")
+else()
+    include(FetchContent)
+    FetchContent_Declare(
+        nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG        v3.11.3
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(nlohmann_json)
+    message(WARNING "nlohmann/json: submodule not found — fetched via network.\n"
+                    "To pin locally: git submodule add "
+                    "https://github.com/nlohmann/json.git third_party/nlohmann_json")
+endif()
+# Target available: nlohmann_json::nlohmann_json
+
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/SPIRV-Cross/CMakeLists.txt)
+    add_subdirectory(SPIRV-Cross)
+    message(STATUS "SPIRV-Cross: Using local submodule at third_party/SPIRV-Cross")
+else()
+    include(FetchContent)
+    FetchContent_Declare(
+        spirv_cross
+        GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Cross.git
+        GIT_TAG        vulkan-sdk-1.3.296.0
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(spirv_cross)
+    message(WARNING "SPIRV-Cross: submodule not found — fetched via network.\n"
+                    "To pin locally: git submodule add "
+                    "https://github.com/KhronosGroup/SPIRV-Cross.git third_party/SPIRV-Cross")
+endif()
+# Target available: spirv-cross-core

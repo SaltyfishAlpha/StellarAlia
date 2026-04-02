@@ -65,16 +65,31 @@ void VulkanCommandList::SetPipeline(RHIPipelineHandle pipeline) {
         SA_LOG_WARN("VulkanCommandList::SetPipeline — invalid pipeline handle");
         return;
     }
-    m_boundPipeline = pipeline;
+    m_boundPipeline         = pipeline;
+    m_boundPipelineIsCompute = false;
     vkCmdBindPipeline(m_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vkPipeline);
+}
+
+void VulkanCommandList::SetComputePipeline(RHIPipelineHandle pipeline) {
+    VkPipeline       vkPipeline = m_device->GetVkPipeline(pipeline);
+    VkPipelineLayout layout     = m_device->GetVkPipelineLayout(pipeline);
+    if (vkPipeline == VK_NULL_HANDLE || layout == VK_NULL_HANDLE) {
+        SA_LOG_WARN("VulkanCommandList::SetComputePipeline — invalid pipeline handle");
+        return;
+    }
+    m_boundPipeline          = pipeline;
+    m_boundPipelineIsCompute = true;
+    vkCmdBindPipeline(m_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vkPipeline);
 }
 
 void VulkanCommandList::SetDescriptorSet(uint32_t set, RHIDescSetHandle ds) {
     VkPipelineLayout layout = m_device->GetVkPipelineLayout(m_boundPipeline);
     VkDescriptorSet  vkDs   = m_device->GetVkDescriptorSet(ds);
     if (layout == VK_NULL_HANDLE || vkDs == VK_NULL_HANDLE) return;
-    vkCmdBindDescriptorSets(m_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            layout, set, 1, &vkDs, 0, nullptr);
+    const VkPipelineBindPoint bp = m_boundPipelineIsCompute
+                                       ? VK_PIPELINE_BIND_POINT_COMPUTE
+                                       : VK_PIPELINE_BIND_POINT_GRAPHICS;
+    vkCmdBindDescriptorSets(m_cmd, bp, layout, set, 1, &vkDs, 0, nullptr);
 }
 
 void VulkanCommandList::SetPushConstants(const void* data, uint32_t size,
@@ -126,9 +141,27 @@ void VulkanCommandList::TransitionTexture(RHITextureHandle tex,
         SA_LOG_ERROR("TransitionTexture: invalid handle {}", tex.index);
         return;
     }
+
+    // Pick the correct aspect based on the texture's format.
+    VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+    if (const RHITextureDesc* desc = m_device->GetTextureDesc(tex)) {
+        switch (desc->format) {
+            case RHIFormat::D32F:
+            case RHIFormat::D16_UNORM:
+                aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+                break;
+            case RHIFormat::D24_S8:
+                aspect = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+                break;
+            default:
+                break;
+        }
+    }
+
     CmdTransitionImage(m_cmd, image,
                        ToVkImageLayout(from),
-                       ToVkImageLayout(to));
+                       ToVkImageLayout(to),
+                       aspect);
 }
 
 void VulkanCommandList::CopyBuffer(RHIBufferHandle src, RHIBufferHandle dst,

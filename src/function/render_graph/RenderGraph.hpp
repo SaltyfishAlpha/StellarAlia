@@ -63,6 +63,15 @@ public:
     // WriteDepth: expects the texture in DepthWrite state.
     void WriteDepth(RGTextureHandle tex);
 
+    // WriteUAV: expects the texture in UnorderedAccess (storage image) state.
+    // Use this for compute pass outputs.
+    void WriteUAV(RGTextureHandle tex);
+
+    // ReadUAV: transitions to ShaderRead before the pass.
+    // Use this when a compute-written texture is consumed by a later pass as SRV.
+    // (Equivalent to Read — listed separately for call-site clarity.)
+    void ReadUAV(RGTextureHandle tex);
+
 private:
     friend class RenderGraph;
     std::vector<RGTextureHandle> m_reads;

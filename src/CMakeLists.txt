@@ -113,6 +113,8 @@ target_link_libraries(StellarAliaRuntime
         spdlog::spdlog
         glm::glm
         tinygltf
+        EnTT::EnTT
+        nlohmann_json::nlohmann_json
 )
 
 # Link stb (header-only) if available

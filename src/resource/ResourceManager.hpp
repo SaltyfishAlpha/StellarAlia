@@ -6,6 +6,7 @@
 #include "core/asset/AssetID.hpp"
 #include "platform/rhi/IRHIDevice.hpp"
 #include "platform/rhi/RHITypes.hpp"
+#include <glm/glm.hpp>
 
 namespace StellarAlia::Resource {
 
@@ -14,10 +15,24 @@ namespace StellarAlia::Resource {
 // Holds vertex buffer, index buffer, and per-submesh draw metadata.
 // ─────────────────────────────────────────────────────────────────────────────
 struct GPUSubMesh {
-    uint32_t firstIndex   = 0;
-    uint32_t indexCount   = 0;
-    int32_t  vertexOffset = 0;
-    int32_t  materialIndex = -1;
+    uint32_t  firstIndex    = 0;
+    uint32_t  indexCount    = 0;
+    int32_t   vertexOffset  = 0;
+    int32_t   materialIndex = -1;
+    glm::mat4 localTransform = glm::mat4(1.0f);  // node world transform from cook
+
+    // v3: per-submesh PBR material data (cooked from glTF material)
+    AssetID   baseColorTexture;
+    AssetID   normalTexture;
+    AssetID   metallicRoughnessTexture;
+    AssetID   occlusionTexture;
+    AssetID   emissiveTexture;
+    glm::vec4 baseColorFactor    = {1.f, 1.f, 1.f, 1.f};
+    float     roughnessFactor    = 1.0f;
+    float     metallicFactor     = 1.0f;
+    float     normalScale        = 1.0f;
+    float     occlusionStrength  = 1.0f;
+    glm::vec3 emissiveFactor     = {0.f, 0.f, 0.f};
 };
 
 struct GPUMesh {

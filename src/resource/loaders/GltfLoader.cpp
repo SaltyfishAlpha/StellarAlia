@@ -169,7 +169,10 @@ Primitive ConvertPrimitive(const tinygltf::Model& model,
 }
 
 // ── Material conversion ───────────────────────────────────────────────────────
-MaterialData ConvertMaterial(const tinygltf::Material& mat) {
+// In glTF, materials reference *textures* (not images directly).
+// model.textures[texIdx].source gives the actual image index in model.images[].
+MaterialData ConvertMaterial(const tinygltf::Material& mat,
+                             const tinygltf::Model&    model) {
     MaterialData out;
     out.name        = mat.name;
     out.doubleSided = mat.doubleSided;
@@ -186,30 +189,32 @@ MaterialData ConvertMaterial(const tinygltf::Material& mat) {
     out.roughnessFactor = static_cast<float>(pbr.roughnessFactor);
     out.metallicFactor  = static_cast<float>(pbr.metallicFactor);
 
+    // Resolve glTF texture index → image index via model.textures[].source
+    auto texImage = [&](int texIdx) -> int32_t {
+        if (texIdx < 0 || texIdx >= (int)model.textures.size()) return -1;
+        return model.textures[texIdx].source;
+    };
+
     if (mat.normalTexture.index >= 0) {
-        out.normalTexture.imageIndex =
-            static_cast<int32_t>(mat.normalTexture.index);
+        out.normalTexture.imageIndex = texImage(mat.normalTexture.index);
         out.normalScale = static_cast<float>(mat.normalTexture.scale);
     }
     if (mat.occlusionTexture.index >= 0) {
-        out.occlusionTexture.imageIndex =
-            static_cast<int32_t>(mat.occlusionTexture.index);
+        out.occlusionTexture.imageIndex = texImage(mat.occlusionTexture.index);
         out.occlusionStrength = static_cast<float>(mat.occlusionTexture.strength);
     }
     if (mat.emissiveTexture.index >= 0)
-        out.emissiveTexture.imageIndex =
-            static_cast<int32_t>(mat.emissiveTexture.index);
+        out.emissiveTexture.imageIndex = texImage(mat.emissiveTexture.index);
     if (mat.emissiveFactor.size() == 3)
         out.emissiveFactor = {(float)mat.emissiveFactor[0],
                               (float)mat.emissiveFactor[1],
                               (float)mat.emissiveFactor[2]};
 
     if (pbr.baseColorTexture.index >= 0)
-        out.baseColorTexture.imageIndex =
-            static_cast<int32_t>(pbr.baseColorTexture.index);
+        out.baseColorTexture.imageIndex = texImage(pbr.baseColorTexture.index);
     if (pbr.metallicRoughnessTexture.index >= 0)
         out.metallicRoughnessTexture.imageIndex =
-            static_cast<int32_t>(pbr.metallicRoughnessTexture.index);
+            texImage(pbr.metallicRoughnessTexture.index);
 
     return out;
 }
@@ -301,7 +306,7 @@ std::optional<SceneData> GltfLoader::Load(const std::string& path) {
     // ── Materials ─────────────────────────────────────────────────────────────
     scene.materials.reserve(model.materials.size());
     for (const auto& gm : model.materials)
-        scene.materials.push_back(ConvertMaterial(gm));
+        scene.materials.push_back(ConvertMaterial(gm, model));
 
     // ── Meshes ────────────────────────────────────────────────────────────────
     scene.meshes.reserve(model.meshes.size());
