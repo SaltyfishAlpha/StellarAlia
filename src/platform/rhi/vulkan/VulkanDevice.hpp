@@ -63,6 +63,10 @@ public:
                            const void* data, uint64_t size) override;
     void UploadTextureMips(RHITextureHandle           handle,
                            std::span<const MipUpload> mips) override;
+    void ReadbackTextureMips(RHITextureHandle       handle,
+                             std::span<MipReadback> mips) override;
+    [[nodiscard]] const RHITextureDesc* GetTextureDesc(
+        RHITextureHandle handle) const override;
 
     void DestroyTexture(RHITextureHandle  handle) override;
     void DestroyBuffer(RHIBufferHandle   handle) override;
@@ -93,9 +97,6 @@ public:
     // Push constant metadata for the currently bound pipeline (used by SetPushConstants).
     uint32_t       GetPushConstantSize  (RHIPipelineHandle handle) const;
     RHIShaderStage GetPushConstantStages(RHIPipelineHandle handle) const;
-
-    // Texture dimension query (used by CopyBufferToTexture).
-    const RHITextureDesc* GetTextureDesc(RHITextureHandle handle) const;
 
     // Returns true when the pipeline was created via CreateComputePipeline.
     // Used by VulkanCommandList to select the correct bind point.

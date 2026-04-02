@@ -1,11 +1,14 @@
 #pragma once
 
 #include <filesystem>
+#include <optional>
 #include <unordered_map>
 
 #include "core/asset/AssetID.hpp"
 #include "platform/rhi/IRHIDevice.hpp"
 #include "platform/rhi/RHITypes.hpp"
+#include "resource/types/ImageData.hpp"
+#include <array>
 #include <glm/glm.hpp>
 
 namespace StellarAlia::Resource {
@@ -21,18 +24,8 @@ struct GPUSubMesh {
     int32_t   materialIndex = -1;
     glm::mat4 localTransform = glm::mat4(1.0f);  // node world transform from cook
 
-    // v3: per-submesh PBR material data (cooked from glTF material)
-    AssetID   baseColorTexture;
-    AssetID   normalTexture;
-    AssetID   metallicRoughnessTexture;
-    AssetID   occlusionTexture;
-    AssetID   emissiveTexture;
-    glm::vec4 baseColorFactor    = {1.f, 1.f, 1.f, 1.f};
-    float     roughnessFactor    = 1.0f;
-    float     metallicFactor     = 1.0f;
-    float     normalScale        = 1.0f;
-    float     occlusionStrength  = 1.0f;
-    glm::vec3 emissiveFactor     = {0.f, 0.f, 0.f};
+    // v4: UUID of the .samat asset for this submesh (invalid when no material)
+    AssetID   defaultMaterialID;
 };
 
 struct GPUMesh {
@@ -73,6 +66,15 @@ public:
     // Load a mesh (vertex + index buffers) from the cook cache onto the GPU.
     // Returns nullptr on failure (mesh is not cached on failure).
     [[nodiscard]] const GPUMesh* LoadMesh(const AssetID& id);
+
+    // Load an RGBA32F .satex as CPU-side float data (for HDR panoramas).
+    // Returns nullopt if the asset is not found or is not RGBA32F format.
+    // Does NOT upload to the GPU — use LoadTexture() for that.
+    [[nodiscard]] std::optional<ImageData> LoadHDRImageData(const AssetID& id);
+
+    // Load 9 SH coefficients from a .sash9 file in the cook cache.
+    // Returns nullopt if the asset is not found or the file is malformed.
+    [[nodiscard]] std::optional<std::array<glm::vec4, 9>> LoadSH9Coeffs(const AssetID& id);
 
 private:
     RHI::IRHIDevice*   m_device = nullptr;

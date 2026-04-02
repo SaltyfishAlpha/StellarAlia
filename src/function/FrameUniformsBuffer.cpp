@@ -41,7 +41,7 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
     {
         RHI::ShaderBindingDesc bd;
         bd.set     = 0; bd.binding = 3;
-        bd.type    = RHI::RHIDescriptorType::Texture2D;
+        bd.type    = RHI::RHIDescriptorType::TextureCube;
         bd.stages  = RHI::RHIShaderStage::Fragment;
         bd.name    = "t_PrefilteredEnv";
         refl.bindings.push_back(bd);
@@ -49,7 +49,7 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
     {
         RHI::ShaderBindingDesc bd;
         bd.set     = 0; bd.binding = 4;
-        bd.type    = RHI::RHIDescriptorType::Texture2D;
+        bd.type    = RHI::RHIDescriptorType::TextureCube;
         bd.stages  = RHI::RHIShaderStage::Fragment;
         bd.name    = "t_SkyboxMap";
         refl.bindings.push_back(bd);
@@ -57,8 +57,7 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
 
     m_layout = device->CreateDescriptorSetLayout(refl, 0);
 
-    // Placeholder 1×1 white texture for IBL bindings until SetIBLTextures() is called.
-    // All set=0 descriptors must be valid before any frame is rendered.
+    // Placeholder 1×1 white texture for binding=2 (BRDF LUT, sampler2D).
     {
         RHI::RHITextureDesc td{};
         td.width = td.height = 1;
@@ -68,6 +67,24 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
         m_iblPlaceholder = device->CreateTexture(td);
         const uint32_t white = 0xFFFFFFFFu;
         device->UploadTextureData(m_iblPlaceholder, &white, 4);
+    }
+
+    // Placeholder 1×1 white cubemap for bindings 3/4 (samplerCube).
+    // Provides a valid cube image view until SetIBLTextures() is called.
+    {
+        RHI::RHITextureDesc td{};
+        td.width = td.height = 1;
+        td.cubemap   = true;
+        td.format    = RHI::RHIFormat::RGBA8_UNORM;
+        td.usage     = RHI::RHITextureUsage::Sampled;
+        td.debugName = "IBLCubePlaceholder";
+        m_iblCubePlaceholder = device->CreateTexture(td);
+        // 6 faces × 1×1 × RGBA8 = 24 bytes of white
+        const uint8_t white6[24] = {
+            0xFF,0xFF,0xFF,0xFF, 0xFF,0xFF,0xFF,0xFF, 0xFF,0xFF,0xFF,0xFF,
+            0xFF,0xFF,0xFF,0xFF, 0xFF,0xFF,0xFF,0xFF, 0xFF,0xFF,0xFF,0xFF
+        };
+        device->UploadTextureData(m_iblCubePlaceholder, white6, sizeof(white6));
     }
 
     for (uint32_t i = 0; i < MAX_FRAMES; ++i) {
@@ -93,9 +110,9 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
                                       0, sizeof(FrameUniforms));
         device->WriteDescriptorBuffer(m_descSets[i], 1, m_lightUBOs[i],
                                       0, sizeof(LightUniforms));
-        device->WriteDescriptorTexture(m_descSets[i], 2, m_iblPlaceholder);  // brdfLut
-        device->WriteDescriptorTexture(m_descSets[i], 3, m_iblPlaceholder);  // prefilteredEnv
-        device->WriteDescriptorTexture(m_descSets[i], 4, m_iblPlaceholder);  // skyboxMap
+        device->WriteDescriptorTexture(m_descSets[i], 2, m_iblPlaceholder);      // brdfLut (2D)
+        device->WriteDescriptorTexture(m_descSets[i], 3, m_iblCubePlaceholder); // prefilteredEnv (cube)
+        device->WriteDescriptorTexture(m_descSets[i], 4, m_iblCubePlaceholder); // skyboxMap (cube)
     }
 
     SA_LOG_INFO("FrameUniformsBuffer: initialized ({} frames)", MAX_FRAMES);
@@ -109,6 +126,7 @@ void FrameUniformsBuffer::Shutdown() {
         // DescSets are freed when the device pool is destroyed.
     }
     m_device->DestroyTexture(m_iblPlaceholder);
+    m_device->DestroyTexture(m_iblCubePlaceholder);
     m_device = nullptr;
 }
 

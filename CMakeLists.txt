@@ -74,7 +74,7 @@ add_subdirectory(src)
 add_subdirectory(tools/cook)
 
 # Add IBL bake tool (library + CLI; must come before ibl_demo)
-add_subdirectory(tools/ibl_bake)
+# add_subdirectory(tools/ibl_bake)
 
 # Add shader reflection tool (must come before setup_assets so the .refl
 # add_custom_commands can reference $<TARGET_FILE:ShaderReflectTool>)

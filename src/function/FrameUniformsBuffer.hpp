@@ -56,7 +56,8 @@ private:
     RHI::RHIBufferHandle     m_frameUBOs[MAX_FRAMES];
     RHI::RHIBufferHandle     m_lightUBOs[MAX_FRAMES];
     RHI::RHIDescSetHandle    m_descSets[MAX_FRAMES];
-    RHI::RHITextureHandle    m_iblPlaceholder;  // 1×1 white used until SetIBLTextures()
+    RHI::RHITextureHandle    m_iblPlaceholder;      // 1×1 white 2D, placeholder for binding=2
+    RHI::RHITextureHandle    m_iblCubePlaceholder;  // 1×1 white cubemap, placeholder for bindings 3/4
 };
 
 } // namespace StellarAlia

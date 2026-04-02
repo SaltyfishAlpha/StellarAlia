@@ -1,7 +1,10 @@
+#define NOMINMAX
 #include "platform/rhi/vulkan/VulkanCommandList.hpp"
 #include "platform/rhi/vulkan/VulkanDevice.hpp"
 #include "platform/rhi/vulkan/VulkanUtils.hpp"
 #include "core/logs/Log.hpp"
+
+#include <algorithm>
 
 namespace StellarAlia::RHI {
 
@@ -162,6 +165,88 @@ void VulkanCommandList::TransitionTexture(RHITextureHandle tex,
                        ToVkImageLayout(from),
                        ToVkImageLayout(to),
                        aspect);
+}
+
+void VulkanCommandList::GenerateMipmaps(RHITextureHandle texture) {
+    const RHITextureDesc* desc = m_device->GetTextureDesc(texture);
+    if (!desc || desc->mipLevels <= 1) return;
+
+    VkImage        img       = m_device->GetVkImage(texture);
+    const uint32_t mipLevels = desc->mipLevels;
+    const uint32_t layers    = desc->arrayLayers; // 6 for cubemaps (normalized in CreateTexture)
+
+    auto barrier2 = [&](VkImageLayout oldL, VkImageLayout newL,
+                        VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
+                        VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess,
+                        uint32_t baseMip, uint32_t levelCount) {
+        VkImageMemoryBarrier2 b{};
+        b.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        b.srcStageMask        = srcStage;
+        b.srcAccessMask       = srcAccess;
+        b.dstStageMask        = dstStage;
+        b.dstAccessMask       = dstAccess;
+        b.oldLayout           = oldL;
+        b.newLayout           = newL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image               = img;
+        b.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, baseMip, levelCount, 0, layers };
+        VkDependencyInfo di{};
+        di.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        di.imageMemoryBarrierCount = 1;
+        di.pImageMemoryBarriers    = &b;
+        vkCmdPipelineBarrier2(m_cmd, &di);
+    };
+
+    // Mip 0: SHADER_READ_ONLY → TRANSFER_SRC
+    barrier2(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,     VK_ACCESS_2_SHADER_READ_BIT,
+             VK_PIPELINE_STAGE_2_BLIT_BIT,             VK_ACCESS_2_TRANSFER_READ_BIT,
+             0, 1);
+
+    for (uint32_t m = 1; m < mipLevels; ++m) {
+        const int32_t srcW = (int32_t)std::max(1u, desc->width  >> (m - 1));
+        const int32_t srcH = (int32_t)std::max(1u, desc->height >> (m - 1));
+        const int32_t dstW = (int32_t)std::max(1u, desc->width  >> m);
+        const int32_t dstH = (int32_t)std::max(1u, desc->height >> m);
+
+        // Mip m: SHADER_READ_ONLY → TRANSFER_DST
+        barrier2(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_NONE,                  VK_ACCESS_2_NONE,
+                 VK_PIPELINE_STAGE_2_BLIT_BIT,              VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 m, 1);
+
+        VkImageBlit2 blit{};
+        blit.sType          = VK_STRUCTURE_TYPE_IMAGE_BLIT_2;
+        blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, m - 1, 0, layers };
+        blit.srcOffsets[0]  = { 0, 0, 0 };
+        blit.srcOffsets[1]  = { srcW, srcH, 1 };
+        blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, m,     0, layers };
+        blit.dstOffsets[0]  = { 0, 0, 0 };
+        blit.dstOffsets[1]  = { dstW, dstH, 1 };
+
+        VkBlitImageInfo2 blitInfo{};
+        blitInfo.sType          = VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2;
+        blitInfo.srcImage       = img;
+        blitInfo.srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        blitInfo.dstImage       = img;
+        blitInfo.dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        blitInfo.regionCount    = 1;
+        blitInfo.pRegions       = &blit;
+        blitInfo.filter         = VK_FILTER_LINEAR;
+        vkCmdBlitImage2(m_cmd, &blitInfo);
+
+        // Mip m: TRANSFER_DST → TRANSFER_SRC (for next iteration)
+        barrier2(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_BLIT_BIT,         VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_BLIT_BIT,         VK_ACCESS_2_TRANSFER_READ_BIT,
+                 m, 1);
+    }
+
+    // All mips in TRANSFER_SRC → SHADER_READ_ONLY
+    CmdTransitionImage(m_cmd, img,
+                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
 void VulkanCommandList::CopyBuffer(RHIBufferHandle src, RHIBufferHandle dst,

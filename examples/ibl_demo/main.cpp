@@ -3,12 +3,12 @@
 // Full PBR IBL rendering with GPU-computed IBL maps.
 //
 // On startup:
-//   1. Loads the HDR panorama (RGBA32F) into CPU memory.
-//   2. Dispatches three GPU compute shaders (GpuIblBake) to produce the three
-//      IBL textures entirely on the GPU — takes ~100 ms vs 30-60 s CPU bake.
-//   3. Loads assets/scenes/metal_rough_spheres.sascene.
-//   4. Renders with full PBR IBL (Cook-Torrance + diffuse irradiance +
-//      specular split-sum) and an equirectangular skybox.
+//   1. Loads metal_rough_spheres.sascene — provides WorldSettings (IBL asset UUIDs).
+//   2. IBL setup (offline-first):
+//        a. If sh9 + prefilteredEnv + brdfLut + skyboxCubemap are all cached → load directly.
+//        b. Otherwise run GpuIblBake (CPU SH projection + GPU compute) and cache all results.
+//   3. Renders with full PBR IBL (Cook-Torrance + SH diffuse + specular split-sum)
+//      and a cubemap skybox.
 
 #include "core/logs/Log.hpp"
 #include "function/FrameUniforms.hpp"
@@ -28,7 +28,8 @@
 #include "platform/rhi/vulkan/VulkanDevice.hpp"
 #include "platform/window/GLFWWindow.hpp"
 #include "resource/ResourceManager.hpp"
-#include "resource/loaders/ImageLoader.hpp"
+#include "resource/cook/CookedSH9.hpp"
+#include "resource/cook/CookedTexture.hpp"
 #include "IblDemoPath.hpp"
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -140,16 +141,6 @@ int main() {
     const fs::path cookDir      = IblDemo::COOK_CACHE_DIR;
     const std::string shaderDir = IblDemo::BUILTIN_SHADER_DIR;
 
-    // ── Load HDR panorama from disk (CPU, RGBA32F) ────────────────────────────
-    const fs::path hdrPath = assetsDir / "hdri" / "grasslands_sunset_4k.hdr";
-    auto hdrOpt = Resource::ImageLoader::LoadHDR(hdrPath.string());
-    if (!hdrOpt) {
-        SA_LOG_CRITICAL("IblDemo: failed to load HDR '{}'", hdrPath.string());
-        Core::Log::Shutdown();
-        return 1;
-    }
-    SA_LOG_INFO("IblDemo: HDR loaded ({}×{})", hdrOpt->width, hdrOpt->height);
-
     fs::create_directories(cookDir);
 
     // ── Window + device ───────────────────────────────────────────────────────
@@ -202,39 +193,7 @@ int main() {
     }
     matMgr.RegisterType(std::move(pbrType));
 
-    // ── GPU IBL bake — runs once before the render loop via ImmediateCompute ──
-    GpuIblBake gpuBake;
-    if (!gpuBake.Init(device.get(), shaderDir)) {
-        SA_LOG_CRITICAL("IblDemo: GpuIblBake::Init failed — IBL shaders missing");
-        return 1;
-    }
-    const GpuIblBake::Result iblResult = gpuBake.Bake(device.get(), *hdrOpt);
-    gpuBake.Shutdown(device.get());
-
-    if (!iblResult.IsValid()) {
-        SA_LOG_CRITICAL("IblDemo: GpuIblBake::Bake failed");
-        return 1;
-    }
-
-    // Upload the HDR panorama as a separate full-resolution skybox texture.
-    // GpuIblBake destroys its internal HDR upload after baking, so we keep our
-    // own copy here (binding=4, t_SkyboxMap) for the background pass.
-    RHITextureDesc skyboxHdrDesc{};
-    skyboxHdrDesc.width     = hdrOpt->width;
-    skyboxHdrDesc.height    = hdrOpt->height;
-    skyboxHdrDesc.format    = RHIFormat::RGBA32F;
-    skyboxHdrDesc.usage     = RHITextureUsage::Sampled;
-    skyboxHdrDesc.debugName = "SkyboxHDR";
-    RHITextureHandle skyboxHdrTex = device->CreateTexture(skyboxHdrDesc);
-    device->UploadTextureData(skyboxHdrTex, hdrOpt->pixelsHDR.data(),
-        static_cast<uint64_t>(hdrOpt->width) * hdrOpt->height * 4 * sizeof(float));
-
-    hdrOpt.reset();   // CPU HDR data no longer needed
-
-    frameUniforms.SetIBLTextures(iblResult.brdfLut, iblResult.prefilteredEnv, skyboxHdrTex);
-    SA_LOG_INFO("IblDemo: GPU IBL bake complete — textures bound");
-
-    // ── Load scene ────────────────────────────────────────────────────────────
+    // ── Load scene (provides WorldSettings — skybox HDR UUID + offline IBL) ───
     const fs::path scenePath = assetsDir / "scenes" / "metal_rough_spheres.sascene";
     Scene scene("MetalRoughSpheres");
     if (!SceneSerializer::LoadFromFile(scene, scenePath)) {
@@ -243,10 +202,146 @@ int main() {
     }
     SA_LOG_INFO("IblDemo: scene loaded");
 
+    // ── IBL setup — offline-first, GPU bake as fallback ──────────────────────
+    //
+    // If WorldSettings has valid sh9/prefilteredEnv/brdfLut UUIDs (produced by
+    // the IblBake tool), load them directly from the cook cache.
+    // Otherwise run GpuIblBake to compute them at runtime (~100 ms).
+
+    const WorldSettings& ws = scene.GetWorldSettings();
+
+    glm::vec4        shCoeffs[9]  = {};
+    RHITextureHandle brdfLutTex;
+    RHITextureHandle prefilteredEnvTex;
+    RHITextureHandle skyboxCubemapTex;
+    bool             gpuBakeOwnsTextures = false;
+
+    const bool canLoadOffline = ws.sh9.IsValid() &&
+                                ws.prefilteredEnv.IsValid() &&
+                                ws.brdfLut.IsValid() &&
+                                ws.skyboxCubemap.IsValid();
+    bool offlineOk = false;
+
+    if (canLoadOffline) {
+        auto sh9Opt = resMgr.LoadSH9Coeffs(ws.sh9);
+        auto blt    = resMgr.LoadTexture(ws.brdfLut);
+        auto pet    = resMgr.LoadTexture(ws.prefilteredEnv);
+        auto sky    = resMgr.LoadTexture(ws.skyboxCubemap);
+
+        if (sh9Opt && blt.IsValid() && pet.IsValid() && sky.IsValid()) {
+            for (int i = 0; i < 9; ++i) shCoeffs[i] = (*sh9Opt)[i];
+            brdfLutTex        = blt;
+            prefilteredEnvTex = pet;
+            skyboxCubemapTex  = sky;
+            offlineOk         = true;
+            SA_LOG_INFO("IblDemo: IBL loaded from cook cache (offline)");
+        } else {
+            SA_LOG_WARN("IblDemo: offline IBL load incomplete, falling back to GPU bake");
+        }
+    }
+
+    if (!offlineOk) {
+        auto hdrOpt = resMgr.LoadHDRImageData(ws.skyboxHdr);
+        if (!hdrOpt) {
+            SA_LOG_CRITICAL("IblDemo: failed to load skybox HDR (UUID={})",
+                            ws.skyboxHdr.ToString());
+            return 1;
+        }
+        SA_LOG_INFO("IblDemo: HDR loaded ({}×{})", hdrOpt->width, hdrOpt->height);
+
+        GpuIblBake gpuBake;
+        if (!gpuBake.Init(device.get(), shaderDir)) {
+            SA_LOG_CRITICAL("IblDemo: GpuIblBake::Init failed — IBL shaders missing");
+            return 1;
+        }
+        const GpuIblBake::Result iblResult = gpuBake.Bake(device.get(), *hdrOpt);
+        gpuBake.Shutdown(device.get());
+
+        if (!iblResult.IsValid()) {
+            SA_LOG_CRITICAL("IblDemo: GpuIblBake::Bake failed");
+            return 1;
+        }
+
+        std::copy(std::begin(iblResult.shCoeffs), std::end(iblResult.shCoeffs),
+                  std::begin(shCoeffs));
+        brdfLutTex            = iblResult.brdfLut;
+        prefilteredEnvTex     = iblResult.prefilteredEnv;
+        skyboxCubemapTex      = iblResult.skyboxCubemap;
+        gpuBakeOwnsTextures   = true;
+        SA_LOG_INFO("IblDemo: GPU IBL bake complete");
+
+        // Cache SH9 coefficients.
+        if (ws.sh9.IsValid()) {
+            Resource::CookedSH9 sh9Cache;
+            sh9Cache.id = ws.sh9;
+            for (int i = 0; i < 9; ++i) sh9Cache.coeffs[i] = shCoeffs[i];
+            const fs::path sh9Path = cookDir / (ws.sh9.ToString() + ".sash9");
+            if (Resource::SaveCookedSH9(sh9Cache, sh9Path.string()))
+                SA_LOG_INFO("IblDemo: SH9 cached → {}", sh9Path.filename().string());
+        }
+
+        // Cache GPU textures — readback from GPU → save .satex for next launch.
+        // isCubemap controls whether the cubemap flag is set in the output file.
+        auto saveGpuTex = [&](RHITextureHandle tex,
+                               const AssetID&   id,
+                               bool             isHDR,
+                               bool             isCubemap) {
+            if (!id.IsValid()) return;
+            const RHITextureDesc* desc = device->GetTextureDesc(tex);
+            if (!desc) return;
+
+            // For cubemaps each mip block covers all 6 faces:
+            //   size per mip = faceW * faceH * 4 * sizeof(float) * 6
+            const uint32_t bytesPerPixel = 4 * sizeof(float); // RGBA32F
+            const uint32_t mipCount      = desc->mipLevels;
+            const uint32_t numLayers     = isCubemap ? 6u : 1u;
+
+            std::vector<std::vector<uint8_t>>    mipData(mipCount);
+            std::vector<IRHIDevice::MipReadback> readbacks(mipCount);
+            for (uint32_t m = 0; m < mipCount; ++m) {
+                const uint32_t mW = std::max(1u, desc->width  >> m);
+                const uint32_t mH = std::max(1u, desc->height >> m);
+                const uint64_t sz = static_cast<uint64_t>(mW) * mH * bytesPerPixel * numLayers;
+                mipData[m].resize(sz);
+                readbacks[m] = { mipData[m].data(), sz };
+            }
+            device->ReadbackTextureMips(tex, readbacks);
+
+            Resource::CookedTexture cooked;
+            cooked.id        = id;
+            cooked.width     = desc->width;
+            cooked.height    = desc->height;
+            cooked.mipLevels = mipCount;
+            cooked.format    = Resource::CookedTextureFormat::RGBA32F;
+            cooked.srgb      = false;
+            cooked.isHDR     = isHDR;
+            cooked.cubemap   = isCubemap;
+
+            uint64_t offset = 0;
+            for (uint32_t m = 0; m < mipCount; ++m) {
+                cooked.mips.push_back({ offset, static_cast<uint64_t>(mipData[m].size()) });
+                cooked.data.insert(cooked.data.end(),
+                                   mipData[m].begin(), mipData[m].end());
+                offset += mipData[m].size();
+            }
+
+            const fs::path outPath = cookDir / (id.ToString() + ".satex");
+            if (Resource::SaveCookedTexture(cooked, outPath.string()))
+                SA_LOG_INFO("IblDemo: {} cached → {}", id.ToString().substr(0,8),
+                            outPath.filename().string());
+        };
+
+        saveGpuTex(iblResult.brdfLut,        ws.brdfLut,        false, false);
+        saveGpuTex(iblResult.prefilteredEnv,  ws.prefilteredEnv, true,  true);
+        saveGpuTex(iblResult.skyboxCubemap,   ws.skyboxCubemap,  true,  true);
+    }
+
+    frameUniforms.SetIBLTextures(brdfLutTex, prefilteredEnvTex, skyboxCubemapTex);
+    SA_LOG_INFO("IblDemo: IBL textures bound");
+
     scene.UpdateTransforms();
 
     // ── Resolve meshes + build draw items ─────────────────────────────────────
-    std::vector<std::unique_ptr<MaterialInstance>> matInstances;
     std::vector<DrawItem> drawItems;
 
     scene.View<StaticMeshComponent, WorldTransformComponent>().each(
@@ -263,31 +358,14 @@ int main() {
             return;
         }
 
-        auto loadTexOrWhite = [&](const AssetID& id) -> RHITextureHandle {
-            if (!id.IsValid()) return whiteTex;
-            auto h = resMgr.LoadTexture(id);
-            return h.IsValid() ? h : whiteTex;
-        };
-
         for (size_t si = 0; si < gpuMesh->subMeshes.size(); ++si) {
             const auto& sub = gpuMesh->subMeshes[si];
 
-            auto inst = matMgr.CreateInstance("PBR");
+            MaterialInstance* inst =
+                matMgr.LoadMaterial(sub.defaultMaterialID, cookDir, resMgr);
             if (!inst) continue;
 
-            inst->SetParam<glm::vec4>("baseColorFactor",  sub.baseColorFactor);
-            inst->SetParam<float>    ("roughnessFactor",   sub.roughnessFactor);
-            inst->SetParam<float>    ("metallicFactor",    sub.metallicFactor);
-            inst->SetParam<float>    ("normalScale",       sub.normalScale);
-            inst->SetParam<float>    ("occlusionStrength", sub.occlusionStrength);
-            inst->SetParam<glm::vec3>("emissiveFactor",    sub.emissiveFactor);
-
-            inst->SetTexture("t_BaseColor",         loadTexOrWhite(sub.baseColorTexture));
-            inst->SetTexture("t_Normal",            loadTexOrWhite(sub.normalTexture));
-            inst->SetTexture("t_MetallicRoughness", loadTexOrWhite(sub.metallicRoughnessTexture));
-            inst->SetTexture("t_Occlusion",         loadTexOrWhite(sub.occlusionTexture));
-            inst->SetTexture("t_Emissive",          loadTexOrWhite(sub.emissiveTexture));
-
+            // Apply any per-entity material overrides on top of the .samat defaults.
             if (const auto* ov = scene.Registry().try_get<MaterialOverrideComponent>(e)) {
                 for (const auto& p : ov->params)
                     inst->SetRawParam(p.name, p.value.data(),
@@ -295,17 +373,15 @@ int main() {
             }
 
             DrawItem item{};
-            item.vertexBuffer    = gpuMesh->vertexBuffer;
-            item.indexBuffer     = gpuMesh->indexBuffer;
-            item.firstIndex      = sub.firstIndex;
-            item.indexCount      = sub.indexCount;
-            item.vertexOffset    = sub.vertexOffset;
-            item.material        = inst.get();
-            item.worldMatrix     = world.matrix * sub.localTransform;
+            item.vertexBuffer     = gpuMesh->vertexBuffer;
+            item.indexBuffer      = gpuMesh->indexBuffer;
+            item.firstIndex       = sub.firstIndex;
+            item.indexCount       = sub.indexCount;
+            item.vertexOffset     = sub.vertexOffset;
+            item.material         = inst;
+            item.worldMatrix      = world.matrix * sub.localTransform;
             item.pushConstantSize = inst->GetType()->shader
-                                       .GetMergedReflection().pushConstantSize;
-
-            matInstances.push_back(std::move(inst));
+                                        .GetMergedReflection().pushConstantSize;
             drawItems.push_back(item);
         }
     });
@@ -376,8 +452,7 @@ int main() {
         FrameUniforms fu{};
         fu.resolution = {static_cast<float>(w), static_cast<float>(h)};
         fu.time       = static_cast<float>(frameIndex) / 60.f;
-        std::copy(std::begin(iblResult.shCoeffs), std::end(iblResult.shCoeffs),
-                  std::begin(fu.irrSH));
+        std::copy(std::begin(shCoeffs), std::end(shCoeffs), std::begin(fu.irrSH));
         scene.View<CameraComponent, ActiveCameraTag, WorldTransformComponent>().each(
             [&](auto, const CameraComponent& cam, const WorldTransformComponent& wt)
         {
@@ -530,11 +605,13 @@ int main() {
     device->WaitIdle();
     skyboxProgram.Unload(device.get());
     drawItems.clear();
-    matInstances.clear();
     matMgr.Shutdown();
-    device->DestroyTexture(iblResult.brdfLut);
-    device->DestroyTexture(iblResult.prefilteredEnv);
-    device->DestroyTexture(skyboxHdrTex);
+    if (gpuBakeOwnsTextures) {
+        device->DestroyTexture(brdfLutTex);
+        device->DestroyTexture(prefilteredEnvTex);
+        device->DestroyTexture(skyboxCubemapTex);
+    }
+    // Offline-loaded textures (brdfLutTex, prefilteredEnvTex, skyboxCubemapTex) are owned by resMgr.
     device->DestroyTexture(depthTex);
     device->DestroyTexture(whiteTex);
     frameUniforms.Shutdown();

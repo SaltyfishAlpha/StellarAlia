@@ -160,8 +160,24 @@ public:
 
     // Upload all mip levels in a single command submit.
     // mips[i] corresponds to mip level i; mips.size() must equal the texture's mipLevels.
-    virtual void UploadTextureMips(RHITextureHandle          handle,
+    virtual void UploadTextureMips(RHITextureHandle           handle,
                                    std::span<const MipUpload> mips) = 0;
+
+    // Per-mip destination buffer passed to ReadbackTextureMips.
+    struct MipReadback { void* data; uint64_t size; };
+
+    // GPU → CPU readback.  Copies all mip levels of a texture to caller-supplied buffers.
+    // mips[i].data must point to a buffer of at least mips[i].size bytes.
+    // mips.size() must equal the texture's mipLevels.
+    // The texture must have been created with RHITextureUsage::CopySrc.
+    // Blocks until the GPU readback completes.
+    virtual void ReadbackTextureMips(RHITextureHandle       handle,
+                                     std::span<MipReadback> mips) = 0;
+
+    // Returns the descriptor used to create this texture (width, height, format, etc.).
+    // Returns nullptr for invalid handles.
+    [[nodiscard]] virtual const RHITextureDesc* GetTextureDesc(
+        RHITextureHandle handle) const = 0;
 
     // ── Resource Destruction ──────────────────────────────────────────────────
     // Safe to call with an invalid handle (no-op).

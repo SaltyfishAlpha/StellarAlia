@@ -4,6 +4,7 @@ add_executable(StellarAliaCook
     ImportScanner.cpp
     TextureCook.cpp
     MeshCook.cpp
+    MaterialCook.cpp
 )
 
 # Cook tool is a host-side utility: link against the runtime library

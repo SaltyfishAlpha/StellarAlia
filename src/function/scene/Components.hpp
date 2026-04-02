@@ -89,18 +89,6 @@ struct SpotLightComponent {
     float     outerAngle = glm::radians(30.f);
 };
 
-// ── Environment ───────────────────────────────────────────────────────────────
-
-struct SkyboxComponent {
-    AssetID cubemapAsset;   // → .satex (cube map)
-};
-
-struct IBLComponent {
-    AssetID irradianceMap;      // low-frequency diffuse (small cubemap)
-    AssetID prefilteredEnvMap;  // specular mip chain
-    AssetID brdfLut;            // 2D split-sum LUT
-};
-
 // ── Material overrides ────────────────────────────────────────────────────────
 //
 // Optional per-entity overrides applied on top of the base .samat asset.

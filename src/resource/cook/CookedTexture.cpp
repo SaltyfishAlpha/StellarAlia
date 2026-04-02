@@ -20,8 +20,9 @@ bool SaveCookedTexture(const CookedTexture& tex, const std::string& path) {
     hdr.height    = tex.height;
     hdr.mip_count = tex.mipLevels;
     hdr.format    = static_cast<uint32_t>(tex.format);
-    if (tex.srgb)  hdr.flags |= SatexFormat::Flag_SRGB;
-    if (tex.isHDR) hdr.flags |= SatexFormat::Flag_HDR;
+    if (tex.srgb)    hdr.flags |= SatexFormat::Flag_SRGB;
+    if (tex.isHDR)   hdr.flags |= SatexFormat::Flag_HDR;
+    if (tex.cubemap) hdr.flags |= SatexFormat::Flag_Cubemap;
 
     f.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
 
@@ -51,8 +52,9 @@ bool LoadCookedTexture(const std::string& path, CookedTexture& out) {
     out.height    = hdr.height;
     out.mipLevels = hdr.mip_count;
     out.format    = static_cast<CookedTextureFormat>(hdr.format);
-    out.srgb      = (hdr.flags & SatexFormat::Flag_SRGB) != 0;
-    out.isHDR     = (hdr.flags & SatexFormat::Flag_HDR)  != 0;
+    out.srgb      = (hdr.flags & SatexFormat::Flag_SRGB)   != 0;
+    out.isHDR     = (hdr.flags & SatexFormat::Flag_HDR)    != 0;
+    out.cubemap   = (hdr.flags & SatexFormat::Flag_Cubemap) != 0;
 
     out.mips.resize(hdr.mip_count);
     for (auto& mip : out.mips) {

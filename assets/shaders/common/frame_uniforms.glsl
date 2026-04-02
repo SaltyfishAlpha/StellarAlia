@@ -43,11 +43,11 @@ layout(set = 0, binding = 1) uniform LightData {
 // binding=2  BRDF LUT (NdotV × roughness → (scale, bias) for Schlick split-sum)
 layout(set = 0, binding = 2) uniform sampler2D t_BrdfLut;
 
-// binding=3  Prefiltered specular env — equirectangular RGBA32F, mip chain.
+// binding=3  Prefiltered specular env — cubemap RGBA32F, mip chain.
 //            mip 0 = roughness 0.0 (mirror), mip 4 = roughness 1.0 (fully diffuse).
-layout(set = 0, binding = 3) uniform sampler2D t_PrefilteredEnv;
+layout(set = 0, binding = 3) uniform samplerCube t_PrefilteredEnv;
 
-// binding=4  Original HDR panorama (full resolution, no prefiltering) — used by skybox.
-layout(set = 0, binding = 4) uniform sampler2D t_SkyboxMap;
+// binding=4  Skybox cubemap (full resolution, no prefiltering) — used by skybox pass.
+layout(set = 0, binding = 4) uniform samplerCube t_SkyboxMap;
 
 #endif // SA_FRAME_UNIFORMS_GLSL

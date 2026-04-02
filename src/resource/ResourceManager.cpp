@@ -3,8 +3,11 @@
 #include "resource/vfs/VFS.hpp"
 #include "resource/cook/CookedTexture.hpp"
 #include "resource/cook/CookedMesh.hpp"
+#include "resource/cook/CookedSH9.hpp"
 #include "platform/rhi/RHITypes.hpp"
 #include "core/logs/Log.hpp"
+
+#include <cstring>
 
 namespace StellarAlia::Resource {
 
@@ -72,6 +75,7 @@ RHI::RHITextureHandle ResourceManager::LoadTexture(const AssetID& id) {
     texDesc.mipLevels = std::max(1u, cooked.mipLevels);
     texDesc.format    = rhiFmt;
     texDesc.usage     = RHI::RHITextureUsage::Sampled;
+    texDesc.cubemap   = cooked.cubemap;
 
     RHI::RHITextureHandle handle = m_device->CreateTexture(texDesc);
     if (!handle.IsValid()) {
@@ -93,8 +97,9 @@ RHI::RHITextureHandle ResourceManager::LoadTexture(const AssetID& id) {
             m_device->UploadTextureData(handle, pixels, static_cast<uint64_t>(size));
     }
 
-    SA_LOG_INFO("ResourceManager: loaded texture {} ({}x{} mips={})",
-                id.ToString(), cooked.width, cooked.height, cooked.mipLevels);
+    SA_LOG_INFO("ResourceManager: loaded texture {} ({}x{} mips={} {})",
+                id.ToString(), cooked.width, cooked.height, cooked.mipLevels,
+                cooked.cubemap ? "cubemap" : "2D");
 
     m_textures[key] = handle;
     return handle;
@@ -163,22 +168,12 @@ const GPUMesh* ResourceManager::LoadMesh(const AssetID& id) {
     gpu.subMeshes.reserve(cooked.subMeshes.size());
     for (const auto& sm : cooked.subMeshes) {
         GPUSubMesh gsm;
-        gsm.firstIndex                = sm.indexOffset;
-        gsm.indexCount                = sm.indexCount;
-        gsm.vertexOffset              = static_cast<int32_t>(sm.vertexOffset);
-        gsm.materialIndex             = sm.materialIndex;
-        gsm.localTransform            = sm.localTransform;
-        gsm.baseColorTexture          = sm.baseColorTexture;
-        gsm.normalTexture             = sm.normalTexture;
-        gsm.metallicRoughnessTexture  = sm.metallicRoughnessTexture;
-        gsm.occlusionTexture          = sm.occlusionTexture;
-        gsm.emissiveTexture           = sm.emissiveTexture;
-        gsm.baseColorFactor           = sm.baseColorFactor;
-        gsm.roughnessFactor           = sm.roughnessFactor;
-        gsm.metallicFactor            = sm.metallicFactor;
-        gsm.normalScale               = sm.normalScale;
-        gsm.occlusionStrength         = sm.occlusionStrength;
-        gsm.emissiveFactor            = sm.emissiveFactor;
+        gsm.firstIndex         = sm.indexOffset;
+        gsm.indexCount         = sm.indexCount;
+        gsm.vertexOffset       = static_cast<int32_t>(sm.vertexOffset);
+        gsm.materialIndex      = sm.materialIndex;
+        gsm.localTransform     = sm.localTransform;
+        gsm.defaultMaterialID  = sm.defaultMaterialID;
         gpu.subMeshes.push_back(gsm);
     }
 
@@ -187,6 +182,66 @@ const GPUMesh* ResourceManager::LoadMesh(const AssetID& id) {
 
     auto [ins, ok] = m_meshes.emplace(key, std::move(gpu));
     return &ins->second;
+}
+
+// ─── LoadHDRImageData ─────────────────────────────────────────────────────────
+
+std::optional<ImageData> ResourceManager::LoadHDRImageData(const AssetID& id) {
+    if (!id.IsValid()) return std::nullopt;
+
+    auto pathOpt = VFS::ResolveCookedPath(id, ".satex");
+    if (!pathOpt) {
+        SA_LOG_ERROR("ResourceManager::LoadHDRImageData — .satex not found for {}",
+                     id.ToString());
+        return std::nullopt;
+    }
+
+    CookedTexture cooked;
+    if (!LoadCookedTexture(pathOpt->string(), cooked)) {
+        SA_LOG_ERROR("ResourceManager::LoadHDRImageData — failed to parse {}",
+                     pathOpt->filename().string());
+        return std::nullopt;
+    }
+
+    if (cooked.format != CookedTextureFormat::RGBA32F) {
+        SA_LOG_ERROR("ResourceManager::LoadHDRImageData — {} is not RGBA32F",
+                     pathOpt->filename().string());
+        return std::nullopt;
+    }
+
+    const float* fptr = reinterpret_cast<const float*>(cooked.MipData(0));
+    const size_t fcount = cooked.MipSize(0) / sizeof(float);
+
+    ImageData img;
+    img.width    = cooked.width;
+    img.height   = cooked.height;
+    img.channels = 4;
+    img.isHDR    = true;
+    img.pixelsHDR.assign(fptr, fptr + fcount);
+    return img;
+}
+
+// ─── LoadSH9Coeffs ────────────────────────────────────────────────────────────
+
+std::optional<std::array<glm::vec4, 9>> ResourceManager::LoadSH9Coeffs(const AssetID& id) {
+    if (!id.IsValid()) return std::nullopt;
+
+    auto pathOpt = VFS::ResolveCookedPath(id, ".sash9");
+    if (!pathOpt) {
+        SA_LOG_ERROR("ResourceManager::LoadSH9Coeffs — .sash9 not found for {}",
+                     id.ToString());
+        return std::nullopt;
+    }
+
+    CookedSH9 sh9;
+    if (!LoadCookedSH9(pathOpt->string(), sh9)) {
+        SA_LOG_ERROR("ResourceManager::LoadSH9Coeffs — failed to parse {}",
+                     pathOpt->filename().string());
+        return std::nullopt;
+    }
+
+    SA_LOG_INFO("ResourceManager: loaded SH9 {}", id.ToString());
+    return sh9.coeffs;
 }
 
 } // namespace StellarAlia::Resource

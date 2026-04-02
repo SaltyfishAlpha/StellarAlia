@@ -1,12 +1,16 @@
 #pragma once
 
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "core/asset/AssetID.hpp"
 #include "function/material/MaterialType.hpp"
 #include "function/material/MaterialInstance.hpp"
+
+namespace StellarAlia::Resource { class ResourceManager; }
 
 namespace StellarAlia {
 
@@ -38,10 +42,23 @@ public:
     [[nodiscard]] std::unique_ptr<MaterialInstance>
     CreateInstance(const std::string& typeName) const;
 
+    // Load a .samat asset by UUID, populate a MaterialInstance, and cache it.
+    // Subsequent calls with the same AssetID return the cached instance.
+    // Returns nullptr on failure (missing file, unknown type, etc.).
+    // The returned pointer is owned by this manager — do not delete it.
+    [[nodiscard]] MaterialInstance*
+    LoadMaterial(const AssetID& id,
+                 const std::filesystem::path& cookCacheDir,
+                 Resource::ResourceManager& resMgr);
+
 private:
+    static uint64_t HashID(const AssetID& id) { return id.hi ^ id.lo; }
+
     RHI::IRHIDevice*      m_device         = nullptr;
     RHI::RHITextureHandle m_defaultTexture;
     std::unordered_map<std::string, std::unique_ptr<MaterialType>> m_types;
+    // Instances loaded via LoadMaterial(), keyed by AssetID hash.
+    std::unordered_map<uint64_t, std::unique_ptr<MaterialInstance>> m_cachedInstances;
 };
 
 } // namespace StellarAlia

@@ -144,6 +144,9 @@ struct RHITextureDesc {
     uint32_t        arrayLayers  = 1;
     RHIFormat       format       = RHIFormat::RGBA8_UNORM;
     RHITextureUsage usage        = RHITextureUsage::Sampled;
+    // When true, creates the image with VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT and
+    // a VK_IMAGE_VIEW_TYPE_CUBE view. arrayLayers is forced to 6.
+    bool            cubemap      = false;
     const char*     debugName    = nullptr;
 };
 

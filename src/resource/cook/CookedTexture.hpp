@@ -31,6 +31,10 @@ struct CookedTexture {
     CookedTextureFormat  format    = CookedTextureFormat::RGBA8;
     bool                 srgb      = false;
     bool                 isHDR     = false;
+    // When true the texture is a cubemap (6 faces).
+    // Each mip entry's data block contains all 6 faces: face0|face1|...|face5.
+    // The GPU image is created with VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT.
+    bool                 cubemap   = false;
 
     std::vector<CookedTextureMip> mips; // mips.size() == mipLevels
     std::vector<uint8_t>          data; // all mip levels concatenated
@@ -79,8 +83,9 @@ namespace SatexFormat {
     static_assert(sizeof(MipEntry) == 16);
 #pragma pack(pop)
 
-    static constexpr uint32_t Flag_SRGB = 1u << 0;
-    static constexpr uint32_t Flag_HDR  = 1u << 1;
+    static constexpr uint32_t Flag_SRGB   = 1u << 0;
+    static constexpr uint32_t Flag_HDR    = 1u << 1;
+    static constexpr uint32_t Flag_Cubemap = 1u << 2;
 } // namespace SatexFormat
 
 bool SaveCookedTexture(const CookedTexture& tex, const std::string& path);

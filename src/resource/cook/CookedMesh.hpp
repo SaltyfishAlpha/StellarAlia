@@ -10,9 +10,10 @@ namespace StellarAlia::Resource {
 
 // Describes one draw call within the cooked mesh.
 // localTransform is the node world transform baked at cook time (column-major).
-// v3 adds per-submesh PBR material data: texture AssetIDs and scalar factors.
+// v4: material data lives in a separate .samat asset; submesh only stores a
+//     reference (defaultMaterialID) to the corresponding .samat file.
 struct CookedSubMesh {
-    // ── Geometry (v2) ─────────────────────────────────────────────────────────
+    // ── Geometry ──────────────────────────────────────────────────────────────
     uint32_t  vertexOffset    = 0;  // index of first vertex in the shared VB
     uint32_t  vertexCount     = 0;
     uint32_t  indexOffset     = 0;  // index of first index  in the shared IB
@@ -21,21 +22,10 @@ struct CookedSubMesh {
     uint32_t  _pad            = 0;
     glm::mat4 localTransform  = glm::mat4(1.0f);  // per-node world transform
 
-    // ── Material (v3) ─────────────────────────────────────────────────────────
-    // Texture AssetIDs — invalid (zeroed) if the glTF material has no texture.
-    AssetID   baseColorTexture;
-    AssetID   normalTexture;
-    AssetID   metallicRoughnessTexture;
-    AssetID   occlusionTexture;
-    AssetID   emissiveTexture;
-    // PBR scalar factors
-    glm::vec4 baseColorFactor    = {1.f, 1.f, 1.f, 1.f};
-    float     roughnessFactor    = 1.0f;
-    float     metallicFactor     = 1.0f;
-    float     normalScale        = 1.0f;
-    float     occlusionStrength  = 1.0f;
-    glm::vec3 emissiveFactor     = {0.f, 0.f, 0.f};
-    uint32_t  _matPad            = 0;
+    // ── Material reference (v4) ───────────────────────────────────────────────
+    // UUID of the .samat asset cooked from the glTF material at this slot.
+    // Invalid (zeroed) when materialIndex == -1.
+    AssetID   defaultMaterialID;
 };
 
 // In-memory representation loaded from a .samesh file.
@@ -58,20 +48,20 @@ struct CookedMesh {
     bool IsValid() const { return vertexCount > 0 && !vertexData.empty(); }
 };
 
-// ─── .samesh binary layout (v3) ──────────────────────────────────────────────
+// ─── .samesh binary layout (v4) ──────────────────────────────────────────────
 //
 //  FileHeader              (48 bytes)
-//  SubMeshEntry[count]     (216 bytes each)
+//  SubMeshEntry[count]     (104 bytes each)
 //  vertex data blob
 //  index  data blob
 //
-// v2 → v3: SubMeshEntry grows from 88 → 216 bytes (adds 5 texture AssetIDs +
-//           PBR scalar factors).  v2 files will fail the version check and
-//           trigger automatic re-cook.
+// v3 → v4: SubMeshEntry shrinks from 216 → 104 bytes.  Per-submesh PBR data
+//           (textures + scalars) is replaced by a single defaultMaterialID
+//           pointing to a companion .samat asset.  v3 files trigger re-cook.
 //
 namespace SameshFormat {
     static constexpr uint32_t Magic   = 0x48534D53u; // 'SMSH' LE
-    static constexpr uint32_t Version = 3u;          // v3 adds per-submesh material data
+    static constexpr uint32_t Version = 4u;          // v4: .samat material reference
 
 #pragma pack(push, 1)
     struct FileHeader {
@@ -89,7 +79,7 @@ namespace SameshFormat {
     static_assert(sizeof(FileHeader) == 48);
 
     struct SubMeshEntry {
-        // v2: geometry (88 bytes)
+        // Geometry (88 bytes, unchanged since v2)
         uint32_t vertex_offset;
         uint32_t vertex_count;
         uint32_t index_offset;
@@ -98,23 +88,11 @@ namespace SameshFormat {
         uint32_t _pad;
         float    local_transform[16];   // column-major glm::mat4
 
-        // v3: material textures — 5 × AssetID (80 bytes)
-        uint64_t tex_base_color_hi,          tex_base_color_lo;
-        uint64_t tex_normal_hi,              tex_normal_lo;
-        uint64_t tex_metallic_roughness_hi,  tex_metallic_roughness_lo;
-        uint64_t tex_occlusion_hi,           tex_occlusion_lo;
-        uint64_t tex_emissive_hi,            tex_emissive_lo;
-
-        // v3: PBR scalars (48 bytes)
-        float    base_color_factor[4];
-        float    roughness_factor;
-        float    metallic_factor;
-        float    normal_scale;
-        float    occlusion_strength;
-        float    emissive_factor[3];
-        uint32_t _mat_pad;
+        // v4: default material reference (16 bytes)
+        uint64_t default_mat_hi;
+        uint64_t default_mat_lo;
     };
-    static_assert(sizeof(SubMeshEntry) == 216);
+    static_assert(sizeof(SubMeshEntry) == 104);
 #pragma pack(pop)
 } // namespace SameshFormat
 

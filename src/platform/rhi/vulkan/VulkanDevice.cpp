@@ -854,7 +854,8 @@ RHITextureHandle VulkanDevice::CreateTexture(const RHITextureDesc& desc) {
     ici.format        = ToVkFormat(desc.format);
     ici.extent        = {desc.width, desc.height, desc.depth};
     ici.mipLevels     = desc.mipLevels;
-    ici.arrayLayers   = desc.arrayLayers;
+    ici.arrayLayers   = desc.cubemap ? 6u : desc.arrayLayers;
+    if (desc.cubemap) ici.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     ici.samples       = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
 
@@ -890,18 +891,26 @@ RHITextureHandle VulkanDevice::CreateTexture(const RHITextureDesc& desc) {
     VkImageViewCreateInfo viewCI{};
     viewCI.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewCI.image                           = img;
-    viewCI.viewType                        = (desc.arrayLayers > 1)
-                                                 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
-                                                 : VK_IMAGE_VIEW_TYPE_2D;
+    const uint32_t layers = desc.cubemap ? 6u : desc.arrayLayers;
+    if (desc.cubemap)
+        viewCI.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
+    else if (layers > 1)
+        viewCI.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    else
+        viewCI.viewType = VK_IMAGE_VIEW_TYPE_2D;
     viewCI.format                          = vkFmt;
     viewCI.subresourceRange.aspectMask     = aspect;
     viewCI.subresourceRange.levelCount     = desc.mipLevels;
-    viewCI.subresourceRange.layerCount     = desc.arrayLayers;
+    viewCI.subresourceRange.layerCount     = layers;
 
     VkImageView view = VK_NULL_HANDLE;
     vkCreateImageView(m_device, &viewCI, nullptr, &view);
 
-    return AllocTextureSlot(img, view, alloc, desc, /*swapchain=*/false);
+    // Normalize: store arrayLayers=6 for cubemaps so Upload/Readback helpers
+    // reading entry.desc.arrayLayers always see the real GPU layer count.
+    RHITextureDesc storedDesc = desc;
+    if (desc.cubemap) storedDesc.arrayLayers = 6;
+    return AllocTextureSlot(img, view, alloc, storedDesc, /*swapchain=*/false);
 }
 
 void VulkanDevice::UploadTextureData(RHITextureHandle handle,
@@ -1006,6 +1015,78 @@ void VulkanDevice::UploadTextureMips(RHITextureHandle           handle,
     });
 
     DestroyBuffer(stagingH);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ReadbackTextureMips — GPU → CPU (mirror of UploadTextureMips)
+// ─────────────────────────────────────────────────────────────────────────────
+void VulkanDevice::ReadbackTextureMips(RHITextureHandle              handle,
+                                       std::span<IRHIDevice::MipReadback> mips) {
+    if (!handle.IsValid() || handle.index >= m_textures.size() || mips.empty()) return;
+    auto& entry = m_textures[handle.index];
+    if (!entry.valid || entry.swapchain) return;
+
+    // One host-visible (GPU_TO_CPU) staging buffer for all mip data.
+    uint64_t totalSize = 0;
+    for (const auto& m : mips) totalSize += m.size;
+
+    VkBufferCreateInfo bci{};
+    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size  = totalSize;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
+    aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+    VkBuffer      stagingBuf   = VK_NULL_HANDLE;
+    VmaAllocation stagingAlloc = VK_NULL_HANDLE;
+    vmaCreateBuffer(m_allocator, &bci, &aci, &stagingBuf, &stagingAlloc, nullptr);
+
+    VkImage        img    = entry.image;
+    const uint32_t layers = entry.desc.arrayLayers;
+
+    ImmediateSubmit([&](VkCommandBuffer cmd) {
+        // Transition SHADER_READ_ONLY → TRANSFER_SRC
+        CmdTransitionImage(cmd, img,
+                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+        uint64_t bufOffset = 0;
+        for (uint32_t m = 0; m < static_cast<uint32_t>(mips.size()); ++m) {
+            const uint32_t mipW = std::max(1u, entry.desc.width  >> m);
+            const uint32_t mipH = std::max(1u, entry.desc.height >> m);
+
+            VkBufferImageCopy region{};
+            region.bufferOffset                    = bufOffset;
+            region.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.mipLevel       = m;
+            region.imageSubresource.baseArrayLayer = 0;
+            region.imageSubresource.layerCount     = layers;
+            region.imageExtent                     = { mipW, mipH, 1 };
+            vkCmdCopyImageToBuffer(cmd, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   stagingBuf, 1, &region);
+            bufOffset += mips[m].size;
+        }
+
+        // Transition back to SHADER_READ_ONLY
+        CmdTransitionImage(cmd, img,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    });
+
+    // Copy from the persistently-mapped staging buffer to caller's buffers.
+    VmaAllocationInfo allocInfo{};
+    vmaGetAllocationInfo(m_allocator, stagingAlloc, &allocInfo);
+    uint64_t offset = 0;
+    for (auto& m : mips) {
+        std::memcpy(m.data,
+                    static_cast<const uint8_t*>(allocInfo.pMappedData) + offset,
+                    m.size);
+        offset += m.size;
+    }
+
+    vmaDestroyBuffer(m_allocator, stagingBuf, stagingAlloc);
 }
 
 void VulkanDevice::DestroyTexture(RHITextureHandle handle) {
@@ -1154,9 +1235,34 @@ void VulkanDevice::WriteDescriptorStorageImage(RHIDescSetHandle dsHandle,
     if (!dsHandle.IsValid()      || dsHandle.index      >= m_descSets.size())  return;
     if (!textureHandle.IsValid() || textureHandle.index >= m_textures.size())  return;
 
+    auto& entry = m_textures[textureHandle.index];
+    if (!entry.valid) return;
+
+    // Cube image views cannot be used as storage images.
+    // For cubemap textures, lazily create a VK_IMAGE_VIEW_TYPE_2D_ARRAY view
+    // covering mip 0 / all 6 layers, and use that for the UAV binding.
+    VkImageView storageView = entry.view;
+    if (entry.desc.cubemap) {
+        if (entry.mipViews.empty()) entry.mipViews.resize(1, VK_NULL_HANDLE);
+        if (entry.mipViews[0] == VK_NULL_HANDLE) {
+            VkImageViewCreateInfo viewCI{};
+            viewCI.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            viewCI.image                           = entry.image;
+            viewCI.viewType                        = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+            viewCI.format                          = ToVkFormat(entry.desc.format);
+            viewCI.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+            viewCI.subresourceRange.baseMipLevel   = 0;
+            viewCI.subresourceRange.levelCount     = 1;
+            viewCI.subresourceRange.baseArrayLayer = 0;
+            viewCI.subresourceRange.layerCount     = 6;
+            vkCreateImageView(m_device, &viewCI, nullptr, &entry.mipViews[0]);
+        }
+        storageView = entry.mipViews[0];
+    }
+
     VkDescriptorImageInfo imgInfo{};
     imgInfo.sampler     = VK_NULL_HANDLE;
-    imgInfo.imageView   = m_textures[textureHandle.index].view;
+    imgInfo.imageView   = storageView;
     imgInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
     VkWriteDescriptorSet write{};
@@ -1184,16 +1290,21 @@ void VulkanDevice::WriteDescriptorStorageImageMip(RHIDescSetHandle dsHandle,
         entry.mipViews.resize(mipLevel + 1, VK_NULL_HANDLE);
 
     if (entry.mipViews[mipLevel] == VK_NULL_HANDLE) {
+        // For cubemap textures, use a 2D_ARRAY view covering all 6 faces at
+        // the requested mip (cube image views cannot be used as storage images).
+        const uint32_t numLayers = entry.desc.cubemap ? 6u : entry.desc.arrayLayers;
         VkImageViewCreateInfo viewCI{};
         viewCI.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         viewCI.image                           = entry.image;
-        viewCI.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+        viewCI.viewType                        = (numLayers > 1)
+                                                     ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+                                                     : VK_IMAGE_VIEW_TYPE_2D;
         viewCI.format                          = ToVkFormat(entry.desc.format);
         viewCI.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
         viewCI.subresourceRange.baseMipLevel   = mipLevel;
         viewCI.subresourceRange.levelCount     = 1;
         viewCI.subresourceRange.baseArrayLayer = 0;
-        viewCI.subresourceRange.layerCount     = 1;
+        viewCI.subresourceRange.layerCount     = numLayers;
         vkCreateImageView(m_device, &viewCI, nullptr, &entry.mipViews[mipLevel]);
     }
 

@@ -73,6 +73,12 @@ public:
                                    RHIResourceState  from,
                                    RHIResourceState  to)                   = 0;
 
+    // ── Mip Generation ───────────────────────────────────────────────────────
+    // Generate all mip levels from mip 0 using linear filtering (blit chain).
+    // Mip 0 must be in ShaderRead state on entry; all mips will be in ShaderRead
+    // on return. The texture must have been created with CopySrc usage.
+    virtual void GenerateMipmaps(RHITextureHandle texture) = 0;
+
     // ── Copy ──────────────────────────────────────────────────────────────────
     virtual void CopyBuffer(RHIBufferHandle src,
                             RHIBufferHandle dst,

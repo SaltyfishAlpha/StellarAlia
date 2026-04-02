@@ -34,30 +34,9 @@ bool SaveCookedMesh(const CookedMesh& mesh, const std::string& path) {
         std::memcpy(entry.local_transform, &sm.localTransform[0][0],
                     sizeof(entry.local_transform));
 
-        // v3: texture AssetIDs
-        entry.tex_base_color_hi          = sm.baseColorTexture.hi;
-        entry.tex_base_color_lo          = sm.baseColorTexture.lo;
-        entry.tex_normal_hi              = sm.normalTexture.hi;
-        entry.tex_normal_lo              = sm.normalTexture.lo;
-        entry.tex_metallic_roughness_hi  = sm.metallicRoughnessTexture.hi;
-        entry.tex_metallic_roughness_lo  = sm.metallicRoughnessTexture.lo;
-        entry.tex_occlusion_hi           = sm.occlusionTexture.hi;
-        entry.tex_occlusion_lo           = sm.occlusionTexture.lo;
-        entry.tex_emissive_hi            = sm.emissiveTexture.hi;
-        entry.tex_emissive_lo            = sm.emissiveTexture.lo;
-
-        // v3: PBR scalars
-        entry.base_color_factor[0] = sm.baseColorFactor.x;
-        entry.base_color_factor[1] = sm.baseColorFactor.y;
-        entry.base_color_factor[2] = sm.baseColorFactor.z;
-        entry.base_color_factor[3] = sm.baseColorFactor.w;
-        entry.roughness_factor     = sm.roughnessFactor;
-        entry.metallic_factor      = sm.metallicFactor;
-        entry.normal_scale         = sm.normalScale;
-        entry.occlusion_strength   = sm.occlusionStrength;
-        entry.emissive_factor[0]   = sm.emissiveFactor.x;
-        entry.emissive_factor[1]   = sm.emissiveFactor.y;
-        entry.emissive_factor[2]   = sm.emissiveFactor.z;
+        // v4: default material reference
+        entry.default_mat_hi = sm.defaultMaterialID.hi;
+        entry.default_mat_lo = sm.defaultMaterialID.lo;
 
         f.write(reinterpret_cast<const char*>(&entry), sizeof(entry));
     }
@@ -99,27 +78,9 @@ bool LoadCookedMesh(const std::string& path, CookedMesh& out) {
         std::memcpy(&sm.localTransform[0][0], entry.local_transform,
                     sizeof(entry.local_transform));
 
-        // v3: texture AssetIDs
-        sm.baseColorTexture.hi          = entry.tex_base_color_hi;
-        sm.baseColorTexture.lo          = entry.tex_base_color_lo;
-        sm.normalTexture.hi             = entry.tex_normal_hi;
-        sm.normalTexture.lo             = entry.tex_normal_lo;
-        sm.metallicRoughnessTexture.hi  = entry.tex_metallic_roughness_hi;
-        sm.metallicRoughnessTexture.lo  = entry.tex_metallic_roughness_lo;
-        sm.occlusionTexture.hi          = entry.tex_occlusion_hi;
-        sm.occlusionTexture.lo          = entry.tex_occlusion_lo;
-        sm.emissiveTexture.hi           = entry.tex_emissive_hi;
-        sm.emissiveTexture.lo           = entry.tex_emissive_lo;
-
-        // v3: PBR scalars
-        sm.baseColorFactor    = {entry.base_color_factor[0], entry.base_color_factor[1],
-                                 entry.base_color_factor[2], entry.base_color_factor[3]};
-        sm.roughnessFactor    = entry.roughness_factor;
-        sm.metallicFactor     = entry.metallic_factor;
-        sm.normalScale        = entry.normal_scale;
-        sm.occlusionStrength  = entry.occlusion_strength;
-        sm.emissiveFactor     = {entry.emissive_factor[0], entry.emissive_factor[1],
-                                 entry.emissive_factor[2]};
+        // v4: default material reference
+        sm.defaultMaterialID.hi = entry.default_mat_hi;
+        sm.defaultMaterialID.lo = entry.default_mat_lo;
     }
 
     const size_t vbSize = static_cast<size_t>(out.vertexCount) * out.vertexStride;

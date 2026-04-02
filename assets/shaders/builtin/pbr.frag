@@ -48,13 +48,6 @@ vec3 EvaluateSHIrradiance(vec3 N) {
     return max(irr, vec3(0.0));
 }
 
-// ── Equirectangular direction → UV ────────────────────────────────────────────
-vec2 DirToEquirect(vec3 dir) {
-    float phi   = atan(dir.z, dir.x);
-    float theta = asin(clamp(dir.y, -1.0, 1.0));
-    return vec2(phi / (2.0 * PI) + 0.5, 0.5 - theta / PI);
-}
-
 // ── PBR microfacet terms ──────────────────────────────────────────────────────
 
 vec3 FresnelSchlick(float cosTheta, vec3 F0) {
@@ -156,7 +149,7 @@ void main() {
     // ── IBL specular (split-sum) ───────────────────────────────────────────────
     const float MAX_REFLECTION_LOD = 4.0;
     vec3  prefilteredColor = textureLod(t_PrefilteredEnv,
-                                        DirToEquirect(R),
+                                        R,
                                         roughness * MAX_REFLECTION_LOD).rgb;
     vec2  brdfSS    = texture(t_BrdfLut, vec2(NdotV, roughness)).rg;
     vec3  iblSpecular = prefilteredColor * (F_ibl * brdfSS.x + brdfSS.y) * occlusion;

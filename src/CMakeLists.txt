@@ -4,19 +4,19 @@
 # Headers (.h/.hpp) and implementation (.cpp) files are both in src/
 
 # Implementation source files (.cpp only)
-file(GLOB_RECURSE CORE_SOURCES
+file(GLOB_RECURSE CORE_SOURCES CONFIGURE_DEPENDS
     "core/*.cpp"
 )
 
-file(GLOB_RECURSE PLATFORM_SOURCES
+file(GLOB_RECURSE PLATFORM_SOURCES CONFIGURE_DEPENDS
     "platform/*.cpp"
 )
 
-file(GLOB_RECURSE RESOURCE_SOURCES
+file(GLOB_RECURSE RESOURCE_SOURCES CONFIGURE_DEPENDS
     "resource/*.cpp"
 )
 
-file(GLOB_RECURSE FUNCTION_SOURCES
+file(GLOB_RECURSE FUNCTION_SOURCES CONFIGURE_DEPENDS
     "function/*.cpp"
 )
 

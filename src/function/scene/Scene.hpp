@@ -5,9 +5,28 @@
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 
+#include "core/asset/AssetID.hpp"
 #include "function/scene/Components.hpp"
 
 namespace StellarAlia {
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WorldSettings
+//
+// Scene-level global configuration that does not belong to any individual
+// entity.  Serialized as a top-level "world" key in .sascene JSON.
+// ─────────────────────────────────────────────────────────────────────────────
+struct WorldSettings {
+    // Source HDR panorama (.satex, RGBA32F equirect).  Read-only input for GpuIblBake.
+    AssetID skyboxHdr;
+
+    // Offline-baked IBL products (GPU-computed, cached as .satex/.sash9).
+    // When all four are valid and cached, the render loop skips GpuIblBake entirely.
+    AssetID sh9;              // L0+L1+L2 SH coefficients (.sash9)
+    AssetID prefilteredEnv;   // GGX prefiltered specular cubemap (mip chain, .satex)
+    AssetID brdfLut;          // Split-sum BRDF LUT 2D (fixed UUID, .satex)
+    AssetID skyboxCubemap;    // Equirect HDR converted to cubemap (.satex)
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Scene
@@ -58,6 +77,9 @@ public:
     [[nodiscard]] const std::string& GetName() const { return m_name; }
     void SetName(std::string name) { m_name = std::move(name); }
 
+    [[nodiscard]] const WorldSettings& GetWorldSettings() const { return m_worldSettings; }
+    WorldSettings& GetWorldSettings() { return m_worldSettings; }
+
     // ── Systems ───────────────────────────────────────────────────────────
 
     // Recomputes WorldTransformComponent for every entity whose local
@@ -71,6 +93,7 @@ public:
 
 private:
     std::string    m_name;
+    WorldSettings  m_worldSettings;
     entt::registry m_registry;
 
     void PropagateTransform(entt::entity entity, const glm::mat4& parentWorld);

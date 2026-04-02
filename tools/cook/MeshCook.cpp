@@ -1,4 +1,5 @@
 #include "MeshCook.hpp"
+#include "MaterialCook.hpp"
 
 #include "resource/cook/CookedMesh.hpp"
 #include "resource/cook/CookedTexture.hpp"
@@ -114,29 +115,19 @@ bool CookMesh(const AssetEntry& entry, const fs::path& outputDir, bool force) {
             std::cerr << "[Cook] WARN  failed to write embedded image #" << imgIdx << '\n';
     }
 
-    // ── Helper: resolve primitive material → CookedSubMesh material fields ────
-    auto fillMaterial = [&](CookedSubMesh& sm, int32_t matIdx) {
-        if (matIdx < 0 || matIdx >= static_cast<int32_t>(scene.materials.size())) return;
-        const MaterialData& mat = scene.materials[matIdx];
-
-        auto resolveID = [&](int32_t imgIdx) -> AssetID {
-            if (imgIdx < 0 || imgIdx >= static_cast<int32_t>(scene.images.size()))
-                return AssetID::Invalid();
-            return DeriveImageID(entry.meta.uuid, imgIdx);
-        };
-
-        sm.baseColorTexture          = resolveID(mat.baseColorTexture.imageIndex);
-        sm.normalTexture             = resolveID(mat.normalTexture.imageIndex);
-        sm.metallicRoughnessTexture  = resolveID(mat.metallicRoughnessTexture.imageIndex);
-        sm.occlusionTexture          = resolveID(mat.occlusionTexture.imageIndex);
-        sm.emissiveTexture           = resolveID(mat.emissiveTexture.imageIndex);
-        sm.baseColorFactor           = mat.baseColorFactor;
-        sm.roughnessFactor           = mat.roughnessFactor;
-        sm.metallicFactor            = mat.metallicFactor;
-        sm.normalScale               = mat.normalScale;
-        sm.occlusionStrength         = mat.occlusionStrength;
-        sm.emissiveFactor            = mat.emissiveFactor;
+    // ── Cook each glTF material → companion .samat file ───────────────────────
+    // Build a map: glTF material index → cooked AssetID.
+    auto resolveImageID = [&](int32_t imgIdx) -> AssetID {
+        if (imgIdx < 0 || imgIdx >= static_cast<int32_t>(scene.images.size()))
+            return AssetID::Invalid();
+        return DeriveImageID(entry.meta.uuid, imgIdx);
     };
+
+    std::vector<AssetID> matIDs(scene.materials.size());
+    for (int32_t mi = 0; mi < static_cast<int32_t>(scene.materials.size()); ++mi) {
+        matIDs[mi] = Cook::DeriveMaterialID(entry.meta.uuid, mi);
+        Cook::CookMaterial(scene.materials[mi], matIDs[mi], resolveImageID, outputDir);
+    }
 
     // Merge all primitives into one VB / IB.
     // Traverse node hierarchy (DFS) to bake per-node world transforms into each
@@ -160,7 +151,9 @@ bool CookMesh(const AssetEntry& entry, const fs::path& outputDir, bool force) {
         sm.indexCount     = static_cast<uint32_t>(prim.indices.size());
         sm.materialIndex  = prim.materialIndex;
         sm.localTransform = worldTf;
-        fillMaterial(sm, prim.materialIndex);
+        if (prim.materialIndex >= 0 &&
+            prim.materialIndex < static_cast<int32_t>(matIDs.size()))
+            sm.defaultMaterialID = matIDs[prim.materialIndex];
         cooked.subMeshes.push_back(sm);
 
         const size_t vbBytes    = prim.vertices.size() * sizeof(Vertex);

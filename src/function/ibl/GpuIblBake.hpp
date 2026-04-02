@@ -22,8 +22,9 @@ namespace StellarAlia {
 // This replaces a 256×128 irradiance texture with 27 floats.
 //
 // Maps produced:
-//   brdfLut        — 512×512  RGBA32F, 1 mip  (split-sum scale/bias)
-//   prefilteredEnv — 512×256  RGBA32F, 5 mips (specular, mip ↔ roughness)
+//   brdfLut        — 512×512   RGBA32F 2D,      1 mip  (split-sum scale/bias)
+//   prefilteredEnv — 512×512×6 RGBA32F cubemap, 5 mips (specular, mip ↔ roughness)
+//   skyboxCubemap  — 1024×1024×6 RGBA32F cubemap, 1 mip (direct HDR, tone-mapped by skybox shader)
 //   shCoeffs[9]    — glm::vec4[9], RGB SH for diffuse irradiance (cpu-side)
 // ─────────────────────────────────────────────────────────────────────────────
 class GpuIblBake {
@@ -31,11 +32,12 @@ public:
     struct Result {
         RHI::RHITextureHandle brdfLut;
         RHI::RHITextureHandle prefilteredEnv;
+        RHI::RHITextureHandle skyboxCubemap;
         // L0+L1+L2 SH coefficients, Lambertian-convolved, std140-padded (w=0).
         glm::vec4             shCoeffs[9];
 
         [[nodiscard]] bool IsValid() const {
-            return brdfLut.IsValid() && prefilteredEnv.IsValid();
+            return brdfLut.IsValid() && prefilteredEnv.IsValid() && skyboxCubemap.IsValid();
         }
     };
 
@@ -47,8 +49,9 @@ public:
     [[nodiscard]] bool IsInitialized() const { return m_brdfProg.IsLoaded(); }
 
 private:
-    ComputeProgram m_brdfProg;   // ibl_brdf_lut.comp
-    ComputeProgram m_prefProg;   // ibl_prefilter.comp
+    ComputeProgram m_brdfProg;         // ibl_brdf_lut.comp
+    ComputeProgram m_prefProg;         // ibl_prefilter.comp
+    ComputeProgram m_equirectCubeProg; // equirect_to_cube.comp
 };
 
 } // namespace StellarAlia

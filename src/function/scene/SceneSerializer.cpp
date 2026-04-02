@@ -84,6 +84,21 @@ bool SceneSerializer::SaveToFile(const Scene& scene,
     json root;
     root["version"] = 1;
     root["name"]    = scene.GetName();
+
+    // World settings (global, not entity-bound)
+    const WorldSettings& ws = scene.GetWorldSettings();
+    if (ws.skyboxHdr.IsValid() || ws.sh9.IsValid() ||
+        ws.prefilteredEnv.IsValid() || ws.brdfLut.IsValid() ||
+        ws.skyboxCubemap.IsValid()) {
+        json wj;
+        if (ws.skyboxHdr.IsValid())       wj["skyboxHdr"]       = AssetToStr(ws.skyboxHdr);
+        if (ws.sh9.IsValid())             wj["sh9"]             = AssetToStr(ws.sh9);
+        if (ws.prefilteredEnv.IsValid())  wj["prefilteredEnv"]  = AssetToStr(ws.prefilteredEnv);
+        if (ws.brdfLut.IsValid())         wj["brdfLut"]         = AssetToStr(ws.brdfLut);
+        if (ws.skyboxCubemap.IsValid())   wj["skyboxCubemap"]   = AssetToStr(ws.skyboxCubemap);
+        root["world"] = std::move(wj);
+    }
+
     root["entities"] = json::array();
 
     reg.view<TagComponent>().each([&](entt::entity e, const TagComponent& tag) {
@@ -156,18 +171,6 @@ bool SceneSerializer::SaveToFile(const Scene& scene,
             };
         }
 
-        // Environment
-        if (const auto* s = reg.try_get<SkyboxComponent>(e))
-            ej["skybox"] = { {"cubemap", AssetToStr(s->cubemapAsset)} };
-
-        if (const auto* ibl = reg.try_get<IBLComponent>(e)) {
-            ej["ibl"] = {
-                {"irradiance",     AssetToStr(ibl->irradianceMap)},
-                {"prefilteredEnv", AssetToStr(ibl->prefilteredEnvMap)},
-                {"brdfLut",        AssetToStr(ibl->brdfLut)}
-            };
-        }
-
         if (reg.all_of<StaticGeometryTag>(e))
             ej["staticGeometry"] = true;
 
@@ -211,6 +214,17 @@ bool SceneSerializer::LoadFromFile(Scene& scene,
 
     if (root.contains("name"))
         scene.SetName(root["name"].get<std::string>());
+
+    // World settings
+    if (root.contains("world")) {
+        const auto& wj = root["world"];
+        WorldSettings& ws = scene.GetWorldSettings();
+        if (wj.contains("skyboxHdr"))      ws.skyboxHdr      = StrToAsset(wj["skyboxHdr"].get<std::string>());
+        if (wj.contains("sh9"))            ws.sh9            = StrToAsset(wj["sh9"].get<std::string>());
+        if (wj.contains("prefilteredEnv")) ws.prefilteredEnv = StrToAsset(wj["prefilteredEnv"].get<std::string>());
+        if (wj.contains("brdfLut"))        ws.brdfLut        = StrToAsset(wj["brdfLut"].get<std::string>());
+        if (wj.contains("skyboxCubemap"))  ws.skyboxCubemap  = StrToAsset(wj["skyboxCubemap"].get<std::string>());
+    }
 
     const auto& entities = root["entities"];
     const size_t count   = entities.size();
@@ -288,21 +302,6 @@ bool SceneSerializer::LoadFromFile(Scene& scene,
             l.innerAngle = lj.value("innerAngle", l.innerAngle);
             l.outerAngle = lj.value("outerAngle", l.outerAngle);
             reg.emplace<SpotLightComponent>(e, l);
-        }
-
-        // Environment
-        if (ej.contains("skybox")) {
-            SkyboxComponent s;
-            s.cubemapAsset = StrToAsset(ej["skybox"]["cubemap"].get<std::string>());
-            reg.emplace<SkyboxComponent>(e, s);
-        }
-        if (ej.contains("ibl")) {
-            const auto& ij = ej["ibl"];
-            IBLComponent ibl;
-            ibl.irradianceMap      = StrToAsset(ij["irradiance"].get<std::string>());
-            ibl.prefilteredEnvMap  = StrToAsset(ij["prefilteredEnv"].get<std::string>());
-            ibl.brdfLut            = StrToAsset(ij["brdfLut"].get<std::string>());
-            reg.emplace<IBLComponent>(e, ibl);
         }
 
         if (ej.value("staticGeometry", false))
