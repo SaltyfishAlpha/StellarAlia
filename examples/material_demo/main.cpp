@@ -3,6 +3,7 @@
 #include "platform/rhi/vulkan/VulkanDevice.hpp"
 #include "platform/rhi/ShaderReflection.hpp"
 #include "function/FrameUniforms.hpp"
+#include "resource/ResourceManager.hpp"
 #include "function/FrameUniformsBuffer.hpp"
 #include "function/material/AttachmentKey.hpp"
 #include "function/material/ShaderProgram.hpp"
@@ -210,22 +211,12 @@ int main() {
         return 1;
     }
 
-    // ── MaterialManager ───────────────────────────────────────────────────────
-    // Default 1×1 white texture (used for unset texture slots)
-    RHITextureHandle whiteTex;
-    {
-        RHITextureDesc td{};
-        td.width = 1; td.height = 1;
-        td.format = RHIFormat::RGBA8_UNORM;
-        td.usage  = RHITextureUsage::Sampled;
-        td.debugName = "White1x1";
-        whiteTex = device->CreateTexture(td);
-        const uint32_t white = 0xFFFFFFFFu;
-        device->UploadTextureData(whiteTex, &white, 4);
-    }
+    // ── ResourceManager + MaterialManager ────────────────────────────────────
+    Resource::ResourceManager resMgr;
+    resMgr.Init(MatDemo::PROJECT_COOK_CACHE, device.get());
 
     MaterialManager matMgr;
-    matMgr.Init(device.get(), whiteTex);
+    matMgr.Init(device.get(), &resMgr);
 
     auto pbrType = BuildPbrType(device.get(), frameUniforms.GetLayout(), vertSpv, fragSpv);
     if (!pbrType) {
@@ -305,11 +296,11 @@ int main() {
         fu.deltaTime   = 0.016f;
 
         LightUniforms lu{};
-        lu.direction        = glm::normalize(glm::vec3(1.f, -1.f, 0.5f));
-        lu.intensity        = 3.f;
-        lu.color            = glm::vec3(1.f, 0.98f, 0.95f);
-        lu.ambientColor     = glm::vec3(0.05f, 0.05f, 0.08f);
-        lu.ambientIntensity = 1.f;
+        lu.lights[0].direction = glm::normalize(glm::vec3(1.f, -1.f, 0.5f));
+        lu.lights[0].intensity = 3.f;
+        lu.lights[0].color     = glm::vec3(1.f, 0.98f, 0.95f);
+        lu.lights[0].type      = 0;
+        lu.lightCount          = 1;
 
         frameUniforms.Upload(fi, fu, lu);
 
@@ -374,10 +365,10 @@ int main() {
 
     device->DestroyBuffer(vb);
     device->DestroyBuffer(ib);
-    device->DestroyTexture(whiteTex);
     device->DestroyTexture(depthTex);
     matMgr.Shutdown();
     frameUniforms.Shutdown();
+    resMgr.Shutdown();
 
     device.reset();
     window.reset();

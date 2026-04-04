@@ -210,6 +210,19 @@ MaterialData ConvertMaterial(const tinygltf::Material& mat,
                               (float)mat.emissiveFactor[1],
                               (float)mat.emissiveFactor[2]};
 
+    // KHR_materials_emissive_strength: HDR emissive multiplier.
+    // glTF clamps emissiveFactor to [0,1] per channel; this extension lifts
+    // that by providing a separate scalar (e.g. 10, 50, 100) baked at cook time.
+    {
+        auto extIt = mat.extensions.find("KHR_materials_emissive_strength");
+        if (extIt != mat.extensions.end() && extIt->second.IsObject()) {
+            const tinygltf::Value& sv = extIt->second.Get("emissiveStrength");
+            float strength = sv.IsReal() ? static_cast<float>(sv.Get<double>()) :
+                             sv.IsInt()  ? static_cast<float>(sv.Get<int>())    : 1.0f;
+            out.emissiveFactor *= strength;
+        }
+    }
+
     if (pbr.baseColorTexture.index >= 0)
         out.baseColorTexture.imageIndex = texImage(pbr.baseColorTexture.index);
     if (pbr.metallicRoughnessTexture.index >= 0)

@@ -2,6 +2,7 @@
 #include "core/logs/Log.hpp"
 
 #include <algorithm>
+#include <queue>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
@@ -26,6 +27,7 @@ entt::entity Scene::CreateEntity(std::string_view name) {
     m_registry.emplace<TagComponent>(e, std::string(name));
     m_registry.emplace<TransformComponent>(e);
     m_registry.emplace<WorldTransformComponent>(e);
+    m_hierarchyDirty = true;
     return e;
 }
 
@@ -51,6 +53,7 @@ void Scene::DestroyEntity(entt::entity entity) {
     }
 
     m_registry.destroy(entity);
+    m_hierarchyDirty = true;
 }
 
 void Scene::SetParent(entt::entity child, entt::entity parent) {
@@ -77,44 +80,66 @@ void Scene::SetParent(entt::entity child, entt::entity parent) {
             ph.children.push_back(child);
     }
 
+    m_hierarchyDirty = true;
     MarkDirty(child);
 }
 
 // ── Systems ───────────────────────────────────────────────────────────────────
 
-void Scene::UpdateTransforms() {
-    // Pass 1: update root entities (no parent or parent == null)
-    for (auto [entity, t, w] :
-         m_registry.view<TransformComponent, WorldTransformComponent>().each()) {
+void Scene::RebuildSortedOrder() {
+    m_sortedEntities.clear();
 
-        auto* h = m_registry.try_get<HierarchyComponent>(entity);
-        const bool isRoot = (!h || h->parent == entt::null);
-        if (!isRoot) continue;
+    // BFS from all root entities (no HierarchyComponent, or parent == null).
+    std::queue<entt::entity> q;
+    for (entt::entity e : m_registry.view<TransformComponent>()) {
+        const auto* h = m_registry.try_get<HierarchyComponent>(e);
+        if (!h || h->parent == entt::null)
+            q.push(e);
+    }
 
-        if (w.dirty) {
-            w.matrix = LocalMatrix(t);
-            w.dirty  = false;
-            if (h) {
-                for (entt::entity child : h->children)
-                    PropagateTransform(child, w.matrix);
-            }
+    while (!q.empty()) {
+        entt::entity e = q.front();
+        q.pop();
+        m_sortedEntities.push_back(e);
+        if (const auto* h = m_registry.try_get<HierarchyComponent>(e)) {
+            for (entt::entity child : h->children)
+                if (m_registry.valid(child))
+                    q.push(child);
         }
     }
+
+    m_hierarchyDirty = false;
 }
 
-void Scene::PropagateTransform(entt::entity entity, const glm::mat4& parentWorld) {
-    if (!m_registry.valid(entity)) return;
+void Scene::UpdateTransforms() {
+    if (m_hierarchyDirty)
+        RebuildSortedOrder();
 
-    auto* t = m_registry.try_get<TransformComponent>(entity);
-    auto* w = m_registry.try_get<WorldTransformComponent>(entity);
-    if (!t || !w) return;
+    for (entt::entity e : m_sortedEntities) {
+        if (!m_registry.valid(e)) continue;
 
-    w->matrix = parentWorld * LocalMatrix(*t);
-    w->dirty  = false;
+        auto* w = m_registry.try_get<WorldTransformComponent>(e);
+        if (!w || !w->dirty) continue;
 
-    if (auto* h = m_registry.try_get<HierarchyComponent>(entity)) {
-        for (entt::entity child : h->children)
-            PropagateTransform(child, w->matrix);
+        // Prefer AnimatedTransformComponent when the animation system has set it.
+        const glm::mat4 local = [&]() -> glm::mat4 {
+            if (const auto* a = m_registry.try_get<AnimatedTransformComponent>(e))
+                return glm::translate(glm::mat4(1.f), a->position)
+                     * glm::mat4_cast(a->rotation)
+                     * glm::scale(glm::mat4(1.f), a->scale);
+            if (const auto* t = m_registry.try_get<TransformComponent>(e))
+                return LocalMatrix(*t);
+            return glm::mat4(1.f);
+        }();
+
+        const auto* h = m_registry.try_get<HierarchyComponent>(e);
+        if (!h || h->parent == entt::null) {
+            w->matrix = local;
+        } else {
+            const auto* pw = m_registry.try_get<WorldTransformComponent>(h->parent);
+            w->matrix = (pw ? pw->matrix : glm::mat4(1.f)) * local;
+        }
+        w->dirty = false;
     }
 }
 

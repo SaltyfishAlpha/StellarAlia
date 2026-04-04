@@ -1,18 +1,36 @@
 #include "function/material/MaterialManager.hpp"
+#include "function/renderer/RenderFeature.hpp"
+#include "platform/rhi/ShaderReflection.hpp"
+#include "platform/rhi/ShaderReflectionIO.hpp"
 #include "resource/ResourceManager.hpp"
 #include "resource/vfs/VFS.hpp"
 #include "core/logs/Log.hpp"
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <fstream>
 
 namespace StellarAlia {
 
-void MaterialManager::Init(RHI::IRHIDevice*      device,
-                            RHI::RHITextureHandle defaultTexture) {
+// ── Shader loader (local helper) ──────────────────────────────────────────────
+
+static std::vector<uint8_t> LoadSpv(const std::string& path) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) { SA_LOG_ERROR("MaterialManager: cannot open '{}'", path); return {}; }
+    const auto sz = static_cast<size_t>(f.tellg());
+    f.seekg(0);
+    std::vector<uint8_t> data(sz);
+    f.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(sz));
+    return data;
+}
+
+// ── Init / Shutdown ───────────────────────────────────────────────────────────
+
+void MaterialManager::Init(RHI::IRHIDevice*             device,
+                            Resource::ResourceManager*   resMgr) {
     m_device         = device;
-    m_defaultTexture = defaultTexture;
+    m_defaultTexture = resMgr->GetBuiltin(Resource::BuiltinTexture::White1x1);
 }
 
 void MaterialManager::Shutdown() {
@@ -28,6 +46,71 @@ MaterialType* MaterialManager::RegisterType(std::unique_ptr<MaterialType> type) 
     auto* ptr = type.get();
     m_types[type->name] = std::move(type);
     return ptr;
+}
+
+bool MaterialManager::RegisterTypeFromShaders(const MaterialTypeDesc&   desc,
+                                               const FeatureInitContext& ctx)
+{
+    const std::string vertSpvPath  = ctx.shaderDir + "/" + desc.vertShader + ".vert.spv";
+    const std::string fragSpvPath  = ctx.shaderDir + "/" + desc.fragShader + ".frag.spv";
+    const std::string vertReflPath = ctx.shaderDir + "/" + desc.vertShader + ".vert.refl";
+    const std::string fragReflPath = ctx.shaderDir + "/" + desc.fragShader + ".frag.refl";
+
+    const auto vertSpv = LoadSpv(vertSpvPath);
+    const auto fragSpv = LoadSpv(fragSpvPath);
+    if (vertSpv.empty() || fragSpv.empty()) {
+        SA_LOG_ERROR("MaterialManager: '{}' — shader .spv not found", desc.name);
+        return false;
+    }
+
+    RHI::ShaderReflection vertRefl, fragRefl;
+    if (!RHI::ShaderReflectionIO::LoadFromFile(vertReflPath, vertRefl) ||
+        !RHI::ShaderReflectionIO::LoadFromFile(fragReflPath, fragRefl)) {
+        SA_LOG_ERROR("MaterialManager: '{}' — .refl files not found", desc.name);
+        return false;
+    }
+
+    const RHI::ShaderReflection merged = RHI::MergeReflections(vertRefl, fragRefl);
+
+    auto type  = std::make_unique<MaterialType>();
+    type->name = desc.name;
+
+    if (auto ubo = merged.FindBinding(1, 0)) {
+        type->uboSize = ubo->blockSize;
+        for (const auto& m : ubo->members)
+            type->params.push_back({m.name, m.offset, m.size});
+    }
+
+    for (const auto& b : merged.bindings) {
+        if (b.set != 1) continue;
+        if (b.type == RHI::RHIDescriptorType::Texture2D   ||
+            b.type == RHI::RHIDescriptorType::TextureCube  ||
+            b.type == RHI::RHIDescriptorType::Sampler)
+            type->textures.push_back({b.name, b.binding,
+                                      static_cast<uint32_t>(type->textures.size())});
+    }
+    std::sort(type->textures.begin(), type->textures.end(),
+              [](const auto& a, const auto& b){ return a.binding < b.binding; });
+    for (uint32_t i = 0; i < type->textures.size(); ++i)
+        type->textures[i].slotIndex = i;
+
+    type->defaultCullMode   = desc.cullMode;
+    type->defaultBlendMode  = desc.blendMode;
+    type->defaultDepthTest  = desc.depthTest;
+    type->defaultDepthWrite = desc.depthWrite;
+    type->noVertexInput     = desc.noVertexInput;
+
+    ShaderProgram::Desc pd;
+    pd.vertSpv     = vertSpv;  pd.vertRefl = vertRefl;
+    pd.fragSpv     = fragSpv;  pd.fragRefl = fragRefl;
+    pd.frameLayout = ctx.frameLayout;
+    if (!type->shader.Load(ctx.device, pd)) {
+        SA_LOG_ERROR("MaterialManager: '{}' — shader program load failed", desc.name);
+        return false;
+    }
+
+    RegisterType(std::move(type));
+    return true;
 }
 
 MaterialType* MaterialManager::GetType(const std::string& name) const {
@@ -118,6 +201,25 @@ MaterialManager::LoadMaterial(const AssetID& id,
     auto* raw = inst.get();
     m_cachedInstances.emplace(key, std::move(inst));
     return raw;
+}
+
+std::unique_ptr<MaterialInstance>
+MaterialManager::CloneInstance(const MaterialInstance* src) const {
+    if (!src) return nullptr;
+    auto clone = src->m_type->CreateInstance(m_device, m_defaultTexture);
+    if (!clone) return nullptr;
+    // Copy the UBO parameter blob wholesale — same layout, same values.
+    clone->m_uboBlob    = src->m_uboBlob;
+    clone->m_paramDirty = true;
+    // Re-bind each texture slot from the source (SetTexture writes the descriptor).
+    for (const auto& td : src->m_type->textures) {
+        if (td.slotIndex < src->m_textures.size()) {
+            const auto tex = src->m_textures[td.slotIndex];
+            if (tex.IsValid())
+                clone->SetTexture(td.name, tex);
+        }
+    }
+    return clone;
 }
 
 std::unique_ptr<MaterialInstance>

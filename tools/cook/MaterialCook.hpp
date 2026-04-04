@@ -27,4 +27,14 @@ bool CookMaterial(const Resource::MaterialData& mat,
                   const std::function<AssetID(int32_t imageIndex)>& resolveTexID,
                   const fs::path& outputDir);
 
+// Cook a standalone .mat source file (assets/materials/*.mat) into the cook
+// cache as {id}.samat.  The .mat format is identical to .samat — no
+// transformation is needed, only a rename with the UUID.
+//
+// Returns true on success or if the output already exists (incremental skip).
+bool CookStandaloneMaterial(const fs::path& sourcePath,
+                             const AssetID&  id,
+                             const fs::path& outputDir,
+                             bool            force);
+
 } // namespace StellarAlia::Cook

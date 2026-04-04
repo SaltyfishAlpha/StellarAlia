@@ -1,6 +1,9 @@
 #version 450
 #extension GL_GOOGLE_include_directive : enable
-#include "frame_uniforms.glsl"
+
+// All PBR/LTC/SH functions and frame uniforms live in shared headers.
+// This file only contains material inputs, vertex I/O, and main().
+#include "pbr.glsl"
 
 // ── set=1 Material parameters ─────────────────────────────────────────────────
 layout(set = 1, binding = 0) uniform MaterialParams {
@@ -27,54 +30,6 @@ layout(location = 3) in vec2 v_TexCoord0;
 
 layout(location = 0) out vec4 out_Color;
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-const float PI = 3.14159265359;
-
-// ── Spherical Harmonics diffuse irradiance ────────────────────────────────────
-// Evaluates the pre-convolved L0+L1+L2 SH stored in u_Frame.irrSH[9].
-// Coefficients are already multiplied by the Lambertian kernel, so evaluation
-// is a simple linear combination of the real SH basis functions Y_i(N).
-vec3 EvaluateSHIrradiance(vec3 N) {
-    vec3 irr = vec3(0.0);
-    irr += u_Frame.irrSH[0].rgb * 0.282095;
-    irr += u_Frame.irrSH[1].rgb * (0.488603 * N.y);
-    irr += u_Frame.irrSH[2].rgb * (0.488603 * N.z);
-    irr += u_Frame.irrSH[3].rgb * (0.488603 * N.x);
-    irr += u_Frame.irrSH[4].rgb * (1.092548 * N.x * N.y);
-    irr += u_Frame.irrSH[5].rgb * (1.092548 * N.y * N.z);
-    irr += u_Frame.irrSH[6].rgb * (0.315392 * (3.0 * N.z * N.z - 1.0));
-    irr += u_Frame.irrSH[7].rgb * (1.092548 * N.x * N.z);
-    irr += u_Frame.irrSH[8].rgb * (0.546274 * (N.x * N.x - N.y * N.y));
-    return max(irr, vec3(0.0));
-}
-
-// ── PBR microfacet terms ──────────────────────────────────────────────────────
-
-vec3 FresnelSchlick(float cosTheta, vec3 F0) {
-    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
-}
-
-vec3 FresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
-    return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
-}
-
-float DistributionGGX(float NdotH, float roughness) {
-    float a  = roughness * roughness;
-    float a2 = a * a;
-    float d  = NdotH * NdotH * (a2 - 1.0) + 1.0;
-    return a2 / (PI * d * d + 1e-7);
-}
-
-float GeometrySchlickGGX(float NdotV, float roughness) {
-    float r = roughness + 1.0;
-    float k = (r * r) / 8.0;
-    return NdotV / (NdotV * (1.0 - k) + k + 1e-7);
-}
-
-float GeometrySmith(float NdotV, float NdotL, float roughness) {
-    return GeometrySchlickGGX(NdotV, roughness) * GeometrySchlickGGX(NdotL, roughness);
-}
-
 // ── Main ──────────────────────────────────────────────────────────────────────
 void main() {
     // Material inputs
@@ -92,10 +47,17 @@ void main() {
 
     vec3 F0 = mix(vec3(0.04), albedo.rgb, metallic);
 
-    // ── Direct lighting loop (directional / point / spot) ────────────────────
+    // ── Direct lighting loop (directional / point / spot / area) ────────────
     vec3 direct = vec3(0.0);
     for (int i = 0; i < u_Lights.lightCount; ++i) {
         LightEntry light = u_Lights.lights[i];
+
+        if (light.type == 3) {
+            // Area (rectangle) — LTC evaluation
+            direct += EvaluateAreaLight(light, v_WorldPos, N, V,
+                                        roughness, F0, albedo.rgb, metallic);
+            continue;
+        }
 
         vec3  L;
         float attenuation = 1.0;

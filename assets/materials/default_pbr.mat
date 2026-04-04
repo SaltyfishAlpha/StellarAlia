@@ -1,0 +1,19 @@
+{
+  "type": "PBR",
+  "version": 1,
+  "params": {
+    "baseColorFactor":   [1.0, 1.0, 1.0, 1.0],
+    "roughnessFactor":   0.1,
+    "metallicFactor":    0.9,
+    "normalScale":       1.0,
+    "occlusionStrength": 1.0,
+    "emissiveFactor":    [0.0, 0.0, 0.0]
+  },
+  "textures": {
+    "t_BaseColor":         "5fe2fd09-f465-435c-abdf-b25066db1ccf",
+    "t_Normal":            "bbf1b547-3330-4dd6-95d5-7e22f67f8265",
+    "t_MetallicRoughness": "6752a4f5-098e-41cc-ac04-9e251bfff65f",
+    "t_Occlusion":         "",
+    "t_Emissive":          ""
+  }
+}

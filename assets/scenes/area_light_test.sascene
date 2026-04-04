@@ -1,0 +1,222 @@
+{
+  "name": "AreaLightTest",
+  "version": 1,
+  "entities": [
+    {
+      "id": 0,
+      "parent": -1,
+      "tag": "MainCamera",
+      "activeCamera": true,
+      "camera": { "fovY": 1.0472, "near": 0.1, "far": 500.0 },
+      "transform": {
+        "position": [0.0, 3.0, 8.0],
+        "rotation": [0.989, -0.151, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      }
+    },
+    {
+      "id": 1,
+      "parent": -1,
+      "tag": "GroundPlane",
+      "staticMesh": {
+        "mesh": "c0be0000-0000-4000-0000-000000000002",
+        "materials": [],
+        "castShadow": false,
+        "receiveShadow": true
+      },
+      "pbrSurface": {
+        "baseColor": [0.4, 0.4, 0.4, 1.0],
+        "roughness": 0.9,
+        "metallic": 0.0
+      },
+      "transform": {
+        "position": [0.0, -0.01, 0.0],
+        "rotation": [1.0, 0.0, 0.0, 0.0],
+        "scale": [10.0, 1.0, 8.0]
+      },
+      "staticGeometry": true
+    },
+    {
+      "id": 2,
+      "parent": -1,
+      "tag": "CubeGray",
+      "staticMesh": {
+        "mesh": "c0be0000-0000-4000-0000-000000000001",
+        "materials": [],
+        "castShadow": true,
+        "receiveShadow": true
+      },
+      "pbrSurface": {
+        "baseColor": [0.2, 0.2, 0.2, 1.0],
+        "roughness": 0.7,
+        "metallic": 0.0
+      },
+      "transform": {
+        "position": [-3.0, 0.5, 0.0],
+        "rotation": [1.0, 0.0, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      }
+    },
+    {
+      "id": 3,
+      "parent": -1,
+      "tag": "CubeBlue",
+      "staticMesh": {
+        "mesh": "c0be0000-0000-4000-0000-000000000001",
+        "materials": [],
+        "castShadow": true,
+        "receiveShadow": true
+      },
+      "pbrSurface": {
+        "baseColor": [0.15, 0.35, 0.85, 1.0],
+        "roughness": 0.25,
+        "metallic": 0.85
+      },
+      "transform": {
+        "position": [0.0, 0.5, 0.0],
+        "rotation": [1.0, 0.0, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      }
+    },
+    {
+      "id": 4,
+      "parent": -1,
+      "tag": "CubeEmissive",
+      "staticMesh": {
+        "mesh": "c0be0000-0000-4000-0000-000000000001",
+        "materials": [],
+        "castShadow": true,
+        "receiveShadow": true
+      },
+      "pbrSurface": {
+        "baseColor": [0.15, 0.15, 0.3, 1.0],
+        "roughness": 0.9,
+        "metallic": 0.0
+      },
+      "materialParams": {
+        "scalars": {
+          "emissiveFactor": [7.5, 4.75, 0.4]
+        },
+        "textures": {}
+      },
+      "transform": {
+        "position": [3.0, 0.5, 0.0],
+        "rotation": [1.0, 0.0, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      }
+    },
+    {
+      "id": 5,
+      "parent": -1,
+      "tag": "PointBetween",
+      "pointLight": {
+        "color": [1.0, 0.0, 0.0],
+        "intensity": 4.0,
+        "range": 7.0
+      },
+      "transform": {
+        "position": [-1.5, 1.5, 1.5],
+        "rotation": [1.0, 0.0, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      }
+    },
+    {
+      "id": 6,
+      "parent": -1,
+      "tag": "Sun",
+      "directionalLight": {
+        "color": [1.0, 0.95, 0.8],
+        "intensity": 0.4,
+        "castShadow": true
+      },
+      "transform": {
+        "position": [0.0, 0.0, 0.0],
+        "rotation": [0.707, -0.5, -0.5, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      }
+    },
+    {
+      "id": 7,
+      "parent": -1,
+      "tag": "SpotTop",
+      "spotLight": {
+        "color": [0.0, 1.0, 0.0],
+        "intensity": 15.0,
+        "range": 8.0,
+        "innerAngle": 0.26,
+        "outerAngle": 0.52
+      },
+      "transform": {
+        "position": [0.0, 5.0, 0.0],
+        "rotation": [0.707, -0.707, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      }
+    },
+    {
+      "id": 8,
+      "parent": -1,
+      "tag": "AreaLeft",
+      "areaLight": {
+        "color": [1.0, 0.55, 0.1],
+        "intensity": 8.0,
+        "width": 2.0,
+        "height": 3.0,
+        "twoSided": false,
+        "emissiveScale": 2.0
+      },
+      "staticMesh": {
+        "mesh": "c0be0000-0000-4000-0000-000000000002",
+        "materials": [],
+        "castShadow": false,
+        "receiveShadow": false
+      },
+      "pbrSurface": {
+        "baseColor": [0.0, 0.0, 0.0, 1.0],
+        "roughness": 1.0,
+        "metallic": 0.0
+      },
+      "materialParams": {
+        "scalars": { "emissiveFactor": [2.0, 1.1, 0.2] },
+        "textures": {}
+      },
+      "transform": {
+        "position": [-6.0, 2.0, 0.0],
+        "rotation": [0.707, 0.0, 0.0, -0.707],
+        "scale": [2.0, 0.05, 3.0]
+      }
+    },
+    {
+      "id": 9,
+      "parent": -1,
+      "tag": "AreaRight",
+      "areaLight": {
+        "color": [0.2, 0.55, 1.0],
+        "intensity": 8.0,
+        "width": 2.0,
+        "height": 3.0,
+        "twoSided": false,
+        "emissiveScale": 2.0
+      },
+      "staticMesh": {
+        "mesh": "c0be0000-0000-4000-0000-000000000002",
+        "materials": [],
+        "castShadow": false,
+        "receiveShadow": false
+      },
+      "pbrSurface": {
+        "baseColor": [0.0, 0.0, 0.0, 1.0],
+        "roughness": 1.0,
+        "metallic": 0.0
+      },
+      "materialParams": {
+        "scalars": { "emissiveFactor": [0.5, 1.2, 2.5] },
+        "textures": {}
+      },
+      "transform": {
+        "position": [6.0, 2.0, 0.0],
+        "rotation": [0.707, 0.0, 0.0, 0.707],
+        "scale": [2.0, 0.05, 3.0]
+      }
+    }
+  ]
+}

@@ -54,10 +54,27 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
         bd.name    = "t_SkyboxMap";
         refl.bindings.push_back(bd);
     }
+    {
+        RHI::ShaderBindingDesc bd;
+        bd.set     = 0; bd.binding = 5;
+        bd.type    = RHI::RHIDescriptorType::Texture2D;
+        bd.stages  = RHI::RHIShaderStage::Fragment;
+        bd.name    = "t_LtcMat";
+        refl.bindings.push_back(bd);
+    }
+    {
+        RHI::ShaderBindingDesc bd;
+        bd.set     = 0; bd.binding = 6;
+        bd.type    = RHI::RHIDescriptorType::Texture2D;
+        bd.stages  = RHI::RHIShaderStage::Fragment;
+        bd.name    = "t_LtcAmp";
+        refl.bindings.push_back(bd);
+    }
 
     m_layout = device->CreateDescriptorSetLayout(refl, 0);
 
-    // Placeholder 1×1 white texture for binding=2 (BRDF LUT, sampler2D).
+    // Placeholder 1×1 BLACK texture for binding=2 (BRDF LUT, sampler2D).
+    // Black → brdfSS=(0,0) → iblSpecular=0 when no IBL is loaded.
     {
         RHI::RHITextureDesc td{};
         td.width = td.height = 1;
@@ -65,12 +82,12 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
         td.usage     = RHI::RHITextureUsage::Sampled;
         td.debugName = "IBLPlaceholder";
         m_iblPlaceholder = device->CreateTexture(td);
-        const uint32_t white = 0xFFFFFFFFu;
-        device->UploadTextureData(m_iblPlaceholder, &white, 4);
+        const uint32_t black = 0x00000000u;
+        device->UploadTextureData(m_iblPlaceholder, &black, 4);
     }
 
-    // Placeholder 1×1 white cubemap for bindings 3/4 (samplerCube).
-    // Provides a valid cube image view until SetIBLTextures() is called.
+    // Placeholder 1×1 BLACK cubemap for bindings 3/4 (samplerCube).
+    // Black → prefilteredColor=(0,0,0) → iblSpecular=0 when no IBL is loaded.
     {
         RHI::RHITextureDesc td{};
         td.width = td.height = 1;
@@ -79,12 +96,8 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
         td.usage     = RHI::RHITextureUsage::Sampled;
         td.debugName = "IBLCubePlaceholder";
         m_iblCubePlaceholder = device->CreateTexture(td);
-        // 6 faces × 1×1 × RGBA8 = 24 bytes of white
-        const uint8_t white6[24] = {
-            0xFF,0xFF,0xFF,0xFF, 0xFF,0xFF,0xFF,0xFF, 0xFF,0xFF,0xFF,0xFF,
-            0xFF,0xFF,0xFF,0xFF, 0xFF,0xFF,0xFF,0xFF, 0xFF,0xFF,0xFF,0xFF
-        };
-        device->UploadTextureData(m_iblCubePlaceholder, white6, sizeof(white6));
+        const uint8_t black6[24] = {};   // zero-init = black for all 6 faces
+        device->UploadTextureData(m_iblCubePlaceholder, black6, sizeof(black6));
     }
 
     for (uint32_t i = 0; i < MAX_FRAMES; ++i) {
@@ -113,6 +126,8 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
         device->WriteDescriptorTexture(m_descSets[i], 2, m_iblPlaceholder);      // brdfLut (2D)
         device->WriteDescriptorTexture(m_descSets[i], 3, m_iblCubePlaceholder); // prefilteredEnv (cube)
         device->WriteDescriptorTexture(m_descSets[i], 4, m_iblCubePlaceholder); // skyboxMap (cube)
+        device->WriteDescriptorTexture(m_descSets[i], 5, m_iblPlaceholder);     // t_LtcMat (2D)
+        device->WriteDescriptorTexture(m_descSets[i], 6, m_iblPlaceholder);     // t_LtcAmp (2D)
     }
 
     SA_LOG_INFO("FrameUniformsBuffer: initialized ({} frames)", MAX_FRAMES);
@@ -133,10 +148,25 @@ void FrameUniformsBuffer::Shutdown() {
 void FrameUniformsBuffer::SetIBLTextures(RHI::RHITextureHandle brdfLut,
                                           RHI::RHITextureHandle prefilteredEnv,
                                           RHI::RHITextureHandle skyboxMap) {
+    // Bindings 3 and 4 are samplerCube — fall back to the cube placeholder if
+    // the caller did not supply a valid cubemap (e.g. cache miss on first run).
+    const auto safeCube2D = brdfLut.IsValid()        ? brdfLut        : m_iblPlaceholder;
+    const auto safeCube3  = prefilteredEnv.IsValid() ? prefilteredEnv : m_iblCubePlaceholder;
+    const auto safeCube4  = skyboxMap.IsValid()      ? skyboxMap      : m_iblCubePlaceholder;
     for (uint32_t i = 0; i < MAX_FRAMES; ++i) {
-        m_device->WriteDescriptorTexture(m_descSets[i], 2, brdfLut);
-        m_device->WriteDescriptorTexture(m_descSets[i], 3, prefilteredEnv);
-        m_device->WriteDescriptorTexture(m_descSets[i], 4, skyboxMap);
+        m_device->WriteDescriptorTexture(m_descSets[i], 2, safeCube2D);
+        m_device->WriteDescriptorTexture(m_descSets[i], 3, safeCube3);
+        m_device->WriteDescriptorTexture(m_descSets[i], 4, safeCube4);
+    }
+}
+
+void FrameUniformsBuffer::SetLtcTextures(RHI::RHITextureHandle ltcMat,
+                                          RHI::RHITextureHandle ltcAmp) {
+    const auto safeMat = ltcMat.IsValid() ? ltcMat : m_iblPlaceholder;
+    const auto safeAmp = ltcAmp.IsValid() ? ltcAmp : m_iblPlaceholder;
+    for (uint32_t i = 0; i < MAX_FRAMES; ++i) {
+        m_device->WriteDescriptorTexture(m_descSets[i], 5, safeMat);
+        m_device->WriteDescriptorTexture(m_descSets[i], 6, safeAmp);
     }
 }
 

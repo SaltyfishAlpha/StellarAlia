@@ -87,16 +87,25 @@ function(compile_shader shader_file output_dir)
     endif()
 
     set(_spv "${output_dir}/${_name}.${_stage}.spv")
+    set(_dep "${output_dir}/${_name}.${_stage}.d")
     file(MAKE_DIRECTORY "${output_dir}")
 
+    # glslc -MD -MF writes a Makefile-style dependency file that lists all
+    # #included .glsl files.  CMake's DEPFILE consumes it so that modifying
+    # any included header (e.g. frame_uniforms.glsl) triggers recompilation.
+    # Requires CMake ≥ 3.20 (Ninja) / 3.21 (Makefile generators).
     add_custom_command(
         OUTPUT  "${_spv}"
         COMMAND "${GLSLC_EXECUTABLE}"
                 -fshader-stage=${_stage}
                 -I${CMAKE_SOURCE_DIR}/assets/shaders/common
+                -I${CMAKE_SOURCE_DIR}/assets/shaders/builtin
+                -I${CMAKE_BINARY_DIR}/generated/shaders
+                -MD -MF "${_dep}"
                 "${CMAKE_SOURCE_DIR}/${shader_file}"
                 -o "${_spv}"
         DEPENDS "${CMAKE_SOURCE_DIR}/${shader_file}"
+        DEPFILE "${_dep}"
         COMMENT "Compiling ${shader_file}"
         VERBATIM
     )

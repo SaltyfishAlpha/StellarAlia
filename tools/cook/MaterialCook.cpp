@@ -71,4 +71,30 @@ bool CookMaterial(const Resource::MaterialData& mat,
     return f.good();
 }
 
+// ─── CookStandaloneMaterial ───────────────────────────────────────────────────
+
+bool CookStandaloneMaterial(const fs::path& sourcePath,
+                             const AssetID&  id,
+                             const fs::path& outputDir,
+                             bool            force) {
+    const fs::path outPath = outputDir / (id.ToString() + ".samat");
+
+    if (!force && fs::exists(outPath)) return true;   // incremental skip
+
+    std::error_code ec;
+    fs::copy_file(sourcePath, outPath,
+                  force ? fs::copy_options::overwrite_existing
+                        : fs::copy_options::none,
+                  ec);
+    if (ec) {
+        std::cerr << "[Cook] FAIL  " << sourcePath.filename()
+                  << "  " << ec.message() << '\n';
+        return false;
+    }
+
+    std::cout << "[Cook] MAT   " << sourcePath.filename()
+              << "  →  " << outPath.filename() << '\n';
+    return true;
+}
+
 } // namespace StellarAlia::Cook

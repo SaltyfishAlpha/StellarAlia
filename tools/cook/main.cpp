@@ -1,6 +1,7 @@
 #include "ImportScanner.hpp"
 #include "TextureCook.hpp"
 #include "MeshCook.hpp"
+#include "MaterialCook.hpp"
 
 #include <filesystem>
 #include <iostream>
@@ -91,6 +92,9 @@ int main(int argc, char** argv) {
                 ok = CookTexture(entry, opts.outputDir, opts.force);
             } else if (entry.meta.type == "Mesh") {
                 ok = CookMesh(entry, opts.outputDir, opts.force);
+            } else if (entry.meta.type == "Material") {
+                ok = CookStandaloneMaterial(entry.sourcePath, entry.meta.uuid,
+                                            opts.outputDir, opts.force);
             } else {
                 std::cout << "[Cook] SKIP (unsupported type: "
                           << entry.meta.type << ")  "

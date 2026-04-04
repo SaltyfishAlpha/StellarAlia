@@ -65,7 +65,8 @@ RHI::RHIPipelineHandle MaterialType::GetOrCreatePipeline(RHI::IRHIDevice*     de
                                        defaultCullMode,
                                        defaultBlendMode,
                                        defaultDepthTest,
-                                       defaultDepthWrite);
+                                       defaultDepthWrite,
+                                       noVertexInput);
 }
 
 } // namespace StellarAlia

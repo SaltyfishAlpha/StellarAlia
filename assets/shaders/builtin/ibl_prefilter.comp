@@ -28,9 +28,6 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 const float PI        = 3.14159265359;
 const uint  N_SAMPLES = 1024u;
-// Bias mip selection toward blurrier levels — suppresses remaining fireflies
-// at the cost of a slight loss of sharpness on mip 0 (roughness=0).
-const float kMipBias  = 1.0;
 
 float RadicalInverse(uint bits) {
     bits = (bits << 16u) | (bits >> 16u);
@@ -111,8 +108,8 @@ void main() {
 
             // Solid angle of this sample — select mip so we read a pre-blurred
             // texel rather than a single bright spike (eliminates fireflies)
-            float saSample = 1.0 / (float(N_SAMPLES) * pdf);
-            float mipLevel = max(0.0, 0.5 * log2(saSample / saTexel) + kMipBias);
+            float saSample = 1.0 / (float(N_SAMPLES) * pdf + 0.0001);
+            float mipLevel = pc.roughness == 0.0 ? 0.0 : max(0.0, 0.5 * log2(saSample / saTexel));
 
             prefilteredColor += textureLod(u_HdrCube, L, mipLevel).rgb * NdotL;
             totalWeight      += NdotL;

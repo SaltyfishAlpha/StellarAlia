@@ -29,8 +29,14 @@
 //       "pointLight":        { "color": [1,1,1], "intensity": 1.0, "range": 10.0 },
 //       "spotLight":         { "color": [1,1,1], "intensity": 1.0, "range": 10.0,
 //                              "innerAngle": 0.26, "outerAngle": 0.52 },
+//       "areaLight":         { "color": [1,1,1], "intensity": 8.0,
+//                              "width": 2.0, "height": 3.0, "twoSided": false },
 //       "skybox": { "cubemap": "uuid..." },
 //       "ibl":    { "irradiance": "uuid...", "prefilteredEnv": "uuid...", "brdfLut": "uuid..." },
+//       "pbrSurface":     { "baseColor": [1,1,1,1], "roughness": 0.5, "metallic": 0.0,
+//                           "albedoMap": "uuid...", "normalMap": "uuid..." },
+//       "materialParams": { "scalars": { "baseColorFactor": [1,0.5,0,1] },
+//                           "textures": { "t_BaseColor": "uuid..." } },
 //       "staticGeometry": true
 //     }
 //   ]
@@ -43,6 +49,7 @@
 #include <nlohmann/json.hpp>
 
 #include <fstream>
+#include <type_traits>
 #include <unordered_map>
 
 namespace StellarAlia {
@@ -57,6 +64,11 @@ static json QuatToJson(const glm::quat& q) { return { q.w, q.x, q.y, q.z }; }
 static glm::vec3 JsonToVec3(const json& j) {
     return { j[0].get<float>(), j[1].get<float>(), j[2].get<float>() };
 }
+static glm::vec4 JsonToVec4(const json& j) {
+    return { j[0].get<float>(), j[1].get<float>(),
+             j[2].get<float>(), j[3].get<float>() };
+}
+static json Vec4ToJson(const glm::vec4& v) { return { v.x, v.y, v.z, v.w }; }
 static glm::vec3 JsonToVec3Color(const json& j) { return JsonToVec3(j); }
 static glm::quat JsonToQuat(const json& j) {
     return { j[0].get<float>(), j[1].get<float>(),
@@ -169,6 +181,52 @@ bool SceneSerializer::SaveToFile(const Scene& scene,
                 {"innerAngle",  l->innerAngle},
                 {"outerAngle",  l->outerAngle}
             };
+        }
+        if (const auto* l = reg.try_get<AreaLightComponent>(e)) {
+            ej["areaLight"] = {
+                {"color",         Vec3ToJson(l->color)},
+                {"intensity",     l->intensity},
+                {"width",         l->size.x},
+                {"height",        l->size.y},
+                {"twoSided",      l->twoSided},
+                {"emissiveScale", l->emissiveScale}
+            };
+        }
+
+        // PBRSurfaceComponent
+        if (const auto* pb = reg.try_get<PBRSurfaceComponent>(e)) {
+            json pbj;
+            pbj["baseColor"] = Vec4ToJson(pb->baseColor);
+            pbj["roughness"] = pb->roughness;
+            pbj["metallic"]  = pb->metallic;
+            if (pb->albedoMap.IsValid()) pbj["albedoMap"] = AssetToStr(pb->albedoMap);
+            if (pb->normalMap.IsValid()) pbj["normalMap"] = AssetToStr(pb->normalMap);
+            ej["pbrSurface"] = std::move(pbj);
+        }
+
+        // MaterialParamComponent
+        if (const auto* mp = reg.try_get<MaterialParamComponent>(e)) {
+            json mpj;
+            json scalarsJ = json::object();
+            for (const auto& [name, val] : mp->scalars) {
+                std::visit([&](const auto& v) {
+                    using T = std::decay_t<decltype(v)>;
+                    if constexpr (std::is_same_v<T, float>)
+                        scalarsJ[name] = v;
+                    else if constexpr (std::is_same_v<T, glm::vec2>)
+                        scalarsJ[name] = { v.x, v.y };
+                    else if constexpr (std::is_same_v<T, glm::vec3>)
+                        scalarsJ[name] = { v.x, v.y, v.z };
+                    else if constexpr (std::is_same_v<T, glm::vec4>)
+                        scalarsJ[name] = { v.x, v.y, v.z, v.w };
+                }, val);
+            }
+            mpj["scalars"] = std::move(scalarsJ);
+            json texturesJ = json::object();
+            for (const auto& [name, id] : mp->textures)
+                if (id.IsValid()) texturesJ[name] = AssetToStr(id);
+            mpj["textures"] = std::move(texturesJ);
+            ej["materialParams"] = std::move(mpj);
         }
 
         if (reg.all_of<StaticGeometryTag>(e))
@@ -302,6 +360,54 @@ bool SceneSerializer::LoadFromFile(Scene& scene,
             l.innerAngle = lj.value("innerAngle", l.innerAngle);
             l.outerAngle = lj.value("outerAngle", l.outerAngle);
             reg.emplace<SpotLightComponent>(e, l);
+        }
+        if (ej.contains("areaLight")) {
+            const auto& lj = ej["areaLight"];
+            AreaLightComponent l;
+            if (lj.contains("color")) l.color = JsonToVec3Color(lj["color"]);
+            l.intensity      = lj.value("intensity",     l.intensity);
+            l.size.x         = lj.value("width",         l.size.x);
+            l.size.y         = lj.value("height",        l.size.y);
+            l.twoSided       = lj.value("twoSided",      l.twoSided);
+            l.emissiveScale  = lj.value("emissiveScale", l.emissiveScale);
+            reg.emplace<AreaLightComponent>(e, l);
+        }
+
+        // PBRSurfaceComponent
+        if (ej.contains("pbrSurface")) {
+            const auto& pbj = ej["pbrSurface"];
+            PBRSurfaceComponent pb;
+            if (pbj.contains("baseColor")) pb.baseColor = JsonToVec4(pbj["baseColor"]);
+            pb.roughness = pbj.value("roughness", pb.roughness);
+            pb.metallic  = pbj.value("metallic",  pb.metallic);
+            if (pbj.contains("albedoMap")) pb.albedoMap = StrToAsset(pbj["albedoMap"].get<std::string>());
+            if (pbj.contains("normalMap")) pb.normalMap = StrToAsset(pbj["normalMap"].get<std::string>());
+            reg.emplace<PBRSurfaceComponent>(e, pb);
+        }
+
+        // MaterialParamComponent
+        if (ej.contains("materialParams")) {
+            const auto& mpj = ej["materialParams"];
+            MaterialParamComponent mp;
+            if (mpj.contains("scalars")) {
+                for (const auto& [name, val] : mpj["scalars"].items()) {
+                    if (val.is_number())
+                        mp.scalars[name] = val.get<float>();
+                    else if (val.is_array()) {
+                        const size_t n = val.size();
+                        if      (n == 2) mp.scalars[name] = glm::vec2{val[0].get<float>(), val[1].get<float>()};
+                        else if (n == 3) mp.scalars[name] = JsonToVec3(val);
+                        else if (n == 4) mp.scalars[name] = JsonToVec4(val);
+                    }
+                }
+            }
+            if (mpj.contains("textures")) {
+                for (const auto& [name, val] : mpj["textures"].items()) {
+                    const AssetID id = StrToAsset(val.get<std::string>());
+                    if (id.IsValid()) mp.textures[name] = id;
+                }
+            }
+            reg.emplace<MaterialParamComponent>(e, std::move(mp));
         }
 
         if (ej.value("staticGeometry", false))

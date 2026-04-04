@@ -2,6 +2,8 @@
 
 #include <cstring>
 #include <string>
+#include <unordered_map>
+#include <variant>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -89,42 +91,69 @@ struct SpotLightComponent {
     float     outerAngle = glm::radians(30.f);
 };
 
+// Rectangle area light. Position/orientation from TransformComponent.
+//
+// Axis convention (matches the builtin plane mesh geometry):
+//   local +X  → tangentU  (width  direction of the rectangle)
+//   local +Z  → tangentV  (height direction of the rectangle)
+//   local +Y  → emission normal (light faces in +Y direction)
+//
+// The entity's scale is set to (size.x, panel_thickness, size.y) by SpawnAreaLight
+// so that the accompanying emissive StaticMesh exactly covers the light rectangle.
+//
+// Evaluated via LTC (Linearly Transformed Cosines) in the PBR shader.
+struct AreaLightComponent {
+    glm::vec3 color         = { 1.f, 1.f, 1.f };
+    float     intensity     = 1.f;
+    glm::vec2 size          = { 1.f, 1.f };  // width (X) × height (Z) in world space
+    bool      twoSided      = false;
+    float     emissiveScale = 2.f;            // visible mesh brightness = color × emissiveScale
+};
+
 // ── Material overrides ────────────────────────────────────────────────────────
 //
-// Optional per-entity overrides applied on top of the base .samat asset.
-// The render system resolves StaticMeshComponent::materialSlots → MaterialInstance,
-// then calls MaterialInstance::SetRawParam() for each entry here.
+// Two-tier override system. Both components are optional and independent.
+// The render system clones the base MaterialInstance on first override, then
+// applies whichever components are present. Entities with no override components
+// share the cached instance directly (no clone, no allocation).
 //
-// Values are stored as raw bytes; the size and interpretation come from the
-// ShaderMemberDesc in the merged reflection (same data that built ParamDef).
-// Use SetParam<T> helpers to fill entries in a type-safe way:
+// Tier 1 — PBRSurfaceComponent
+//   Typed fast path for the built-in PBR shader. No string lookups at runtime.
+//   Only set fields that differ from the .samat default; an invalid AssetID means
+//   "keep the texture from the base material".
 //
-//   auto& ov = reg.emplace<MaterialOverrideComponent>(e);
-//   MaterialOverrideComponent::Set(ov.params, "roughnessFactor", 0.1f);
-//
-struct MaterialOverrideComponent {
-    struct Param {
-        std::string          name;
-        std::vector<uint8_t> value;  // raw bytes — sizeof(T) bytes for a given T
-    };
-    std::vector<Param> params;
+struct PBRSurfaceComponent {
+    glm::vec4 baseColor = {1.f, 1.f, 1.f, 1.f};
+    float     roughness = 0.5f;
+    float     metallic  = 0.f;
+    AssetID   albedoMap;   // invalid → keep base material texture
+    AssetID   normalMap;   // invalid → keep base material texture
+};
 
-    // Convenience: upsert a typed value by name.
-    template<typename T>
-    static void Set(std::vector<Param>& params, std::string_view name, const T& v) {
-        for (auto& p : params) {
-            if (p.name == name) {
-                p.value.resize(sizeof(T));
-                std::memcpy(p.value.data(), &v, sizeof(T));
-                return;
-            }
-        }
-        Param p;
-        p.name = std::string(name);
-        p.value.resize(sizeof(T));
-        std::memcpy(p.value.data(), &v, sizeof(T));
-        params.push_back(std::move(p));
-    }
+//
+// Tier 2 — MaterialParamComponent
+//   Generic path for any shader (custom, modified PBR, toon, …).
+//   Parameter names must match the MaterialType's ParamDef / TextureDef names.
+//   Can be combined with PBRSurfaceComponent: PBR fields apply first, then these.
+//
+using ParamValue = std::variant<float, glm::vec2, glm::vec3, glm::vec4>;
+
+struct MaterialParamComponent {
+    std::unordered_map<std::string, ParamValue> scalars;   // name → UBO value
+    std::unordered_map<std::string, AssetID>    textures;  // name → sampler AssetID
+};
+
+// ── Animation ─────────────────────────────────────────────────────────────────
+//
+// AnimatedTransformComponent — per-frame animated local pose.
+//   Written each frame by the animation system; never serialized.
+//   UpdateTransforms uses this in preference to TransformComponent when present.
+//   Entities without animation carry no overhead (component not attached).
+//
+struct AnimatedTransformComponent {
+    glm::vec3 position = { 0.f, 0.f, 0.f };
+    glm::quat rotation = { 1.f, 0.f, 0.f, 0.f };
+    glm::vec3 scale    = { 1.f, 1.f, 1.f };
 };
 
 // ── Marker tags ───────────────────────────────────────────────────────────────

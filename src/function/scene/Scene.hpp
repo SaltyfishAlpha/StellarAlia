@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
@@ -82,9 +83,9 @@ public:
 
     // ── Systems ───────────────────────────────────────────────────────────
 
-    // Recomputes WorldTransformComponent for every entity whose local
-    // transform has been marked dirty (dirty = true on TransformComponent write).
-    // Call once per frame before rendering.
+    // Recomputes WorldTransformComponent for every dirty entity.
+    // Rebuilds the topological traversal order (BFS from roots) whenever the
+    // hierarchy has changed since the last call.  Call once per frame.
     void UpdateTransforms();
 
     // Mark an entity's world transform (and all descendants) as dirty.
@@ -96,7 +97,12 @@ private:
     WorldSettings  m_worldSettings;
     entt::registry m_registry;
 
-    void PropagateTransform(entt::entity entity, const glm::mat4& parentWorld);
+    // Cached BFS traversal order — parents always appear before their children.
+    // Rebuilt lazily whenever m_hierarchyDirty is set.
+    std::vector<entt::entity> m_sortedEntities;
+    bool                      m_hierarchyDirty = true;
+
+    void RebuildSortedOrder();
     void MarkDirtyRecursive(entt::entity entity);
 };
 

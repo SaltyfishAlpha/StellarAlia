@@ -14,6 +14,13 @@
 namespace StellarAlia::Resource {
 
 // ─────────────────────────────────────────────────────────────────────────────
+// BuiltinTexture — well-known procedural textures created at Init time.
+// ─────────────────────────────────────────────────────────────────────────────
+enum class BuiltinTexture {
+    White1x1,   // 1×1 RGBA8 0xFFFFFFFF — default sampler slot fill
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GPUMesh — GPU-side buffers for a loaded mesh.
 // Holds vertex buffer, index buffer, and per-submesh draw metadata.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -76,11 +83,26 @@ public:
     // Returns nullopt if the asset is not found or the file is malformed.
     [[nodiscard]] std::optional<std::array<glm::vec4, 9>> LoadSH9Coeffs(const AssetID& id);
 
+    // Load an arbitrary LDR image (PNG / JPG / TGA / BMP) directly from a filesystem path.
+    // Uses canonical path as cache key — loading the same file twice returns the cached handle.
+    // The handle is owned by ResourceManager and destroyed in Shutdown().
+    // Returns an invalid handle on failure (error is logged).
+    [[nodiscard]] RHI::RHITextureHandle LoadTextureFromFile(const std::filesystem::path& path);
+
+    // Return a handle to a procedural built-in texture.
+    // The handle is owned by ResourceManager; do not destroy it.
+    [[nodiscard]] RHI::RHITextureHandle GetBuiltin(BuiltinTexture which) const;
+
 private:
     RHI::IRHIDevice*   m_device = nullptr;
 
+    RHI::RHITextureHandle m_white1x1;   // created in Init, destroyed in Shutdown
+
     std::unordered_map<uint64_t, RHI::RHITextureHandle> m_textures;
     std::unordered_map<uint64_t, GPUMesh>               m_meshes;
+    // File-path-keyed textures loaded via LoadTextureFromFile().
+    // Key: std::hash of the canonical path string.
+    std::unordered_map<std::size_t, RHI::RHITextureHandle> m_fileTextures;
 
     // Simple hash: XOR the two halves of the UUID (sufficient for cache key).
     static uint64_t HashID(const AssetID& id) { return id.hi ^ id.lo; }

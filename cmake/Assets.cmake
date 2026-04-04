@@ -20,6 +20,19 @@ function(sa_compile_builtin_shaders)
         return()
     endif()
 
+    # Generated GLSL files (written at configure time by generate_shading_dispatch).
+    # Listed in DEPENDS so any shader that includes them recompiles after a CMake re-run
+    # that adds or removes an evaluator.
+    set(_gen_glsl
+        "${CMAKE_BINARY_DIR}/generated/shaders/shading_dispatch.glsl"
+        "${CMAKE_BINARY_DIR}/generated/shaders/shading_model_ids.glsl"
+    )
+
+    # Build-time evaluator copies (outputs of add_custom_commands created by
+    # generate_shading_dispatch).  Editing an existing *.lighting.glsl triggers
+    # these copies and therefore the dependent SPV recompilation — no CMake re-run needed.
+    get_property(_eval_copies GLOBAL PROPERTY SHADING_EVALUATOR_COPIES)
+
     file(GLOB _shaders
         "${SA_BUILTIN_SHADER_SRC}/*.vert"
         "${SA_BUILTIN_SHADER_SRC}/*.frag"
@@ -34,9 +47,9 @@ function(sa_compile_builtin_shaders)
 
     set(_spv_outputs "")
     foreach(_src ${_shaders})
-        get_filename_component(_fname "${_src}" NAME)          # e.g.  pbr.vert
-        get_filename_component(_stem  "${_src}" NAME_WE)       # e.g.  pbr
-        get_filename_component(_ext   "${_src}" EXT)           # e.g.  .vert
+        get_filename_component(_fname "${_src}" NAME)           # e.g.  pbr.vert
+        get_filename_component(_stem  "${_src}" NAME_WLE)      # e.g.  pbr  (also: simple_albedo.gbuffer)
+        get_filename_component(_ext   "${_src}" LAST_EXT)      # e.g.  .vert (last only, not longest)
 
         if(_ext STREQUAL ".vert")
             set(_stage vert)
@@ -55,11 +68,15 @@ function(sa_compile_builtin_shaders)
             COMMAND "${GLSLC_EXECUTABLE}"
                     -fshader-stage=${_stage}
                     -I${CMAKE_SOURCE_DIR}/assets/shaders/common
+                    -I${CMAKE_SOURCE_DIR}/assets/shaders/builtin
+                    -I${CMAKE_BINARY_DIR}/generated/shaders
                     "${_src}"
                     -o "${_spv}"
             DEPENDS "${_src}"
                     "${CMAKE_SOURCE_DIR}/assets/shaders/common/frame_uniforms.glsl"
                     "${CMAKE_SOURCE_DIR}/assets/shaders/common/pbr.glsl"
+                    ${_gen_glsl}
+                    ${_eval_copies}
             COMMENT "Compiling builtin shader: ${_fname}"
             VERBATIM
         )

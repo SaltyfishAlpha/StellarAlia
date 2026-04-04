@@ -19,8 +19,9 @@ vec3 ACESFilmic(vec3 x) {
 }
 
 void main() {
-    vec3 hdr     = texture(t_HDR, v_UV).rgb * pc.exposure;
+    vec3 hdr        = texture(t_HDR, v_UV).rgb * pc.exposure;
     vec3 tonemapped = ACESFilmic(hdr);
-    // Gamma correction
-    out_Color = vec4(pow(tonemapped, vec3(1.0 / pc.gamma)), 1.0);
+    // No manual gamma: swapchain is VK_FORMAT_B8G8R8A8_SRGB,
+    // the driver applies linear→sRGB automatically.
+    out_Color = vec4(tonemapped, 1.0);
 }

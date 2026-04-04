@@ -18,6 +18,9 @@ std::string AssetTypeFromExtension(const fs::path& ext) {
     if (e == ".gltf" || e == ".glb")
         return "Mesh";
 
+    if (e == ".mat")
+        return "Material";
+
     return {};
 }
 

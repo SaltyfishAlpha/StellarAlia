@@ -63,9 +63,11 @@ public:
     void Bind(RHI::IRHICommandList* cmd);
 
     [[nodiscard]] const MaterialType* GetType() const { return m_type; }
+    [[nodiscard]]       MaterialType* GetType()       { return m_type; }
 
 private:
     friend class MaterialType;
+    friend class MaterialManager;
 
     MaterialType*                  m_type   = nullptr;
     RHI::IRHIDevice*               m_device = nullptr;

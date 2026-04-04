@@ -62,7 +62,19 @@ endif()
 include(cmake/CompileShaders.cmake)
 include(cmake/Assets.cmake)
 include(cmake/CookAssets.cmake)
+include(cmake/GenerateShadingDispatch.cmake)
 set_property(GLOBAL PROPERTY SHADER_OUTPUTS "")
+set_property(GLOBAL PROPERTY SHADING_EVALUATORS "")
+
+# Auto-register builtin *.lighting.glsl evaluators.
+# Custom evaluators in examples/ or other subdirectories call
+# register_lighting_evaluator() from their own CMakeLists.txt.
+file(GLOB _builtin_evals CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/assets/shaders/builtin/*.lighting.glsl"
+)
+foreach(_eval ${_builtin_evals})
+    register_lighting_evaluator("${_eval}")
+endforeach()
 
 # Add third-party dependencies
 add_subdirectory(third_party)
@@ -72,9 +84,6 @@ add_subdirectory(src)
 
 # Add cook tool (must come before setup_cook and cook-dependent examples)
 add_subdirectory(tools/cook)
-
-# Add IBL bake tool (library + CLI; must come before ibl_demo)
-# add_subdirectory(tools/ibl_bake)
 
 # Add shader reflection tool (must come before setup_assets so the .refl
 # add_custom_commands can reference $<TARGET_FILE:ShaderReflectTool>)
@@ -96,6 +105,15 @@ add_subdirectory(examples/skybox_demo)
 add_subdirectory(examples/scene_demo)
 add_subdirectory(examples/ibl_demo)
 add_subdirectory(examples/compute_demo)
+add_subdirectory(examples/material_test_demo)
+add_subdirectory(examples/area_light_demo)
+add_subdirectory(examples/hierarchy_demo)
+add_subdirectory(examples/scene_renderer_demo)
+
+# Generate shading dispatch GLSL after all add_subdirectory() calls so every
+# register_lighting_evaluator() call (from any subdirectory) is collected first.
+# Re-run CMake to pick up newly added *.lighting.glsl files.
+generate_shading_dispatch("${CMAKE_BINARY_DIR}/generated/shaders")
 
 # Tool layer source files
 file(GLOB_RECURSE TOOL_SOURCES

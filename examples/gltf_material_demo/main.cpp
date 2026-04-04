@@ -338,7 +338,7 @@ int main() {
 
     // ── MaterialManager + PBR type ────────────────────────────────────────────
     MaterialManager matMgr;
-    matMgr.Init(device.get(), whiteTex);
+    matMgr.Init(device.get(), &resMgr);
 
     auto pbrType = BuildPbrType(device.get(), frameUniforms.GetLayout(),
                                 vertSpv, vertRefl, fragSpv, fragRefl);
@@ -519,11 +519,11 @@ int main() {
         fu.deltaTime   = 0.016f;
 
         LightUniforms lu{};
-        lu.direction        = glm::normalize(glm::vec3(1.f, -1.f, 0.5f));
-        lu.intensity        = 3.f;
-        lu.color            = glm::vec3(1.f, 0.98f, 0.95f);
-        lu.ambientColor     = glm::vec3(0.05f, 0.05f, 0.08f);
-        lu.ambientIntensity = 1.f;
+        lu.lights[0].direction = glm::normalize(glm::vec3(1.f, -1.f, 0.5f));
+        lu.lights[0].intensity = 3.f;
+        lu.lights[0].color     = glm::vec3(1.f, 0.98f, 0.95f);
+        lu.lights[0].type      = 0;
+        lu.lightCount          = 1;
 
         frameUniforms.Upload(fi, fu, lu);
 

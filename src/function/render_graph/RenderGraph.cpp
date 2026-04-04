@@ -90,24 +90,31 @@ void RenderGraph::Compile() {
     const uint32_t passCount = static_cast<uint32_t>(m_passes.size());
     if (passCount == 0) return;
 
-    // For each texture, record which pass (index) last writes it (-1 = none).
-    std::vector<int32_t> textureWriter(m_textures.size(), -1);
-    for (uint32_t p = 0; p < passCount; p++)
-        for (auto& we : m_passes[p].writes)
-            if (we.handle.IsValid())
-                textureWriter[we.handle.index] = static_cast<int32_t>(p);
-
-    // Build directed edges: for each pass p that reads a texture written by q,
-    // add an edge q → p (p depends on q).
+    // Build directed edges: for each pass p that reads texture t, find the
+    // most recent pass q < p that writes t and add edge q → p.
+    // Using "most recent writer before p" (not "last global writer") avoids
+    // false cycles in ping-pong patterns where two passes alternate writing
+    // the same texture pair (e.g. separable blur: A writes T1, B writes T2,
+    // A reads T2, B reads T1 — global-last-writer would see A→B and B→A).
     std::vector<uint32_t>              inDegree(passCount, 0);
     std::vector<std::vector<uint32_t>> dependents(passCount);
 
     for (uint32_t p = 0; p < passCount; p++) {
         for (auto rgt : m_passes[p].reads) {
             if (!rgt.IsValid()) continue;
-            int32_t writer = textureWriter[rgt.index];
-            if (writer < 0 || static_cast<uint32_t>(writer) == p) continue;
-            dependents[writer].push_back(p);
+            // Scan backwards to find the most recent writer before p.
+            int32_t writer = -1;
+            for (int32_t q = static_cast<int32_t>(p) - 1; q >= 0; --q) {
+                for (const auto& we : m_passes[q].writes) {
+                    if (we.handle.IsValid() && we.handle.index == rgt.index) {
+                        writer = q;
+                        break;
+                    }
+                }
+                if (writer >= 0) break;
+            }
+            if (writer < 0) continue;
+            dependents[static_cast<uint32_t>(writer)].push_back(p);
             inDegree[p]++;
         }
     }

@@ -9,10 +9,30 @@
 #include "core/asset/AssetID.hpp"
 #include "function/material/MaterialType.hpp"
 #include "function/material/MaterialInstance.hpp"
+#include "platform/rhi/RHITypes.hpp"
 
 namespace StellarAlia::Resource { class ResourceManager; }
+namespace StellarAlia { struct FeatureInitContext; }
 
 namespace StellarAlia {
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MaterialTypeDesc — declarative description for RegisterTypeFromShaders.
+//
+// The feature author specifies only what they care about: shader filenames
+// and render state. Reflection parsing, binding layout, shader compile, and
+// type registration are all handled internally by MaterialManager.
+// ─────────────────────────────────────────────────────────────────────────────
+struct MaterialTypeDesc {
+    std::string        name;
+    std::string        vertShader;               // filename stem, e.g. "pbr" → pbr.vert.spv
+    std::string        fragShader;               // filename stem, e.g. "pbr" → pbr.frag.spv
+    RHI::RHICullMode   cullMode      = RHI::RHICullMode::Back;
+    RHI::RHIBlendMode  blendMode     = RHI::RHIBlendMode::Opaque;
+    bool               depthTest     = true;
+    bool               depthWrite    = true;
+    bool               noVertexInput = false;    // true for fullscreen-triangle passes
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MaterialManager
@@ -22,9 +42,10 @@ namespace StellarAlia {
 // ─────────────────────────────────────────────────────────────────────────────
 class MaterialManager {
 public:
-    // Set the device and a 1×1 white fallback texture used for unset sampler slots.
-    void Init(RHI::IRHIDevice*      device,
-              RHI::RHITextureHandle defaultTexture);
+    // Set the device and resource manager.
+    // The white 1×1 fallback texture is obtained from resMgr as a builtin resource.
+    void Init(RHI::IRHIDevice*                  device,
+              Resource::ResourceManager*         resMgr);
 
     // Destroy all types and instances (pipelines/shaders are owned by the device
     // and destroyed separately; here we unload the ShaderPrograms).
@@ -33,6 +54,11 @@ public:
     // Register a fully configured MaterialType.
     // The manager takes ownership. Returns a raw pointer for immediate use.
     MaterialType* RegisterType(std::unique_ptr<MaterialType> type);
+
+    // Load shaders, parse reflection, build, and register a MaterialType in one call.
+    // Returns false on shader load or compile failure.
+    // This is the preferred path from RenderFeature::OnInit.
+    bool RegisterTypeFromShaders(const MaterialTypeDesc& desc, const FeatureInitContext& ctx);
 
     // Find a registered type by name. Returns nullptr if not found.
     [[nodiscard]] MaterialType* GetType(const std::string& name) const;
@@ -50,6 +76,13 @@ public:
     LoadMaterial(const AssetID& id,
                  const std::filesystem::path& cookCacheDir,
                  Resource::ResourceManager& resMgr);
+
+    // Return an independent copy of src with the same type, parameters, and
+    // textures. The caller owns the returned instance.
+    // Use this when per-entity parameter overrides are needed on top of a shared
+    // cached instance (copy-on-write pattern).
+    [[nodiscard]] std::unique_ptr<MaterialInstance>
+    CloneInstance(const MaterialInstance* src) const;
 
 private:
     static uint64_t HashID(const AssetID& id) { return id.hi ^ id.lo; }

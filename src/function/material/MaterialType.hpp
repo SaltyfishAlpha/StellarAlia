@@ -56,6 +56,7 @@ public:
     RHI::RHIBlendMode defaultBlendMode = RHI::RHIBlendMode::Opaque;
     bool              defaultDepthTest  = true;
     bool              defaultDepthWrite = true;
+    bool              noVertexInput     = false;
 
     // Find a param by name; returns nullptr if not found.
     [[nodiscard]] const ParamDef*  FindParam  (std::string_view name) const noexcept;
@@ -67,9 +68,10 @@ public:
     CreateInstance(RHI::IRHIDevice*     device,
                    RHI::RHITextureHandle defaultTexture);
 
-    // Get (or create) a pipeline for the given attachment config.
-    RHI::RHIPipelineHandle GetOrCreatePipeline(RHI::IRHIDevice*      device,
-                                                const AttachmentKey&  key);
+    // Get (or create) a pipeline using the type's stored default render state.
+    // Use this from RenderFeature::AddPasses — no need to repeat cull/blend/depth flags.
+    RHI::RHIPipelineHandle GetOrCreatePipeline(RHI::IRHIDevice*     device,
+                                                const AttachmentKey& key);
 };
 
 } // namespace StellarAlia

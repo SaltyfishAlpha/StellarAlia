@@ -15,8 +15,10 @@ namespace StellarAlia {
 //   binding=0  FrameData        (UniformBuffer)
 //   binding=1  LightData        (UniformBuffer)
 //   binding=2  t_BrdfLut        (sampler2D — split-sum BRDF LUT)
-//   binding=3  t_IrradianceMap  (sampler2D — precomputed diffuse irradiance equirect)
-//   binding=4  t_PrefilteredEnv (sampler2D — prefiltered specular env equirect, mip chain)
+//   binding=3  t_PrefilteredEnv (samplerCube — GGX prefiltered specular, mip chain)
+//   binding=4  t_SkyboxMap      (samplerCube — full-resolution HDR for skybox)
+//   binding=5  t_LtcMat         (sampler2D 64×64 — LTC inverse-M matrix LUT)
+//   binding=6  t_LtcAmp         (sampler2D 64×64 — LTC amplitude/GGX-norm LUT)
 //
 // Usage per frame:
 //   fub.Upload(frameIndex, frameData, lightData);
@@ -47,6 +49,13 @@ public:
                         RHI::RHITextureHandle prefilteredEnv,
                         RHI::RHITextureHandle skyboxMap);
 
+    // Upload LTC LUT textures (bindings 5 and 6).
+    // Call once after Init(); placeholder 1×1 white is used until then.
+    //   ltcMat — 64×64 RGBA32F inverse-M matrix LUT
+    //   ltcAmp — 64×64 RGBA32F amplitude/GGX-norm LUT
+    void SetLtcTextures(RHI::RHITextureHandle ltcMat,
+                        RHI::RHITextureHandle ltcAmp);
+
     [[nodiscard]] RHI::RHIDescSetHandle    GetDescriptorSet(uint32_t frameIndex) const;
     [[nodiscard]] RHI::RHIDescLayoutHandle GetLayout() const { return m_layout; }
 
@@ -56,7 +65,7 @@ private:
     RHI::RHIBufferHandle     m_frameUBOs[MAX_FRAMES];
     RHI::RHIBufferHandle     m_lightUBOs[MAX_FRAMES];
     RHI::RHIDescSetHandle    m_descSets[MAX_FRAMES];
-    RHI::RHITextureHandle    m_iblPlaceholder;      // 1×1 white 2D, placeholder for binding=2
+    RHI::RHITextureHandle    m_iblPlaceholder;      // 1×1 white 2D, placeholder for bindings 2/5/6
     RHI::RHITextureHandle    m_iblCubePlaceholder;  // 1×1 white cubemap, placeholder for bindings 3/4
 };
 

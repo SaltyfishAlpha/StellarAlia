@@ -1,0 +1,25 @@
+{
+  "asset": {
+    "version": "2.0",
+    "generator": "StellarAlia builtin"
+  },
+  "scenes": [{"nodes": [0]}],
+  "scene": 0,
+  "nodes": [{"mesh": 0, "name": "Plane"}],
+  "meshes": [{"name": "Plane", "primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1, "TANGENT": 2, "TEXCOORD_0": 3}, "indices": 4, "mode": 4}]}],
+  "accessors": [
+    {"bufferView": 0, "byteOffset": 0, "componentType": 5126, "count": 4, "type": "VEC3", "min": [-0.5, 0.0, -0.5], "max": [0.5, 0.0, 0.5]},
+    {"bufferView": 1, "byteOffset": 0, "componentType": 5126, "count": 4, "type": "VEC3"},
+    {"bufferView": 2, "byteOffset": 0, "componentType": 5126, "count": 4, "type": "VEC4"},
+    {"bufferView": 3, "byteOffset": 0, "componentType": 5126, "count": 4, "type": "VEC2"},
+    {"bufferView": 4, "byteOffset": 0, "componentType": 5125, "count": 6, "type": "SCALAR"}
+  ],
+  "bufferViews": [
+    {"buffer": 0, "byteOffset": 0,   "byteLength": 48},
+    {"buffer": 0, "byteOffset": 48,  "byteLength": 48},
+    {"buffer": 0, "byteOffset": 96,  "byteLength": 64},
+    {"buffer": 0, "byteOffset": 160, "byteLength": 32},
+    {"buffer": 0, "byteOffset": 192, "byteLength": 24}
+  ],
+  "buffers": [{"uri": "data:application/octet-stream;base64,AAAAvwAAAAAAAAC/AAAAPwAAAAAAAAC/AAAAPwAAAAAAAAA/AAAAvwAAAAAAAAA/AAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAgD8AAAAAAACAPwAAAAAAAAAAAACAPwAAgD8AAAAAAAAAAAAAgD8AAIA/AAAAAAAAAAAAAIA/AACAPwAAAAAAAAAAAACAPwAAAAAAAAAAAACAPwAAAAAAAIA/AACAPwAAAAAAAIA/AAAAAAIAAAABAAAAAAAAAAMAAAACAAAA", "byteLength": 216}]
+}

@@ -1,52 +1,67 @@
 // common.glsl
-// Common shader definitions and utilities
+// Shared math constants and utility functions.
+// Included by pbr.glsl and any shader that needs these utilities.
+//
+// Does NOT declare any uniforms or I/O — pure functions only.
 
-#ifndef COMMON_GLSL
-#define COMMON_GLSL
+#ifndef SA_COMMON_GLSL
+#define SA_COMMON_GLSL
 
-// Common constants
-#define PI 3.14159265359
-#define EPSILON 0.0001
+// ── Constants ─────────────────────────────────────────────────────────────────
 
-// Common data structures
-struct Material {
-    vec3 albedo;
-    float metallic;
-    float roughness;
-    vec3 emissive;
-};
+const float PI      = 3.14159265359;
+const float INV_PI  = 0.31830988618;
+const float EPSILON = 1e-7;
 
-struct Light {
-    vec3 position;
-    vec3 color;
-    float intensity;
-    float radius;
-};
+// ── Depth utilities ───────────────────────────────────────────────────────────
 
-// Utility functions
-vec3 calculateNormal(vec3 position, vec2 texCoord) {
-    // Placeholder for normal calculation
-    return vec3(0.0, 1.0, 0.0);
+// Convert a non-linear depth buffer value to a linear eye-space depth.
+// Matches the standard Vulkan/OpenGL reversed-Z convention when near/far are
+// passed from the projection matrix.
+float LinearizeDepth(float depth, float near, float far) {
+    return (2.0 * near * far) / (far + near - (depth * 2.0 - 1.0) * (far - near));
 }
 
-float linearizeDepth(float depth, float near, float far) {
-    return (2.0 * near) / (far + near - depth * (far - near));
+// Reconstruct world-space position from a depth sample and the inverse
+// view-projection matrix.  uv is in [0,1]; depth in [0,1] (Vulkan NDC).
+vec3 ReconstructWorldPos(vec2 uv, float depth, mat4 invViewProj) {
+    vec4 ndc = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 world = invViewProj * ndc;
+    return world.xyz / world.w;
 }
 
-// Encode/decode functions for G-Buffer
-vec2 encodeNormal(vec3 n) {
-    return n.xy * 0.5 + 0.5;
+// ── Octahedral normal encoding ────────────────────────────────────────────────
+// Encodes a unit-length vec3 normal into two floats in [-1, 1].
+// Used for the G-Buffer RT1 (RG channels).
+// Reference: Cigolle et al. "Survey of Efficient Representations for
+// Independent Unit Vectors", JCGT 2014.
+//
+// IMPORTANT: uses signNotZero instead of sign() to avoid sign(0)=0,
+// which would corrupt normals whose x or y component is exactly zero
+// in the southern hemisphere fold (e.g. poles of a sphere).
+
+float signNotZero(float v) { return v >= 0.0 ? 1.0 : -1.0; }
+
+vec2 OctEncode(vec3 n) {
+    // Project onto octahedron surface
+    n /= abs(n.x) + abs(n.y) + abs(n.z);
+    // Fold lower hemisphere into upper square
+    if (n.z < 0.0) {
+        float ox = n.x, oy = n.y;
+        n.x = (1.0 - abs(oy)) * signNotZero(ox);
+        n.y = (1.0 - abs(ox)) * signNotZero(oy);
+    }
+    return n.xy;
 }
 
-vec3 decodeNormal(vec2 enc) {
-    vec2 fenc = enc * 4.0 - 2.0;
-    float f = dot(fenc, fenc);
-    float g = sqrt(1.0 - f / 4.0);
-    vec3 n;
-    n.xy = fenc * g;
-    n.z = 1.0 - f / 2.0;
-    return n;
+vec3 OctDecode(vec2 e) {
+    vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0) {
+        float ox = n.x, oy = n.y;
+        n.x = (1.0 - abs(oy)) * signNotZero(ox);
+        n.y = (1.0 - abs(ox)) * signNotZero(oy);
+    }
+    return normalize(n);
 }
 
-#endif // COMMON_GLSL
-
+#endif // SA_COMMON_GLSL

@@ -1,65 +1,54 @@
 #version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+#include "shading_models.glsl"     // assets/shaders/common/
+#include "shading_model_ids.glsl"  // generated/shading_model_ids.glsl
 
-layout(location = 0) in vec3 fragPosition;
-layout(location = 1) in vec3 fragNormal;
-layout(location = 2) in vec2 fragTexCoord;
-layout(location = 3) in vec3 fragTangent;
-layout(location = 4) in vec3 fragBitangent;
-
-// G-Buffer outputs
-layout(location = 0) out vec4 outPosition;      // RGB = position, A = unused
-layout(location = 1) out vec4 outNormal;        // RGB = normal, A = unused
-layout(location = 2) out vec4 outAlbedo;        // RGB = albedo, A = unused
-layout(location = 3) out vec2 outMetallicRoughness; // R = metallic, G = roughness
-
-layout(set = 1, binding = 0) uniform sampler2D texAlbedo;
-layout(set = 1, binding = 1) uniform sampler2D texNormal;
-layout(set = 1, binding = 2) uniform sampler2D texMetallicRoughness;
-layout(set = 1, binding = 3) uniform sampler2D texAO;
-
-layout(set = 1, binding = 4) uniform MaterialUniforms {
-    vec4 baseColorFactor;
-    float metallicFactor;
+// ── set=1 Material parameters ─────────────────────────────────────────────────
+layout(set = 1, binding = 0) uniform MaterialParams {
+    vec4  baseColorFactor;
     float roughnessFactor;
+    float metallicFactor;
     float normalScale;
-    float aoStrength;
-} material;
+    float occlusionStrength;
+    vec3  emissiveFactor;
+    float _pad;
+} u_Mat;
+
+layout(set = 1, binding = 1) uniform sampler2D t_BaseColor;
+layout(set = 1, binding = 2) uniform sampler2D t_Normal;
+layout(set = 1, binding = 3) uniform sampler2D t_MetallicRoughness;  // g=roughness, b=metallic
+layout(set = 1, binding = 4) uniform sampler2D t_Occlusion;
+layout(set = 1, binding = 5) uniform sampler2D t_Emissive;
+
+// ── Inputs from vertex stage ──────────────────────────────────────────────────
+layout(location = 0) in vec3 v_WorldPos;
+layout(location = 1) in vec3 v_Normal;
+layout(location = 2) in vec4 v_Tangent;
+layout(location = 3) in vec2 v_TexCoord0;
+
+// ── G-Buffer outputs ──────────────────────────────────────────────────────────
+//   RT0: albedo.rgb + occlusion.a                          (RGBA8_UNORM)
+//   RT1: octahedral-encoded normal (RG) + roughness(B) + metallic(A)  (RGBA16F)
+//   RT2: emissive.rgb                                      (RGBA16F)
+layout(location = 0) out vec4 out_GAlbedoOcclusion;
+layout(location = 1) out vec4 out_GNormalRoughness;
+layout(location = 2) out vec4 out_GEmissiveMetallic;
 
 void main() {
-    // Sample textures
-    vec4 albedo = texture(texAlbedo, fragTexCoord) * material.baseColorFactor;
-    vec3 normalMap = texture(texNormal, fragTexCoord).rgb;
-    vec4 metallicRoughness = texture(texMetallicRoughness, fragTexCoord);
-    float ao = texture(texAO, fragTexCoord).r;
-    
-    // Decode normal from normal map (tangent space to world space)
-    vec3 N = normalize(fragNormal);
-    vec3 T = normalize(fragTangent);
-    vec3 B = normalize(fragBitangent);
-    mat3 TBN = mat3(T, B, N);
-    
-    // Unpack normal from [0,1] to [-1,1]
-    vec3 normalMapUnpacked = normalMap * 2.0 - 1.0;
-    normalMapUnpacked.xy *= material.normalScale;
-    N = normalize(TBN * normalMapUnpacked);
-    
-    // Extract metallic and roughness
-    float metallic = metallicRoughness.b * material.metallicFactor;
-    float roughness = metallicRoughness.g * material.roughnessFactor;
-    
-    // Write to G-Buffer
-    // Position (store in view space or world space - using world space here)
-    outPosition = vec4(fragPosition, 1.0);
-    
-    // Normal (encode from [-1,1] to [0,1])
-    outNormal = vec4(N * 0.5 + 0.5, 1.0);
-    
-    // Albedo
-    outAlbedo = vec4(albedo.rgb, 1.0);
-    
-    // Metallic and Roughness
-    outMetallicRoughness = vec2(metallic, roughness);
-    
-    // Note: AO and emissive could be stored in additional attachments if needed
-}
+    // ── Material inputs ───────────────────────────────────────────────────────
+    vec4  albedo    = texture(t_BaseColor,         v_TexCoord0) * u_Mat.baseColorFactor;
+    float occlusion = texture(t_Occlusion,         v_TexCoord0).r * u_Mat.occlusionStrength;
+    vec2  mr        = texture(t_MetallicRoughness, v_TexCoord0).gb;  // g=roughness, b=metallic
+    float roughness = clamp(mr.x * u_Mat.roughnessFactor, 0.04, 1.0);
+    float metallic  = clamp(mr.y * u_Mat.metallicFactor,  0.0,  1.0);
+    vec3  emissive  = texture(t_Emissive,          v_TexCoord0).rgb * u_Mat.emissiveFactor;
 
+    // ── Normal (geometric only — no TBN, avoids normal-map texture artefacts) ──
+    vec3 N = normalize(v_Normal);
+
+    // ── Write G-Buffer ────────────────────────────────────────────────────────
+    out_GAlbedoOcclusion = vec4(albedo.rgb, occlusion);
+    out_GNormalRoughness  = vec4(OctEncode(N), roughness, metallic);
+    out_GEmissiveMetallic = vec4(emissive, EncodeShadingFlags(SHADING_MODEL_PBR));
+}

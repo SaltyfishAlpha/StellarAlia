@@ -6,12 +6,8 @@ layout(location = 0) in vec3 v_SkyDir;
 layout(location = 0) out vec4 out_Color;
 
 void main() {
+    // Output raw HDR — tonemap handled by the separate TonemapPass.
     vec3 dir   = normalize(v_SkyDir);
     vec3 color = texture(t_SkyboxMap, dir).rgb;
-
-    // ACES filmic tone mapping
-    const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
-    color = clamp((color * (a * color + b)) / (color * (c * color + d) + e), 0.0, 1.0);
-
-    out_Color = vec4(color, 1.0);
+    out_Color  = vec4(color, 1.0);
 }

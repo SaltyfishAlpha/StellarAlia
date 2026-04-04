@@ -4,10 +4,12 @@
 #include "resource/cook/CookedTexture.hpp"
 #include "resource/cook/CookedMesh.hpp"
 #include "resource/cook/CookedSH9.hpp"
+#include "resource/loaders/ImageLoader.hpp"
 #include "platform/rhi/RHITypes.hpp"
 #include "core/logs/Log.hpp"
 
 #include <cstring>
+#include <functional>
 
 namespace StellarAlia::Resource {
 
@@ -15,14 +17,33 @@ void ResourceManager::Init(const std::filesystem::path& cookCacheDir, RHI::IRHID
     m_device = device;
     VFS::SetCookCacheDir(cookCacheDir);
     SA_LOG_INFO("ResourceManager: cook cache = {}", cookCacheDir.string());
+
+    // Create built-in textures.
+    RHI::RHITextureDesc whiteDesc{};
+    whiteDesc.width     = whiteDesc.height = 1;
+    whiteDesc.format    = RHI::RHIFormat::RGBA8_UNORM;
+    whiteDesc.usage     = RHI::RHITextureUsage::Sampled;
+    whiteDesc.debugName = "Builtin_White1x1";
+    m_white1x1 = m_device->CreateTexture(whiteDesc);
+    const uint32_t whitePixel = 0xFFFFFFFFu;
+    m_device->UploadTextureData(m_white1x1, &whitePixel, sizeof(whitePixel));
 }
 
 void ResourceManager::Shutdown() {
     if (!m_device) return;
 
+    if (m_white1x1.IsValid()) {
+        m_device->DestroyTexture(m_white1x1);
+        m_white1x1 = {};
+    }
+
     for (auto& [hash, handle] : m_textures)
         if (handle.IsValid()) m_device->DestroyTexture(handle);
     m_textures.clear();
+
+    for (auto& [hash, handle] : m_fileTextures)
+        if (handle.IsValid()) m_device->DestroyTexture(handle);
+    m_fileTextures.clear();
 
     for (auto& [hash, mesh] : m_meshes) {
         if (mesh.vertexBuffer.IsValid()) m_device->DestroyBuffer(mesh.vertexBuffer);
@@ -102,6 +123,49 @@ RHI::RHITextureHandle ResourceManager::LoadTexture(const AssetID& id) {
                 cooked.cubemap ? "cubemap" : "2D");
 
     m_textures[key] = handle;
+    return handle;
+}
+
+// ─── LoadTextureFromFile ──────────────────────────────────────────────────────
+
+RHI::RHITextureHandle ResourceManager::LoadTextureFromFile(const std::filesystem::path& path) {
+    if (!m_device) return {};
+
+    std::error_code ec;
+    const std::filesystem::path canonical = std::filesystem::canonical(path, ec);
+    if (ec) {
+        SA_LOG_ERROR("ResourceManager::LoadTextureFromFile — path not found: '{}'", path.string());
+        return {};
+    }
+
+    const std::size_t key = std::hash<std::string>{}(canonical.string());
+    auto it = m_fileTextures.find(key);
+    if (it != m_fileTextures.end()) return it->second;
+
+    auto img = ImageLoader::Load(canonical.string());
+    if (!img) return {};   // ImageLoader already logged the error
+
+    RHI::RHITextureDesc td{};
+    td.width     = img->width;
+    td.height    = img->height;
+    td.format    = RHI::RHIFormat::RGBA8_UNORM;
+    td.usage     = RHI::RHITextureUsage::Sampled;
+    td.debugName = canonical.filename().string().c_str();
+
+    RHI::RHITextureHandle handle = m_device->CreateTexture(td);
+    if (!handle.IsValid()) {
+        SA_LOG_ERROR("ResourceManager::LoadTextureFromFile — CreateTexture failed for '{}'",
+                     canonical.string());
+        return {};
+    }
+
+    const uint64_t byteSize = static_cast<uint64_t>(img->width) * img->height * 4u;
+    m_device->UploadTextureData(handle, img->pixels.data(), byteSize);
+
+    SA_LOG_INFO("ResourceManager: loaded file texture {}x{} from '{}'",
+                img->width, img->height, canonical.string());
+
+    m_fileTextures[key] = handle;
     return handle;
 }
 
@@ -242,6 +306,15 @@ std::optional<std::array<glm::vec4, 9>> ResourceManager::LoadSH9Coeffs(const Ass
 
     SA_LOG_INFO("ResourceManager: loaded SH9 {}", id.ToString());
     return sh9.coeffs;
+}
+
+// ─── GetBuiltin ──────────────────────────────────────────────────────────────
+
+RHI::RHITextureHandle ResourceManager::GetBuiltin(BuiltinTexture which) const {
+    switch (which) {
+        case BuiltinTexture::White1x1: return m_white1x1;
+    }
+    return {};
 }
 
 } // namespace StellarAlia::Resource
