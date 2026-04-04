@@ -1,0 +1,6 @@
+#pragma once
+namespace StellarAliaApp {
+    inline constexpr const char* ASSETS_DIR         = "@SA_ASSETS_DIR@";
+    inline constexpr const char* COOK_CACHE_DIR     = "@SA_COOK_CACHE_DIR@";
+    inline constexpr const char* BUILTIN_SHADER_DIR = "@CMAKE_RUNTIME_OUTPUT_DIRECTORY@/assets/shaders/builtin";
+}

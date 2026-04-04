@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -8,6 +9,7 @@
 #include <glm/glm.hpp>
 
 #include "function/FrameUniforms.hpp"
+#include "function/renderer/CameraData.hpp"
 #include "function/FrameUniformsBuffer.hpp"
 #include "function/ibl/GpuIblBake.hpp"
 #include "function/ibl/GpuLtcBake.hpp"
@@ -102,16 +104,36 @@ public:
     // User features always execute after the built-in skybox and geometry passes.
     void AddFeature(std::unique_ptr<RenderFeature> feature);
 
-    // ── Render tick (single entry point) ─────────────────────────────────────
+    // ── Render tick ───────────────────────────────────────────────────────────
     //
-    // Executes one complete frame:
+    // Overload 1 — explicit camera (editor camera, cinematic camera, etc.)
+    //   The renderer uses the supplied CameraData directly; the Scene is only
+    //   queried for lights and draw items.
+    //
+    // Overload 2 — camera from scene (game runtime path)
+    //   Extracts the first entity tagged ActiveCameraTag from the Scene and
+    //   derives CameraData from its CameraComponent + WorldTransformComponent.
+    //   Equivalent to calling Overload 1 with ExtractCamera(scene, w, h).
+    //
+    // Both overloads execute one complete frame:
     //   Phase 1 — collect frame data (camera + lights).
-    //   Phase 2 — BeginFrame, upload uniforms, reset + build RenderGraph by
-    //             calling feature.AddPasses for every feature (built-in first,
-    //             then user features), Compile + Execute, EndFrame, Present.
+    //   Phase 2 — BeginFrame, upload uniforms, reset + build RenderGraph,
+    //             Compile + Execute, [uiPass if provided], EndFrame, Present.
     //
     // Returns immediately (no-op) when device->BeginFrame returns null.
+    //
+    // uiPass — optional callback invoked after 3D passes complete but before
+    //   EndFrame. The active IRHICommandList is passed in. Use this to record
+    //   ImGui draw calls (cast to VulkanCommandList to get VkCommandBuffer).
+    using UIPassFn = std::function<void(RHI::IRHICommandList*)>;
+    void RenderFrame(Scene& scene, const CameraData& camera, uint32_t w, uint32_t h,
+                     UIPassFn uiPass = {});
     void RenderFrame(Scene& scene, uint32_t w, uint32_t h);
+
+    // Extract CameraData from the Scene's active camera entity.
+    // Returns identity matrices when no ActiveCameraTag entity is found.
+    [[nodiscard]] static CameraData ExtractCamera(const Scene& scene,
+                                                   uint32_t w, uint32_t h);
 
     [[nodiscard]] bool IsReady() const { return m_ready; }
 
@@ -293,8 +315,7 @@ private:
 
     // ── Frame data helpers (private, called from RenderFrame) ─────────────────
     [[nodiscard]] LightUniforms GatherLights(const Scene& scene) const;
-    void FillCameraUniforms(const Scene& scene, int vpWidth, int vpHeight,
-                            FrameUniforms& fu) const;
+    static void ApplyCameraToUniforms(const CameraData& cam, FrameUniforms& fu);
 };
 
 } // namespace StellarAlia

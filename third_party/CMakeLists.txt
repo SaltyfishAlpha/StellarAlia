@@ -273,6 +273,36 @@ else()
 endif()
 # Target available: nlohmann_json::nlohmann_json
 
+# ============================================================================
+# ImGui — Immediate-mode GUI (docking branch)
+# Preferred: git submodule at third_party/imgui/
+# ============================================================================
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/imgui/imgui.h)
+    add_library(imgui STATIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/imgui/imgui.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/imgui/imgui_draw.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/imgui/imgui_tables.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/imgui/imgui_widgets.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/imgui/imgui_demo.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/imgui/backends/imgui_impl_glfw.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/imgui/backends/imgui_impl_vulkan.cpp
+    )
+    target_include_directories(imgui PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/imgui
+        ${CMAKE_CURRENT_SOURCE_DIR}/imgui/backends
+    )
+    # volk already loads all Vulkan function pointers at runtime;
+    # IMGUI_IMPL_VULKAN_NO_PROTOTYPES tells imgui_impl_vulkan not to redeclare them.
+    target_compile_definitions(imgui PUBLIC
+        IMGUI_IMPL_VULKAN_NO_PROTOTYPES
+        VK_NO_PROTOTYPES
+    )
+    target_link_libraries(imgui PUBLIC glfw volk)
+    message(STATUS "ImGui: Using local submodule at third_party/imgui")
+else()
+    message(WARNING "ImGui submodule not found at third_party/imgui/ — editor UI will be unavailable")
+endif()
+
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/SPIRV-Cross/CMakeLists.txt)
     add_subdirectory(SPIRV-Cross)
     message(STATUS "SPIRV-Cross: Using local submodule at third_party/SPIRV-Cross")

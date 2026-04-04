@@ -423,23 +423,53 @@ LightUniforms SceneRenderer::GatherLights(const Scene& scene) const {
     return lu;
 }
 
-// ── FillCameraUniforms ────────────────────────────────────────────────────────
+// ── ExtractCamera ─────────────────────────────────────────────────────────────
 
-void SceneRenderer::FillCameraUniforms(const Scene& scene,
-                                        int vpWidth, int vpHeight,
-                                        FrameUniforms& fu) const {
+CameraData SceneRenderer::ExtractCamera(const Scene& scene,
+                                         uint32_t w, uint32_t h) {
+    CameraData out{};
+    // Identity defaults — rendered frame will be black but won't crash.
+    out.view = glm::mat4(1.f);
+    out.proj = glm::mat4(1.f);
+
     scene.View<CameraComponent, ActiveCameraTag, WorldTransformComponent>().each(
         [&](auto, const CameraComponent& cam, const WorldTransformComponent& wt) {
-            const float aspect = (vpHeight > 0)
-                ? static_cast<float>(vpWidth) / static_cast<float>(vpHeight)
+            const float aspect = (h > 0)
+                ? static_cast<float>(w) / static_cast<float>(h)
                 : 1.f;
-            fu.view        = glm::inverse(wt.matrix);
-            fu.proj        = glm::perspective(cam.fovY, aspect, cam.nearPlane, cam.farPlane);
-            fu.proj[1][1] *= -1.f;
-            fu.viewProj    = fu.proj * fu.view;
-            fu.invViewProj = glm::inverse(fu.viewProj);
-            fu.cameraPos   = glm::vec3(wt.matrix[3]);
+            out.view           = glm::inverse(wt.matrix);
+            out.proj           = glm::perspective(cam.fovY, aspect, cam.nearPlane, cam.farPlane);
+            out.proj[1][1]    *= -1.f;   // Vulkan Y-flip
+            out.worldPosition  = glm::vec3(wt.matrix[3]);
         });
+
+    return out;
+}
+
+// ── ApplyCameraToUniforms ─────────────────────────────────────────────────────
+
+// Analytical inverse of a rigid-body (rotation + translation) matrix.
+// For V = [R | t ; 0 | 1]:  V⁻¹ = [Rᵀ | −Rᵀt ; 0 | 1]
+// The rotation part is orthonormal, so transpose == inverse — exact in float.
+// This is far more numerically stable than glm::inverse() on the composed
+// matrix (P·V), whose mixed perspective/rotation entries ill-condition the
+// general 4×4 inversion and produce skybox jitter during off-axis rotation.
+static glm::mat4 RigidBodyInverse(const glm::mat4& v) {
+    const glm::mat3 Rt = glm::transpose(glm::mat3(v));
+    glm::mat4 result(Rt);
+    result[3] = glm::vec4(-(Rt * glm::vec3(v[3])), 1.f);
+    return result;
+}
+
+void SceneRenderer::ApplyCameraToUniforms(const CameraData& cam, FrameUniforms& fu) {
+    fu.view        = cam.view;
+    fu.proj        = cam.proj;
+    fu.viewProj    = cam.proj * cam.view;
+    // (P·V)⁻¹ = V⁻¹·P⁻¹.  Compute V⁻¹ analytically (rigid body — exact),
+    // then multiply by P⁻¹ (single perspective matrix — well conditioned).
+    // Avoids inverting the ill-conditioned composed matrix directly.
+    fu.invViewProj = RigidBodyInverse(cam.view) * glm::inverse(cam.proj);
+    fu.cameraPos   = cam.worldPosition;
 }
 
 // ── AddFeature ────────────────────────────────────────────────────────────────
@@ -452,7 +482,16 @@ void SceneRenderer::AddFeature(std::unique_ptr<RenderFeature> feature) {
 
 // ── RenderFrame ───────────────────────────────────────────────────────────────
 
-void SceneRenderer::RenderFrame(Scene& scene, uint32_t w, uint32_t h)
+// ── RenderFrame (scene-camera wrapper) ───────────────────────────────────────
+
+void SceneRenderer::RenderFrame(Scene& scene, uint32_t w, uint32_t h) {
+    RenderFrame(scene, ExtractCamera(scene, w, h), w, h);
+}
+
+// ── RenderFrame (explicit camera — canonical implementation) ──────────────────
+
+void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
+                                 uint32_t w, uint32_t h, UIPassFn uiPass)
 {
     // ── Resize G-Buffer + depth if viewport changed ────────────────────────────
     if (w != m_depthWidth || h != m_depthHeight) {
@@ -515,7 +554,7 @@ void SceneRenderer::RenderFrame(Scene& scene, uint32_t w, uint32_t h)
     fu.resolution = {static_cast<float>(w), static_cast<float>(h)};
     fu.time       = static_cast<float>(m_frameCount) / 60.f;
     std::copy(std::begin(m_shCoeffs), std::end(m_shCoeffs), std::begin(fu.irrSH));
-    FillCameraUniforms(scene, static_cast<int>(w), static_cast<int>(h), fu);
+    ApplyCameraToUniforms(camera, fu);
     const LightUniforms lu = GatherLights(scene);
 
     // Compute light-space matrix from the first directional light found.
@@ -617,6 +656,9 @@ void SceneRenderer::RenderFrame(Scene& scene, uint32_t w, uint32_t h)
     // ── Compile + Execute + Present ───────────────────────────────────────────
     m_rg.Compile();
     m_rg.Execute(*m_device, *m_cmd);
+
+    if (uiPass)
+        uiPass(m_cmd);
 
     m_device->EndFrame();
     m_device->Present();

@@ -20,6 +20,10 @@ file(GLOB_RECURSE FUNCTION_SOURCES CONFIGURE_DEPENDS
     "function/*.cpp"
 )
 
+file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS
+    "engine/*.cpp"
+)
+
 # Header files (.h/.hpp) - collected separately for easy inclusion
 file(GLOB_RECURSE CORE_HEADERS
     "core/*.h"
@@ -47,6 +51,7 @@ set(ALL_RUNTIME_SOURCES
     ${PLATFORM_SOURCES}
     ${RESOURCE_SOURCES}
     ${FUNCTION_SOURCES}
+    ${ENGINE_SOURCES}
     ${CORE_HEADERS}
     ${PLATFORM_HEADERS}
     ${RESOURCE_HEADERS}
@@ -148,48 +153,8 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/third_party/VulkanSDK/include/vulkan/vulkan.h)
             $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/third_party/VulkanSDK/include>
     )
     
-    # Link Vulkan loader - use system library from PATH/environment
-    if(WIN32)
-        # Windows: link against vulkan-1 (will find vulkan-1.dll from system PATH)
-        # Try to find vulkan-1.lib in common locations, or use just the library name
-        # which will be resolved by the linker from system paths
-        find_library(VULKAN_LIB
-            NAMES vulkan-1 vulkan
-            PATHS
-                ${CMAKE_SOURCE_DIR}/lib/vulkan
-                "$ENV{VULKAN_SDK}/Lib"
-                "$ENV{VULKAN_SDK}/lib"
-            NO_DEFAULT_PATH
-        )
-        
-        if(VULKAN_LIB)
-            target_link_libraries(StellarAliaRuntime PUBLIC ${VULKAN_LIB})
-            message(STATUS "Linking against Vulkan loader: ${VULKAN_LIB}")
-        else()
-            # Fall back to just linking by name - linker will find it from system
-            target_link_libraries(StellarAliaRuntime PUBLIC vulkan-1)
-            message(STATUS "Linking against Vulkan loader: vulkan-1 (from system PATH)")
-            message(STATUS "Note: vulkan-1.dll should be available in system PATH or executable directory")
-        endif()
-    else()
-        # Linux/Unix: link against libvulkan.so from system
-        find_library(VULKAN_LIB
-            NAMES vulkan
-            PATHS
-                ${CMAKE_SOURCE_DIR}/lib/vulkan
-                "$ENV{VULKAN_SDK}/lib"
-            NO_DEFAULT_PATH
-        )
-        
-        if(VULKAN_LIB)
-            target_link_libraries(StellarAliaRuntime PUBLIC ${VULKAN_LIB})
-            message(STATUS "Linking against Vulkan loader: ${VULKAN_LIB}")
-        else()
-            # Fall back to system library
-            target_link_libraries(StellarAliaRuntime PUBLIC vulkan)
-            message(STATUS "Linking against Vulkan loader: vulkan (from system)")
-        endif()
-    endif()
+    # Vulkan functions are loaded at runtime by volk — do NOT link vulkan-1.lib/libvulkan.so.
+    # Volk calls LoadLibrary("vulkan-1.dll") / dlopen("libvulkan.so") internally.
 else()
     message(WARNING "VulkanSDK not found. Vulkan support may not work.")
 endif()

@@ -86,6 +86,20 @@ public:
     void             ResizeSwapchain(uint32_t width, uint32_t height) override;
     uint32_t         GetCurrentFrameIndex() const   override { return m_frameIdx; }
 
+    // ── ImGui integration ─────────────────────────────────────────────────────
+    // Raw Vulkan handles required to initialise imgui_impl_vulkan.
+    // Only the editor layer should call this.
+    struct ImGuiVulkanContext {
+        VkInstance       instance;
+        VkPhysicalDevice physicalDevice;
+        VkDevice         device;
+        VkQueue          graphicsQueue;
+        uint32_t         graphicsFamily;
+        uint32_t         swapchainImageCount;    // total images in the swapchain
+        uint32_t         swapchainMinImageCount; // VkSurfaceCapabilitiesKHR::minImageCount
+    };
+    [[nodiscard]] ImGuiVulkanContext GetImGuiContext() const;
+
     // ── Internal helpers (used by VulkanCommandList) ──────────────────────────
     VkImage          GetVkImage         (RHITextureHandle  handle) const;
     VkImageView      GetVkImageView     (RHITextureHandle  handle) const;
@@ -137,11 +151,12 @@ private:
     VkDebugUtilsMessengerEXT m_debugMessenger  = VK_NULL_HANDLE;
 
     // ── Surface + Swapchain ───────────────────────────────────────────────────
-    VkSurfaceKHR   m_surface           = VK_NULL_HANDLE;
-    VkSwapchainKHR m_swapchain         = VK_NULL_HANDLE;
-    VkFormat       m_swapchainVkFormat = VK_FORMAT_UNDEFINED;
-    VkExtent2D     m_swapchainExtent   = {};
-    bool           m_vsync             = true;
+    VkSurfaceKHR   m_surface              = VK_NULL_HANDLE;
+    VkSwapchainKHR m_swapchain            = VK_NULL_HANDLE;
+    VkFormat       m_swapchainVkFormat    = VK_FORMAT_UNDEFINED;
+    VkExtent2D     m_swapchainExtent      = {};
+    bool           m_vsync                = true;
+    uint32_t       m_swapMinImageCount    = 2;   // caps.minImageCount+1 (requested count)
 
     std::vector<VkImage>          m_swapImages;
     std::vector<VkImageView>      m_swapImageViews;

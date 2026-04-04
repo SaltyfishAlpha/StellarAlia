@@ -15,4 +15,6 @@ cook_cache/
 .claude
 
 # Local design docs / blueprints — not for upstream
-docs/
+docs/plan
+
+renderdoc/debugLog

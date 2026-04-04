@@ -92,6 +92,12 @@ add_subdirectory(tools/shader_reflect)
 # Wire the project-wide asset cook into the build
 setup_cook()
 
+# Editor layer (always on during engine development; disable for pure game builds)
+option(STELLAR_BUILD_EDITOR "Build the editor layer (StellarAliaEditor)" ON)
+if(STELLAR_BUILD_EDITOR)
+    add_subdirectory(editor)
+endif()
+
 # Add example projects
 add_subdirectory(examples/sandbox)
 add_subdirectory(examples/rhi_interface_demo)
@@ -109,6 +115,7 @@ add_subdirectory(examples/material_test_demo)
 add_subdirectory(examples/area_light_demo)
 add_subdirectory(examples/hierarchy_demo)
 add_subdirectory(examples/scene_renderer_demo)
+add_subdirectory(examples/input_demo)
 
 # Generate shading dispatch GLSL after all add_subdirectory() calls so every
 # register_lighting_evaluator() call (from any subdirectory) is collected first.
@@ -122,17 +129,43 @@ file(GLOB_RECURSE TOOL_SOURCES
     "src/tool/*.hpp"
 )
 
+# Generate ApplicationPath.hpp from template (cook cache + shader dir paths)
+configure_file(
+    "${CMAKE_SOURCE_DIR}/src/ApplicationPath.hpp.in"
+    "${CMAKE_BINARY_DIR}/generated/ApplicationPath.hpp"
+    @ONLY
+)
+
 # Main executable (links against foundation runtime library)
 add_executable(${PROJECT_NAME}
     src/main.cpp
     ${TOOL_SOURCES}
 )
 
-# Link foundation runtime library to executable
-target_link_libraries(${PROJECT_NAME} 
+# Link foundation runtime library + editor layer (when editor build is on)
+target_link_libraries(${PROJECT_NAME}
     PRIVATE StellarAliaRuntime
+    $<$<BOOL:${STELLAR_BUILD_EDITOR}>:StellarAliaEditor>
 )
+
+# Generated headers (ApplicationPath.hpp) are already on the path via
+# StellarAliaRuntime's PUBLIC include of CMAKE_BINARY_DIR/generated.
+# Include editor/ so main.cpp can find EditorMode.hpp.
+if(STELLAR_BUILD_EDITOR)
+    target_include_directories(${PROJECT_NAME}
+        PRIVATE ${CMAKE_SOURCE_DIR}/editor
+    )
+endif()
 
 # Setup built-in assets: compile assets/shaders/builtin/ → bin/assets/shaders/builtin/
 # and copy textures/models/hdri to the runtime output directory.
 setup_assets()
+
+# Wire shader compilation, dispatch generation, and asset cooking as hard
+# build-time dependencies of the main executable so they always run before
+# the binary is considered up-to-date.
+foreach(_dep StellarAliaBuiltinShaders ShadingEvaluatorsCopy CookAssets)
+    if(TARGET ${_dep})
+        add_dependencies(${PROJECT_NAME} ${_dep})
+    endif()
+endforeach()

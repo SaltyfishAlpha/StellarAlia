@@ -374,6 +374,7 @@ void VulkanDevice::CreateSwapchain(uint32_t width, uint32_t height, bool vsync) 
     uint32_t imageCount = caps.minImageCount + 1;
     if (caps.maxImageCount > 0)
         imageCount = std::min(imageCount, caps.maxImageCount);
+    m_swapMinImageCount = imageCount;
 
     VkSwapchainCreateInfoKHR ci{};
     ci.sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -629,6 +630,18 @@ RHIFormat VulkanDevice::GetSwapchainFormat() {
 
 uint32_t VulkanDevice::GetSwapchainWidth()  { return m_swapchainExtent.width; }
 uint32_t VulkanDevice::GetSwapchainHeight() { return m_swapchainExtent.height; }
+
+VulkanDevice::ImGuiVulkanContext VulkanDevice::GetImGuiContext() const {
+    return ImGuiVulkanContext{
+        m_instance,
+        m_physDevice,
+        m_device,
+        m_graphicsQueue,
+        m_graphicsFamily,
+        static_cast<uint32_t>(m_swapImages.size()),
+        m_swapMinImageCount,
+    };
+}
 
 void VulkanDevice::ResizeSwapchain(uint32_t width, uint32_t height) {
     m_swapchainExtent = {width, height};
