@@ -1,60 +1,223 @@
 {
-  "name": "MetalRoughSpheres",
-  "version": 1,
-  "world": {
-    "skyboxHdr":        "7a735f5c-b3c4-4361-b342-699c816fa64d",
-    "sh9":              "79735f5c-b3c4-4362-b342-699c816fa64e",
-    "prefilteredEnv":   "78735f5c-b3c4-4363-b142-699c816fa64f",
-    "brdfLut":          "c5b06992-5a8f-4dc9-9d11-406e12b969d4",
-    "skyboxCubemap":    "7e735f5c-b3c4-4365-b342-699c816fa649"
-  },
   "entities": [
     {
       "id": 0,
-      "parent": -1,
-      "tag": "MainCamera",
-      "activeCamera": true,
-      "camera": {
-        "fovY": 0.9599310755729675,
-        "near": 0.10000000149011612,
-        "far": 500.0
+      "parent": 5,
+      "staticMesh": {
+        "castShadow": true,
+        "materials": [],
+        "mesh": "26691f4d-e678-4cff-b485-4f1909e3d66e",
+        "receiveShadow": true
       },
+      "tag": "Node_2",
       "transform": {
-        "position": [0.0, 0.0, 6.0],
-        "rotation": [1.0, 0.0, 0.0, 0.0],
-        "scale": [1.0, 1.0, 1.0]
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
       }
     },
     {
       "id": 1,
-      "parent": -1,
-      "tag": "MetalRoughSpheres",
+      "parent": 5,
       "staticMesh": {
-        "mesh": "42d9b5dd-bea1-49d5-8b77-190e195bd4ea",
-        "materials": [],
         "castShadow": true,
+        "materials": [],
+        "mesh": "f4f4d99a-c15a-466a-a723-644b0128d72c",
         "receiveShadow": true
       },
+      "tag": "Node_3",
       "transform": {
-        "position": [0.0, 0.0, 0.0],
-        "rotation": [1.0, 0.0, 0.0, 0.0],
-        "scale": [1.0, 1.0, 1.0]
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
       }
     },
     {
       "id": 2,
+      "parent": 5,
+      "staticMesh": {
+        "castShadow": true,
+        "materials": [],
+        "mesh": "45739823-19bc-4381-93c1-bd7d3975d1e2",
+        "receiveShadow": true
+      },
+      "tag": "Node_4",
+      "transform": {
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "parent": 5,
+      "staticMesh": {
+        "castShadow": true,
+        "materials": [],
+        "mesh": "1bff5a68-709e-4d3c-8e6f-d2af3eb2d2a0",
+        "receiveShadow": true
+      },
+      "tag": "Node_5",
+      "transform": {
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "parent": 5,
+      "staticMesh": {
+        "castShadow": true,
+        "materials": [],
+        "mesh": "51ea5d04-8f16-4340-98e7-37e711a6d5a8",
+        "receiveShadow": true
+      },
+      "tag": "Node_1",
+      "transform": {
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "id": 5,
+      "parent": -1,
+      "tag": "MetalRoughSpheres",
+      "transform": {
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.7071067690849304,
+          -0.7071067690849304,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          0.4000000059604645,
+          0.4000000059604645,
+          0.4000000059604645
+        ]
+      }
+    },
+    {
+      "directionalLight": {
+        "castShadow": false,
+        "color": [
+          1.0,
+          0.8999999761581421,
+          0.75
+        ],
+        "intensity": 0.20000000298023224
+      },
+      "id": 6,
       "parent": -1,
       "tag": "Sun",
-      "directionalLight": {
-        "color": [1.0, 0.9, 0.75],
-        "intensity": 0.2,
-        "castShadow": false
-      },
       "transform": {
-        "position": [0.0, 0.0, 0.0],
-        "rotation": [0.7070000171661377, -0.5, -0.5, 0.0],
-        "scale": [1.0, 1.0, 1.0]
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.7070000171661377,
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
       }
     }
-  ]
+  ],
+  "name": "MetalRoughSpheres",
+  "version": 1,
+  "world": {
+    "backgroundColor": [
+      0.07999999821186066,
+      0.07999999821186066,
+      0.07999999821186066
+    ],
+    "backgroundMode": "SolidColor",
+    "brdfLut": "c5b06992-5a8f-4dc9-9d11-406e12b969d4",
+    "exposure": 1.0,
+    "gamma": 2.200000047683716,
+    "lutStrength": 1.0,
+    "prefilteredEnv": "78735f5c-b3c4-4363-b142-699c816fa64f",
+    "sh9": "79735f5c-b3c4-4362-b342-699c816fa64e",
+    "skyboxCubemap": "7e735f5c-b3c4-4365-b342-699c816fa649",
+    "skyboxHdr": "7a735f5c-b3c4-4361-b342-699c816fa64d",
+    "tonemapMode": "Builtin"
+  }
 }

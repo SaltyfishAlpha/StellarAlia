@@ -1,6 +1,10 @@
 #pragma once
 
 #include "engine/AppMode.hpp"
+#include "engine/EnginePlayState.hpp"
+#include "function/animation/AnimationSystem.hpp"
+#include "function/debug/DebugDraw.hpp"
+#include "function/physics/PhysicsSystem.hpp"
 #include "function/input/InputSystem.hpp"
 #include "function/material/MaterialManager.hpp"
 #include "function/renderer/SceneRenderer.hpp"
@@ -71,8 +75,28 @@ public:
     void*                        GetNativeWindow();
     const Desc&                  GetDesc()       const { return m_desc; }
 
+    // Returns the per-frame debug line accumulator.
+    DebugDraw& GetDebugDraw() { return m_debugDraw; }
+
+    // Returns the physics system. Use PhysicsDebugSettings to toggle overlay drawing.
+    PhysicsSystem&        GetPhysicsSystem()       { return m_physics; }
+    PhysicsDebugSettings& GetPhysicsDebugSettings(){ return m_physicsDebugSettings; }
+
     // Call after changing scene content at runtime (e.g. loading a new level).
     void RebuildDrawList();
+
+    // ── Play-state control ────────────────────────────────────────────────────
+    // Editing  — animation paused, scene freely editable.
+    // Playing  — animation systems tick; first transition prepares all skinned entities.
+    // Paused   — animation frozen at last evaluated frame.
+    [[nodiscard]] EnginePlayState GetPlayState() const { return m_playState; }
+    void SetPlayState(EnginePlayState state);
+
+    // Prepare every SkinnedMeshComponent in the current scene that is not yet
+    // ready (allocates GPU buffers, caches clip pointers).  Called automatically
+    // on the first Editing→Playing transition; safe to call manually after
+    // spawning new animated entities at runtime.
+    void PrepareAnimatedEntities();
 
 private:
     Desc                                           m_desc;
@@ -86,8 +110,15 @@ private:
     MaterialManager            m_matMgr;
     SceneRenderer              m_renderer;
     InputSystem                m_input;
+    AnimationSystem            m_animSystem;
+    PhysicsSystem              m_physics;
+    DebugDraw                  m_debugDraw;
 
-    bool m_initialized = false;
+    PhysicsDebugSettings       m_physicsDebugSettings;
+    float                      m_physicsAccumulator = 0.f;
+
+    EnginePlayState            m_playState   = EnginePlayState::Editing;
+    bool                       m_initialized = false;
 };
 
 } // namespace StellarAlia

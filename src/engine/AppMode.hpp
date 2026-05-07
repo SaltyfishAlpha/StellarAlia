@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/EnginePlayState.hpp"
 #include "function/renderer/CameraData.hpp"
 #include "platform/rhi/IRHIDevice.hpp"
 
@@ -39,6 +40,10 @@ public:
     // submitted. Record ImGui draw calls into `cmd` here.
     // Default is a no-op so non-editor modes don't need to override.
     virtual void OnRenderUI(RHI::IRHICommandList* /*cmd*/) {}
+
+    // Called immediately after the engine play state changes.
+    // Override to react to Play / Pause / Stop transitions (e.g. swap input maps).
+    virtual void OnPlayStateChanged(EnginePlayState /*newState*/) {}
 };
 
 } // namespace StellarAlia

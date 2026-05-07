@@ -7,6 +7,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "resource/types/ImageData.hpp"
+#include "resource/types/AnimData.hpp"
 
 namespace StellarAlia::Resource {
 
@@ -59,9 +60,11 @@ struct MaterialData {
 // Primitive  —  one draw call's worth of geometry + material.
 // ─────────────────────────────────────────────────────────────────────────────
 struct Primitive {
-    std::vector<Vertex>   vertices;
-    std::vector<uint32_t> indices;
-    int32_t               materialIndex = -1;  // index into SceneData::materials
+    std::vector<Vertex>      vertices;
+    std::vector<uint32_t>    indices;
+    std::vector<SkinVertex>  skinVertices;  // parallel to vertices; empty if not skinned
+    int32_t                  materialIndex = -1;  // index into SceneData::materials
+    int32_t                  skinIndex     = -1;  // index into SceneData::skins; -1 = unskinned
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -73,12 +76,21 @@ struct MeshData {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SkeletonData  —  one glTF skin (bone hierarchy + inverse bind matrices).
+// ─────────────────────────────────────────────────────────────────────────────
+struct SkeletonData {
+    std::string           name;
+    std::vector<BoneInfo> bones;  // indexed by joint index used in SkinVertex::joints
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SceneNode  —  node in the glTF scene hierarchy.
 // ─────────────────────────────────────────────────────────────────────────────
 struct SceneNode {
     std::string           name;
     glm::mat4             localTransform = glm::mat4(1.0f);
     int32_t               meshIndex      = -1;   // -1 = no mesh
+    int32_t               skinIndex      = -1;   // index into SceneData::skins; -1 = no skin
     std::vector<uint32_t> children;
 };
 
@@ -92,6 +104,8 @@ struct SceneData {
     std::vector<ImageData>    images;      // embedded / referenced textures
     std::vector<SceneNode>    nodes;
     std::vector<uint32_t>     rootNodes;
+    std::vector<SkeletonData> skins;       // one per glTF skin
+    std::vector<AnimClip>     animations;  // one per glTF animation
 
     [[nodiscard]] size_t TotalVertexCount() const noexcept {
         size_t n = 0;

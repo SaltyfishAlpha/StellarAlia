@@ -4,6 +4,8 @@
 #include "resource/cook/CookedTexture.hpp"
 #include "resource/cook/CookedMesh.hpp"
 #include "resource/cook/CookedSH9.hpp"
+#include "resource/cook/CookedSkeleton.hpp"
+#include "resource/cook/CookedAnim.hpp"
 #include "resource/loaders/ImageLoader.hpp"
 #include "platform/rhi/RHITypes.hpp"
 #include "core/logs/Log.hpp"
@@ -315,6 +317,87 @@ RHI::RHITextureHandle ResourceManager::GetBuiltin(BuiltinTexture which) const {
         case BuiltinTexture::White1x1: return m_white1x1;
     }
     return {};
+}
+
+// ─── LoadSkeleton ─────────────────────────────────────────────────────────────
+
+const CookedSkeleton* ResourceManager::LoadSkeleton(const AssetID& id) {
+    if (!id.IsValid()) return nullptr;
+
+    const uint64_t key = HashID(id);
+    auto it = m_skeletons.find(key);
+    if (it != m_skeletons.end()) return &it->second;
+
+    auto pathOpt = VFS::ResolveCookedPath(id, ".saskel");
+    if (!pathOpt) {
+        SA_LOG_ERROR("ResourceManager::LoadSkeleton — .saskel not found for {}", id.ToString());
+        return nullptr;
+    }
+
+    CookedSkeleton skel;
+    if (!LoadCookedSkeleton(pathOpt->string(), skel)) {
+        SA_LOG_ERROR("ResourceManager::LoadSkeleton — failed to parse {}",
+                     pathOpt->filename().string());
+        return nullptr;
+    }
+
+    SA_LOG_INFO("ResourceManager: loaded skeleton {} ({} bones)", id.ToString(), skel.bones.size());
+    auto [ins, ok] = m_skeletons.emplace(key, std::move(skel));
+    return &ins->second;
+}
+
+// ─── LoadAnimClip ─────────────────────────────────────────────────────────────
+
+const CookedAnim* ResourceManager::LoadAnimClip(const AssetID& id) {
+    if (!id.IsValid()) return nullptr;
+
+    const uint64_t key = HashID(id);
+    auto it = m_animClips.find(key);
+    if (it != m_animClips.end()) return &it->second;
+
+    auto pathOpt = VFS::ResolveCookedPath(id, ".saanim");
+    if (!pathOpt) {
+        SA_LOG_ERROR("ResourceManager::LoadAnimClip — .saanim not found for {}", id.ToString());
+        return nullptr;
+    }
+
+    CookedAnim anim;
+    if (!LoadCookedAnim(pathOpt->string(), anim)) {
+        SA_LOG_ERROR("ResourceManager::LoadAnimClip — failed to parse {}",
+                     pathOpt->filename().string());
+        return nullptr;
+    }
+
+    SA_LOG_INFO("ResourceManager: loaded anim '{}' ({} channels, {:.2f}s)",
+                anim.clip.name, anim.clip.channels.size(), anim.clip.duration);
+    auto [ins, ok] = m_animClips.emplace(key, std::move(anim));
+    return &ins->second;
+}
+
+// ─── LoadMeshData ─────────────────────────────────────────────────────────────
+
+const CookedMesh* ResourceManager::LoadMeshData(const AssetID& id) {
+    if (!id.IsValid()) return nullptr;
+
+    const uint64_t key = HashID(id);
+    auto it = m_cookedMeshes.find(key);
+    if (it != m_cookedMeshes.end()) return &it->second;
+
+    auto pathOpt = VFS::ResolveCookedPath(id, ".samesh");
+    if (!pathOpt) {
+        SA_LOG_ERROR("ResourceManager::LoadMeshData — .samesh not found for {}", id.ToString());
+        return nullptr;
+    }
+
+    CookedMesh mesh;
+    if (!LoadCookedMesh(pathOpt->string(), mesh)) {
+        SA_LOG_ERROR("ResourceManager::LoadMeshData — failed to parse {}",
+                     pathOpt->filename().string());
+        return nullptr;
+    }
+
+    auto [ins, ok] = m_cookedMeshes.emplace(key, std::move(mesh));
+    return &ins->second;
 }
 
 } // namespace StellarAlia::Resource

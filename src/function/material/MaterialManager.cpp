@@ -96,6 +96,7 @@ bool MaterialManager::RegisterTypeFromShaders(const MaterialTypeDesc&   desc,
 
     type->defaultCullMode   = desc.cullMode;
     type->defaultBlendMode  = desc.blendMode;
+    type->defaultTopology   = desc.topology;
     type->defaultDepthTest  = desc.depthTest;
     type->defaultDepthWrite = desc.depthWrite;
     type->noVertexInput     = desc.noVertexInput;

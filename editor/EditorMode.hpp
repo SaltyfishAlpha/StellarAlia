@@ -3,10 +3,14 @@
 #include "engine/AppMode.hpp"
 #include "camera/EditorCamera.hpp"
 #include "ui/EditorUI.hpp"
+#include "EditorOverlaySettings.hpp"
+#include "gizmo/GizmoSystem.hpp"
 
 namespace StellarAlia { class Application; }
 
 namespace StellarAlia::Editor {
+
+class SceneHierarchyPanel;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // EditorMode — the engine's authoring mode.
@@ -23,11 +27,19 @@ public:
     void OnUpdate(float dt) override;
     void OnRenderUI(RHI::IRHICommandList* cmd) override;
     [[nodiscard]] CameraData GetCameraData(float aspectRatio) const override;
+    void OnPlayStateChanged(EnginePlayState newState) override;
 
 private:
-    Application* m_app = nullptr;
-    EditorCamera m_camera;
-    EditorUI     m_ui;
+    Application*               m_app             = nullptr;
+    EditorCamera               m_camera;
+    EditorUI                   m_ui;
+    bool                       m_viewportActive  = false;
+
+    EditorOverlaySettings      m_overlaySettings;
+    const SceneHierarchyPanel* m_hierarchyPanel  = nullptr;
+    GizmoSystem                m_gizmo;
+
+    void DrawOverlays();
 };
 
 } // namespace StellarAlia::Editor

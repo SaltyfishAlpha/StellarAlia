@@ -71,6 +71,39 @@ inline std::vector<ActionMapDef> MakeViewportMaps() {
                         BindingDef::Direct("Gamepad/Start"),
                     }
                 },
+                // ── Gizmo mode shortcuts ──────────────────────────────────
+                {
+                    .name = "GizmoTranslate",
+                    .type = ActionType::Button,
+                    .bindings = { BindingDef::Direct("Keyboard/T") }
+                },
+                {
+                    .name = "GizmoRotate",
+                    .type = ActionType::Button,
+                    .bindings = { BindingDef::Direct("Keyboard/R") }
+                },
+                {
+                    .name = "GizmoScale",
+                    .type = ActionType::Button,
+                    .bindings = { BindingDef::Direct("Keyboard/S") }
+                },
+                // ── Scene Hierarchy shortcuts ─────────────────────────────
+                {
+                    .name = "EntityDelete",
+                    .type = ActionType::Button,
+                    .bindings = { BindingDef::Direct("Keyboard/Delete") }
+                },
+                {
+                    // Ctrl gate is checked at the call site via GetDeviceButton
+                    .name = "EntityDuplicate",
+                    .type = ActionType::Button,
+                    .bindings = { BindingDef::Direct("Keyboard/D") }
+                },
+                {
+                    .name = "EntityRename",
+                    .type = ActionType::Button,
+                    .bindings = { BindingDef::Direct("Keyboard/F2") }
+                },
             }
         },
         {

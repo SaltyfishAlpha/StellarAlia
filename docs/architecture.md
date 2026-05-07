@@ -30,7 +30,7 @@
 │                                                                  │
 │  // Scene setup (once after load)                                │
 │  SceneSerializer::LoadFromFile(scene, "scene.sascene")          │
-│  renderer.SetIBL(scene.GetWorldSettings())                      │
+│  renderer.ApplyWorldSettings(scene.GetWorldSettings())          │
 │  renderer.BuildDrawList(scene)                                   │
 │  renderer.AddFeature(std::make_unique<OutlineFeature>())        │
 ├─────────────────────────────────────────────────────────────────┤
@@ -44,6 +44,10 @@
 │                 → RG.Compile/Execute → EndFrame → Present       │
 │    AddPass(name, PassFlags, execFn): RG pass primitive           │
 │    AddFeature(unique_ptr<RenderFeature>): OnInit called immediately
+│    ApplyWorldSettings(ws, updateIBL=true):                      │
+│      background mode/color → SkyboxFeature;                     │
+│      IBL clear (SolidColor) or SetIBL (Skybox);                 │
+│      tonemap param update or feature hot-swap (Builtin ↔ LUT)  │
 │    SetIBL(ws): offline-first; GPU bake + cache on miss          │
 │    BuildDrawList(scene): ECS → DrawItem list                    │
 │                                                                  │
@@ -291,13 +295,37 @@ Value-type field on `Scene`, serialised in `.sascene`'s `"world"` block:
 
 ```cpp
 struct WorldSettings {
-    AssetID skyboxHdr;       // source HDR equirect panorama
-    AssetID sh9;             // SH9 coefficient file (.sash9)
-    AssetID prefilteredEnv;  // GGX specular cubemap, 5 mips
-    AssetID brdfLut;         // split-sum BRDF LUT (fixed UUID)
-    AssetID skyboxCubemap;   // HDR converted to cubemap
+    // ── Background ──────────────────────────────────────────────
+    enum class BackgroundMode { SolidColor, Skybox };
+    BackgroundMode backgroundMode  = BackgroundMode::SolidColor;
+    glm::vec3      backgroundColor = { 0.08f, 0.08f, 0.08f };  // linear
+
+    // HDR source + baked IBL products (Skybox mode only)
+    AssetID skyboxHdr;        // source HDR equirect panorama
+    AssetID sh9;              // SH9 coefficient file (.sash9)
+    AssetID prefilteredEnv;   // GGX specular cubemap, 5 mips
+    AssetID brdfLut;          // split-sum BRDF LUT
+    AssetID skyboxCubemap;    // HDR converted to cubemap
+
+    // ── Tonemap ─────────────────────────────────────────────────
+    enum class TonemapMode { Builtin, LUT };
+    TonemapMode tonemapMode  = TonemapMode::Builtin;
+    AssetID     tonemapLut;   // LUT mode only
+    float       exposure     = 1.f;
+    float       gamma        = 2.2f;
+    float       lutStrength  = 1.f;
 };
 ```
+
+**SolidColor IBL behaviour:** `ApplyWorldSettings` encodes `backgroundColor` as a constant
+SH L0 ambient term (`irrSH[0] = backgroundColor / 0.282095`) and writes it to a 1×1 RGBA32F
+solid-colour cubemap used as `t_PrefilteredEnv`, so metallic surfaces reflect the background
+colour instead of sampling a black placeholder. The real BRDF LUT (pre-baked at `Init` via
+`GpuIblBake::BakeBrdfLut`) ensures correct specular split-sum.
+
+**Tonemap hot-swap:** `ApplyWorldSettings` can replace `TonemapFeature` (ACES) with
+`LutTonemapFeature` at runtime by calling `device->WaitIdle()`, shutting down the old feature,
+and initialising the new one in-place in the `m_features` vector slot.
 
 ### Two-Tier Material Override
 
@@ -337,11 +365,18 @@ JSON serialised by `SceneSerializer`. Full schema:
   "version": 1,
   "name": "SceneName",
   "world": {
-    "skyboxHdr":      "uuid",
-    "sh9":            "uuid",
-    "prefilteredEnv": "uuid",
-    "brdfLut":        "uuid",
-    "skyboxCubemap":  "uuid"
+    "backgroundMode":  "SolidColor",
+    "backgroundColor": [0.08, 0.08, 0.08],
+    "skyboxHdr":       "uuid",
+    "sh9":             "uuid",
+    "prefilteredEnv":  "uuid",
+    "brdfLut":         "uuid",
+    "skyboxCubemap":   "uuid",
+    "tonemapMode":     "Builtin",
+    "tonemapLut":      "uuid",
+    "exposure":        1.0,
+    "gamma":           2.2,
+    "lutStrength":     1.0
   },
   "entities": [
     {
@@ -590,6 +625,12 @@ cache. Results are saved to disk so subsequent launches load directly (~1 ms vs 
 | `skyboxCubemap` | 1024×1024×6 cubemap | RGBA32F, 1 mip | Direct HDR sky |
 | `shCoeffs[9]` | CPU `glm::vec4[9]` | — | SH9 diffuse (Lambertian-convolved) |
 
+### Standalone BRDF LUT
+
+`GpuIblBake::BakeBrdfLut(device)` runs only the BRDF LUT compute pass (no HDR input needed).
+Called once in `SceneRenderer::Init` so `m_cachedBrdfLut` is valid from the first frame —
+required for correct metallic specular in SolidColor background mode before any Skybox is loaded.
+
 ### Integration with SceneRenderer
 
 `SceneRenderer::SetIBL(const WorldSettings&)` implements the offline-first strategy:
@@ -669,13 +710,21 @@ registered in order in `SceneRenderer::Init`:
 
 | Feature | Condition | Output | Shader |
 |---------|-----------|--------|--------|
-| `ShadowFeature` | `config.shadowEnabled` | shadow map (D32, 2048²) | `shadow.vert` / `shadow.frag` |
-| `SkyboxFeature` | always | writes HDR color buffer | `skybox.vert` / `skybox.frag` |
+| `ShadowFeature` | `config.shadowEnabled` | shadow map (D32, 2048²) | `shadow.vert/.frag` |
+| `SkyboxFeature` | always | HDR buffer (draw or clearColor) | `skybox.vert/.frag`; SolidColor: zero-draw clearColor pass |
 | `GBufferFeature` | always | RT0/RT1/RT2 + depth | `deferred_geometry.vert/.frag` |
-| `DeferredLightingFeature` | always | HDR color buffer (RGBA16F) | `fullscreen_tri.vert` / `deferred_lighting.frag` |
+| `DeferredLightingFeature` | always | HDR buffer (RGBA16F) | `fullscreen_tri.vert` / `deferred_lighting.frag` |
+| `SelectionMaskFeature` | always | R8 silhouette mask | `selection_mask.vert/.frag`; renders selected entity + all descendants |
 | `BloomFeature` | `config.bloomEnabled` | additive bloom into HDR buffer | `bloom_*.frag` |
-| `TonemapFeature` | `config.builtinTonemap` | swapchain LDR image | `tonemap.vert/.frag` |
+| `TonemapFeature` | `config.builtinTonemap` && `ws.tonemapMode==Builtin` | swapchain LDR | `tonemap.frag` (ACES + gamma) |
+| `LutTonemapFeature` | `config.builtinTonemap` && `ws.tonemapMode==LUT` | swapchain LDR | `postfx_lut_tonemap.frag` (ACES + 2D strip LUT) |
+| `SelectionOutlineFeature` | always | outline composited onto swapchain | `selection_outline_dilate.frag` + composite |
+| `InfiniteGridFeature` | when enabled | XZ grid onto swapchain | `infinite_grid.frag` |
+| `DebugOverlayFeature` | always | debug lines onto swapchain | `debug_line.vert/.frag` |
 | user `RenderFeature`s | `AddFeature(...)` | any | custom |
+
+`TonemapFeature` ↔ `LutTonemapFeature` are hot-swapped at runtime by `ApplyWorldSettings`.
+The active tonemap feature is tracked via `m_tonemapFeature` (raw ptr into `m_features`).
 
 `RendererConfig` (in `SceneRenderer::Desc`) controls the optional passes:
 
@@ -684,7 +733,7 @@ struct RendererConfig {
     bool     shadowEnabled  = true;
     uint32_t shadowMapSize  = 2048;
     bool     bloomEnabled   = true;
-    int      bloomMipCount  = 6;
+    int      bloomMipCount  = 3;
     bool     builtinTonemap = true;
 };
 ```

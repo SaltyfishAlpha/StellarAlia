@@ -55,7 +55,7 @@ public:
     void OnInit(const FeatureInitContext& ctx) override {
         ctx.matMgr->RegisterTypeFromShaders(
             {"LutTonemap", "fullscreen_tri", "postfx_lut_tonemap",
-             RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque, false, false, true}, ctx);
+             RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque, RHI::RHITopology::TriangleList, false, false, true}, ctx);
         m_type = ctx.matMgr->GetType("LutTonemap");
         if (!m_type) { SA_LOG_WARN("LutTonemapFeature: shader load failed"); return; }
 

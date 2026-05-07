@@ -54,6 +54,7 @@ public:
     // Default render state
     RHI::RHICullMode  defaultCullMode  = RHI::RHICullMode::Back;
     RHI::RHIBlendMode defaultBlendMode = RHI::RHIBlendMode::Opaque;
+    RHI::RHITopology  defaultTopology  = RHI::RHITopology::TriangleList;
     bool              defaultDepthTest  = true;
     bool              defaultDepthWrite = true;
     bool              noVertexInput     = false;

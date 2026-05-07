@@ -43,6 +43,7 @@ RHI::RHIPipelineHandle ShaderProgram::GetOrCreatePipeline(
     const AttachmentKey& key,
     RHI::RHICullMode     cullMode,
     RHI::RHIBlendMode    blendMode,
+    RHI::RHITopology     topology,
     bool                 depthTest,
     bool                 depthWrite,
     bool                 noVertexInput)
@@ -70,6 +71,7 @@ RHI::RHIPipelineHandle ShaderProgram::GetOrCreatePipeline(
 
     pipeDesc.cullMode      = cullMode;
     pipeDesc.blendMode     = blendMode;
+    pipeDesc.topology      = topology;
     pipeDesc.depthTest     = depthTest;
     pipeDesc.depthWrite    = depthWrite;
     pipeDesc.noVertexInput = noVertexInput;

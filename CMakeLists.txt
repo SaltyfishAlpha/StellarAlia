@@ -114,6 +114,8 @@ add_subdirectory(examples/compute_demo)
 add_subdirectory(examples/material_test_demo)
 add_subdirectory(examples/area_light_demo)
 add_subdirectory(examples/hierarchy_demo)
+add_subdirectory(examples/anim_demo)
+add_subdirectory(examples/physics_demo)
 add_subdirectory(examples/scene_renderer_demo)
 add_subdirectory(examples/input_demo)
 

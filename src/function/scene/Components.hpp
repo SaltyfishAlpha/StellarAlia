@@ -11,6 +11,7 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include "core/asset/AssetID.hpp"
+#include "platform/rhi/RHITypes.hpp"
 
 namespace StellarAlia {
 
@@ -154,6 +155,67 @@ struct AnimatedTransformComponent {
     glm::vec3 position = { 0.f, 0.f, 0.f };
     glm::quat rotation = { 1.f, 0.f, 0.f, 0.f };
     glm::vec3 scale    = { 1.f, 1.f, 1.f };
+};
+
+// Binds a skeleton (bone hierarchy) to an entity for CPU skinning.
+struct SkeletonComponent {
+    AssetID skeletonAsset;  // → .saskel (cooked via DeriveSkinID)
+};
+
+// Drives keyframe playback for a skinned entity.
+struct AnimatorComponent {
+    AssetID clipAsset;      // → .saanim (cooked via DeriveAnimID)
+    float   time     = 0.f; // current playback position in seconds
+    float   speed    = 1.f;
+    bool    looping  = true;
+    bool    playing  = true;
+};
+
+// Per-sub-mesh draw call descriptor for a skinned mesh entity.
+struct SkinnedSubMeshInfo {
+    uint32_t firstIndex   = 0;
+    uint32_t indexCount   = 0;
+    int32_t  vertexOffset = 0;
+    AssetID  materialAssetID;   // .samat uuid; invalid → use default material
+};
+
+// Holds the GPU-side skinned mesh data.
+//   dynVertexBuffer: CPU-visible, written each frame by AnimationSystem (deformed poses).
+//   indexBuffer:     Static GPU buffer; shared from LoadMesh().
+//   ready:           Set true by AnimationSystem::PrepareEntity(); BuildDrawList skips if false.
+struct SkinnedMeshComponent {
+    AssetID                         meshAsset;
+    std::vector<AssetID>            materialSlots;  // per-submesh override
+    RHI::RHIBufferHandle            dynVertexBuffer;
+    RHI::RHIBufferHandle            indexBuffer;
+    uint32_t                        vertexCount = 0;
+    std::vector<SkinnedSubMeshInfo> subMeshes;
+    bool                            ready = false;
+};
+
+// ── Physics ───────────────────────────────────────────────────────────────────
+//
+// RigidBodyComponent — driven by PhysicsSystem.
+//   bodyId is written by PhysicsSystem::SyncIn on first encounter (~0u = not created yet).
+//
+struct RigidBodyComponent {
+    enum class Type { Static, Kinematic, Dynamic };
+    Type     type        = Type::Dynamic;
+    float    mass        = 1.f;
+    float    friction    = 0.5f;
+    float    restitution = 0.f;
+    uint32_t bodyId      = ~0u;   // Jolt BodyID bits; ~0u = not yet created
+};
+
+// ColliderComponent — defines the collision shape.
+//   extents interpretation:
+//     Box:     half-extents (x, y, z)
+//     Sphere:  radius in x  (y, z ignored)
+//     Capsule: radius in x, half-height in y
+struct ColliderComponent {
+    enum class Shape { Box, Sphere, Capsule };
+    Shape     shape   = Shape::Box;
+    glm::vec3 extents = { 0.5f, 0.5f, 0.5f };
 };
 
 // ── Marker tags ───────────────────────────────────────────────────────────────

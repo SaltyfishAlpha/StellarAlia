@@ -64,6 +64,45 @@ void GpuIblBake::Shutdown(RHI::IRHIDevice* device) {
     m_equirectCubeProg.Unload(device);
 }
 
+// ─── BakeBrdfLut ──────────────────────────────────────────────────────────────
+
+RHI::RHITextureHandle GpuIblBake::BakeBrdfLut(RHI::IRHIDevice* device)
+{
+    constexpr uint32_t kBrdfSize = 512u;
+
+    RHI::RHITextureDesc d{};
+    d.width     = kBrdfSize;
+    d.height    = kBrdfSize;
+    d.format    = RHI::RHIFormat::RGBA32F;
+    d.usage     = RHI::RHITextureUsage::UnorderedAccess
+                | RHI::RHITextureUsage::Sampled
+                | RHI::RHITextureUsage::CopySrc;
+    d.debugName = "IBL_BrdfLut";
+    RHI::RHITextureHandle lut = device->CreateTexture(d);
+
+    auto pipeline = m_brdfProg.GetPipeline(device);
+    if (!pipeline.IsValid()) {
+        SA_LOG_ERROR("GpuIblBake::BakeBrdfLut: pipeline creation failed");
+        device->DestroyTexture(lut);
+        return {};
+    }
+
+    auto ds = device->AllocateDescriptorSet(m_brdfProg.GetLayout(0));
+    device->WriteDescriptorStorageImage(ds, 0, lut);
+
+    using RS = RHI::RHIResourceState;
+    device->ImmediateCompute([&](RHI::IRHICommandList* cmd) {
+        cmd->TransitionTexture(lut, RS::Undefined, RS::UnorderedAccess);
+        cmd->SetComputePipeline(pipeline);
+        cmd->SetDescriptorSet(0, ds);
+        cmd->Dispatch((kBrdfSize + 7) / 8, (kBrdfSize + 7) / 8, 1);
+        cmd->TransitionTexture(lut, RS::UnorderedAccess, RS::ShaderRead);
+    });
+
+    SA_LOG_INFO("GpuIblBake: BRDF LUT baked (standalone)");
+    return lut;
+}
+
 // ─── Bake ─────────────────────────────────────────────────────────────────────
 
 GpuIblBake::Result GpuIblBake::Bake(RHI::IRHIDevice* device,

@@ -13,6 +13,8 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <algorithm>
 
 namespace StellarAlia::Resource {
 
@@ -80,9 +82,11 @@ glm::mat4 NodeLocalTransform(const tinygltf::Node& node) {
 
 // ── Primitive conversion ─────────────────────────────────────────────────────
 Primitive ConvertPrimitive(const tinygltf::Model& model,
-                            const tinygltf::Primitive& prim) {
+                            const tinygltf::Primitive& prim,
+                            int nodeSkinIndex) {
     Primitive out;
     out.materialIndex = prim.material;
+    out.skinIndex     = nodeSkinIndex;
 
     // ── Positions (required) ─────────────────────────────────────────────────
     auto posIt = prim.attributes.find("POSITION");
@@ -165,12 +169,58 @@ Primitive ConvertPrimitive(const tinygltf::Model& model,
         ComputeFlatNormals(out.vertices, out.indices);
     }
 
+    // ── Skinning: JOINTS_0 + WEIGHTS_0 ───────────────────────────────────────
+    auto jointsIt  = prim.attributes.find("JOINTS_0");
+    auto weightsIt = prim.attributes.find("WEIGHTS_0");
+    if (jointsIt != prim.attributes.end() && weightsIt != prim.attributes.end()) {
+        out.skinVertices.resize(vertCount);
+
+        // JOINTS_0: UBYTE4 or USHORT4
+        {
+            const auto& acc = model.accessors[jointsIt->second];
+            const auto& bv  = model.bufferViews[acc.bufferView];
+            const auto& buf = model.buffers[bv.buffer];
+            const uint8_t* raw = buf.data.data() + bv.byteOffset + acc.byteOffset;
+
+            for (size_t i = 0; i < vertCount; i++) {
+                if (acc.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE) {
+                    const uint8_t* j = raw + i * 4;
+                    out.skinVertices[i].joints = {j[0], j[1], j[2], j[3]};
+                } else if (acc.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
+                    const uint16_t* j = reinterpret_cast<const uint16_t*>(raw) + i * 4;
+                    out.skinVertices[i].joints = {j[0], j[1], j[2], j[3]};
+                }
+            }
+        }
+
+        // WEIGHTS_0: FLOAT4 or UBYTE4 or USHORT4
+        {
+            const auto& acc = model.accessors[weightsIt->second];
+            const auto& bv  = model.bufferViews[acc.bufferView];
+            const auto& buf = model.buffers[bv.buffer];
+            const uint8_t* raw = buf.data.data() + bv.byteOffset + acc.byteOffset;
+
+            for (size_t i = 0; i < vertCount; i++) {
+                if (acc.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT) {
+                    const float* w = reinterpret_cast<const float*>(raw) + i * 4;
+                    out.skinVertices[i].weights = {w[0], w[1], w[2], w[3]};
+                } else if (acc.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
+                    const uint16_t* w = reinterpret_cast<const uint16_t*>(raw) + i * 4;
+                    out.skinVertices[i].weights = {
+                        w[0]/65535.f, w[1]/65535.f, w[2]/65535.f, w[3]/65535.f};
+                } else if (acc.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE) {
+                    const uint8_t* w = raw + i * 4;
+                    out.skinVertices[i].weights = {
+                        w[0]/255.f, w[1]/255.f, w[2]/255.f, w[3]/255.f};
+                }
+            }
+        }
+    }
+
     return out;
 }
 
 // ── Material conversion ───────────────────────────────────────────────────────
-// In glTF, materials reference *textures* (not images directly).
-// model.textures[texIdx].source gives the actual image index in model.images[].
 MaterialData ConvertMaterial(const tinygltf::Material& mat,
                              const tinygltf::Model&    model) {
     MaterialData out;
@@ -189,7 +239,6 @@ MaterialData ConvertMaterial(const tinygltf::Material& mat,
     out.roughnessFactor = static_cast<float>(pbr.roughnessFactor);
     out.metallicFactor  = static_cast<float>(pbr.metallicFactor);
 
-    // Resolve glTF texture index → image index via model.textures[].source
     auto texImage = [&](int texIdx) -> int32_t {
         if (texIdx < 0 || texIdx >= (int)model.textures.size()) return -1;
         return model.textures[texIdx].source;
@@ -210,9 +259,6 @@ MaterialData ConvertMaterial(const tinygltf::Material& mat,
                               (float)mat.emissiveFactor[1],
                               (float)mat.emissiveFactor[2]};
 
-    // KHR_materials_emissive_strength: HDR emissive multiplier.
-    // glTF clamps emissiveFactor to [0,1] per channel; this extension lifts
-    // that by providing a separate scalar (e.g. 10, 50, 100) baked at cook time.
     {
         auto extIt = mat.extensions.find("KHR_materials_emissive_strength");
         if (extIt != mat.extensions.end() && extIt->second.IsObject()) {
@@ -241,16 +287,140 @@ void ConvertNodes(const tinygltf::Model& model, SceneData& scene) {
         sn.name            = gn.name;
         sn.localTransform  = NodeLocalTransform(gn);
         sn.meshIndex       = gn.mesh;
+        sn.skinIndex       = gn.skin;
         sn.children.reserve(gn.children.size());
         for (int c : gn.children)
             sn.children.push_back(static_cast<uint32_t>(c));
     }
 
-    // Root nodes from the default scene (or first scene)
     int sceneIdx = model.defaultScene >= 0 ? model.defaultScene : 0;
     if (!model.scenes.empty()) {
         for (int r : model.scenes[sceneIdx].nodes)
             scene.rootNodes.push_back(static_cast<uint32_t>(r));
+    }
+}
+
+// ── Skeleton (skin) extraction ────────────────────────────────────────────────
+void ConvertSkins(const tinygltf::Model& model, SceneData& scene) {
+    scene.skins.reserve(model.skins.size());
+    for (const auto& gs : model.skins) {
+        SkeletonData skel;
+        skel.name = gs.name;
+        skel.bones.resize(gs.joints.size());
+
+        // Build parent index map: nodeIndex → jointIndex within this skin.
+        std::unordered_map<int, int32_t> nodeToJoint;
+        for (int32_t ji = 0; ji < (int32_t)gs.joints.size(); ++ji)
+            nodeToJoint[gs.joints[ji]] = ji;
+
+        // Inverse bind matrices (column-major, one per joint).
+        const glm::mat4* ibm = nullptr;
+        if (gs.inverseBindMatrices >= 0)
+            ibm = AccessorData<glm::mat4>(model, gs.inverseBindMatrices);
+
+        for (int32_t ji = 0; ji < (int32_t)gs.joints.size(); ++ji) {
+            int nodeIdx = gs.joints[ji];
+            skel.bones[ji].name = model.nodes[nodeIdx].name;
+            skel.bones[ji].inverseBindMatrix = ibm ? ibm[ji] : glm::mat4(1.f);
+
+            // Find parent: the glTF node's parent within the joint set.
+            skel.bones[ji].parentIndex = -1;
+            for (int32_t pji = 0; pji < (int32_t)gs.joints.size(); ++pji) {
+                const auto& parentNode = model.nodes[gs.joints[pji]];
+                for (int child : parentNode.children) {
+                    if (child == nodeIdx) {
+                        skel.bones[ji].parentIndex = pji;
+                        break;
+                    }
+                }
+                if (skel.bones[ji].parentIndex >= 0) break;
+            }
+        }
+
+        scene.skins.push_back(std::move(skel));
+    }
+}
+
+// ── Animation extraction ──────────────────────────────────────────────────────
+void ConvertAnimations(const tinygltf::Model& model, SceneData& scene,
+                       const std::vector<std::vector<int>>& skinJoints) {
+    scene.animations.reserve(model.animations.size());
+    for (const auto& ga : model.animations) {
+        AnimClip clip;
+        clip.name = ga.name;
+
+        for (const auto& gch : ga.channels) {
+            if (gch.sampler < 0 || gch.sampler >= (int)ga.samplers.size()) continue;
+            if (gch.target_node < 0) continue;
+
+            const auto& sampler = ga.samplers[gch.sampler];
+
+            // Only Translation, Rotation, Scale are supported.
+            AnimChannel::Target target;
+            if (gch.target_path == "translation")      target = AnimChannel::Target::Translation;
+            else if (gch.target_path == "rotation")    target = AnimChannel::Target::Rotation;
+            else if (gch.target_path == "scale")       target = AnimChannel::Target::Scale;
+            else continue;
+
+            AnimChannel::Interp interp = AnimChannel::Interp::Linear;
+            if (sampler.interpolation == "STEP")         interp = AnimChannel::Interp::Step;
+            // CUBICSPLINE is downgraded to LINEAR.
+
+            // Map target_node to a bone index within any skin.
+            // Use the first skin that contains this node.
+            int32_t boneIndex = -1;
+            for (const auto& joints : skinJoints) {
+                for (int32_t ji = 0; ji < (int32_t)joints.size(); ++ji) {
+                    if (joints[ji] == gch.target_node) {
+                        boneIndex = ji;
+                        break;
+                    }
+                }
+                if (boneIndex >= 0) break;
+            }
+            if (boneIndex < 0) continue;  // target_node not in any skin joint list
+
+            // Times (input accessor).
+            const size_t kfCount = AccessorCount(model, sampler.input);
+            if (kfCount == 0) continue;
+            const float* times = AccessorData<float>(model, sampler.input);
+
+            AnimChannel ch;
+            ch.boneIndex = boneIndex;
+            ch.target    = target;
+            ch.interp    = interp;
+            ch.times.assign(times, times + kfCount);
+
+            // Values (output accessor) — always stored as vec4 for uniform layout.
+            const auto& outAcc = model.accessors[sampler.output];
+            const size_t valCount = (sampler.interpolation == "CUBICSPLINE")
+                                    ? kfCount  // take only the middle values (in-tangent + value + out-tangent)
+                                    : kfCount;
+            ch.values.resize(valCount);
+
+            if (target == AnimChannel::Target::Rotation) {
+                // Rotation: xyzw quaternion stored directly.
+                const glm::vec4* vals = AccessorData<glm::vec4>(model, sampler.output);
+                const uint32_t stride = (sampler.interpolation == "CUBICSPLINE") ? 3 : 1;
+                for (size_t ki = 0; ki < kfCount; ++ki)
+                    ch.values[ki] = vals[ki * stride + (stride == 3 ? 1 : 0)];
+            } else {
+                // Translation/Scale: vec3 → stored as vec4 with w=0.
+                const glm::vec3* vals = AccessorData<glm::vec3>(model, sampler.output);
+                const uint32_t stride = (sampler.interpolation == "CUBICSPLINE") ? 3 : 1;
+                for (size_t ki = 0; ki < kfCount; ++ki) {
+                    const glm::vec3& v = vals[ki * stride + (stride == 3 ? 1 : 0)];
+                    ch.values[ki] = {v.x, v.y, v.z, 0.f};
+                }
+            }
+
+            if (!ch.times.empty())
+                clip.duration = std::max(clip.duration, ch.times.back());
+
+            clip.channels.push_back(std::move(ch));
+        }
+
+        scene.animations.push_back(std::move(clip));
     }
 }
 
@@ -264,7 +434,6 @@ std::optional<SceneData> GltfLoader::Load(const std::string& path) {
     tinygltf::Model    model;
     std::string        err, warn;
 
-    // Provide a custom image loader that delegates to our ImageLoader.
     loader.SetImageLoader(
         [](tinygltf::Image* image, const int /*imageIdx*/,
            std::string* err, std::string* /*warn*/,
@@ -286,7 +455,6 @@ std::optional<SceneData> GltfLoader::Load(const std::string& path) {
         },
         nullptr);
 
-    // Detect GLB vs GLTF by extension
     bool ok = false;
     if (path.size() >= 4 && path.substr(path.size() - 4) == ".glb")
         ok = loader.LoadBinaryFromFile(&model, &err, &warn, path);
@@ -321,25 +489,46 @@ std::optional<SceneData> GltfLoader::Load(const std::string& path) {
     for (const auto& gm : model.materials)
         scene.materials.push_back(ConvertMaterial(gm, model));
 
-    // ── Meshes ────────────────────────────────────────────────────────────────
+    // ── Skins (skeletons) ─────────────────────────────────────────────────────
+    ConvertSkins(model, scene);
+
+    // ── Nodes + hierarchy (stores skinIndex per node) ─────────────────────────
+    ConvertNodes(model, scene);
+
+    // ── Meshes (passes skinIndex from the node that references each primitive) ─
+    // Build a per-node skinIndex lookup since gltf primitives don't carry skin info.
+    // skin info comes from the node, not the primitive.
+    std::vector<int> meshNodeSkin(model.meshes.size(), -1);
+    for (const auto& gn : model.nodes) {
+        if (gn.mesh >= 0 && gn.skin >= 0)
+            meshNodeSkin[gn.mesh] = gn.skin;
+    }
+
     scene.meshes.reserve(model.meshes.size());
-    for (const auto& gm : model.meshes) {
+    for (size_t mi = 0; mi < model.meshes.size(); ++mi) {
+        const auto& gm = model.meshes[mi];
         MeshData mesh;
         mesh.name = gm.name;
         mesh.primitives.reserve(gm.primitives.size());
+        const int skinIdx = meshNodeSkin[mi];
         for (const auto& gp : gm.primitives)
-            mesh.primitives.push_back(ConvertPrimitive(model, gp));
+            mesh.primitives.push_back(ConvertPrimitive(model, gp, skinIdx));
         scene.meshes.push_back(std::move(mesh));
     }
 
-    // ── Nodes + hierarchy ────────────────────────────────────────────────────
-    ConvertNodes(model, scene);
+    // ── Animations ────────────────────────────────────────────────────────────
+    std::vector<std::vector<int>> skinJoints;
+    skinJoints.reserve(model.skins.size());
+    for (const auto& gs : model.skins)
+        skinJoints.push_back(gs.joints);
+    ConvertAnimations(model, scene, skinJoints);
 
     SA_LOG_INFO("GltfLoader: loaded '{}' — {} mesh(es), {} material(s), "
-                "{} image(s), {} node(s), {} vertices, {} indices",
+                "{} image(s), {} node(s), {} skin(s), {} anim(s), {} vertices, {} indices",
                 path,
                 scene.meshes.size(), scene.materials.size(),
                 scene.images.size(), scene.nodes.size(),
+                scene.skins.size(), scene.animations.size(),
                 scene.TotalVertexCount(), scene.TotalIndexCount());
 
     return scene;

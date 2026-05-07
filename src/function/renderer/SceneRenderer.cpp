@@ -4,6 +4,7 @@
 #include "function/material/AttachmentKey.hpp"
 #include "function/material/MaterialType.hpp"
 #include "function/scene/Components.hpp"
+#include "platform/rhi/ShaderReflectionIO.hpp"
 #include "resource/ResourceManager.hpp"
 #include "resource/cook/CookedSH9.hpp"
 #include "resource/cook/CookedTexture.hpp"
@@ -34,8 +35,13 @@ bool SceneRenderer::Init(const Desc& desc) {
     const auto frameLayout = m_frameUniforms.GetLayout();
 
     // IBL bake — initialise so SetIBL can fall back to GPU bake on cache miss.
-    if (!m_iblBake.Init(desc.device, desc.shaderDir))
+    if (!m_iblBake.Init(desc.device, desc.shaderDir)) {
         SA_LOG_WARN("SceneRenderer: GpuIblBake init failed — IBL bake unavailable");
+    } else {
+        // Pre-bake the BRDF LUT immediately (no HDR needed).
+        // Cached so ApplyWorldSettings can use it even before a Skybox is ever loaded.
+        m_cachedBrdfLut = m_iblBake.BakeBrdfLut(desc.device);
+    }
 
     // LTC LUT upload — always succeeds if device is valid; data is embedded.
     m_ltcBake.Upload(desc.device);
@@ -83,6 +89,24 @@ bool SceneRenderer::Init(const Desc& desc) {
         m_gbWidth = m_gbHeight = 1;
     }
 
+    // ── Selection mask + dilateH intermediate (1×1 placeholders, resized on first RenderFrame) ──
+    {
+        auto makeR8 = [&](const char* name) {
+            RHI::RHITextureDesc d{};
+            d.width     = 1;
+            d.height    = 1;
+            d.format    = RHI::RHIFormat::R8_UNORM;
+            d.usage     = RHI::RHITextureUsage::RenderTarget
+                        | RHI::RHITextureUsage::Sampled;
+            d.debugName = name;
+            return desc.device->CreateTexture(d);
+        };
+        m_selectionMask  = makeR8("SelectionMask");
+        m_dilateH        = makeR8("DilateH");
+        m_selectionMaskW = 1;
+        m_selectionMaskH = 1;
+    }
+
     // ── Depth texture (1×1 placeholder, resized on first RenderFrame) ─────────
     {
         RHI::RHITextureDesc d{};
@@ -99,16 +123,32 @@ bool SceneRenderer::Init(const Desc& desc) {
 
     // ── Pre-register built-in passes as features ───────────────────────────────
     // Insert at front in reverse execution order so final order is:
-    //   [Shadow?, Skybox, GBuffer, DeferredLighting, Bloom?, Tonemap?, ...user features]
-    if (m_config.builtinTonemap)
-        m_features.insert(m_features.begin(), std::make_unique<TonemapFeature>());
+    //   [Shadow?, Skybox, GBuffer, DeferredLighting, SelectionMask, Bloom?, Tonemap?,
+    //    ...user features, SelectionOutline, DebugOverlay]
+    if (m_config.builtinTonemap) {
+        auto tf = std::make_unique<TonemapFeature>();
+        m_tonemapFeature = tf.get();
+        m_features.insert(m_features.begin(), std::move(tf));
+    }
     if (m_config.bloomEnabled)
         m_features.insert(m_features.begin(), std::make_unique<BloomFeature>(m_bloomMipCount));
     m_features.insert(m_features.begin(), std::make_unique<DeferredLightingFeature>());
+    // SelectionMask runs immediately after DeferredLighting (depth is populated,
+    // already transitioned back to depth-attachment by this WriteDepth declaration).
+    m_features.insert(m_features.begin() + 1, std::make_unique<SelectionMaskFeature>(this));
     m_features.insert(m_features.begin(), std::make_unique<GBufferFeature>(this));
-    m_features.insert(m_features.begin(), std::make_unique<SkyboxFeature>());
+    {
+        auto sf = std::make_unique<SkyboxFeature>();
+        m_skyboxFeature = sf.get();
+        m_features.insert(m_features.begin(), std::move(sf));
+    }
     if (m_config.shadowEnabled)
         m_features.insert(m_features.begin(), std::make_unique<ShadowFeature>());
+
+    // ── Selection outline + infinite grid + debug overlay — always last ─────────
+    m_features.push_back(std::make_unique<SelectionOutlineFeature>());
+    m_features.push_back(std::make_unique<InfiniteGridFeature>());
+    m_features.push_back(std::make_unique<DebugOverlayFeature>());
 
     // ── Call OnInit on all features (built-in + user pre-registered) ──────────
     for (auto& f : m_features)
@@ -135,12 +175,17 @@ void SceneRenderer::Shutdown() {
     for (int i = 0; i < m_bloomMipCount; ++i)
         if (m_bloomMip[i].IsValid()) m_device->DestroyTexture(m_bloomMip[i]);
 
+    if (m_selectionMask.IsValid()) m_device->DestroyTexture(m_selectionMask);
+    if (m_dilateH.IsValid())       m_device->DestroyTexture(m_dilateH);
+
     if (m_iblBake.IsInitialized())
         m_iblBake.Shutdown(m_device);
     if (m_ltcBake.IsUploaded())
         m_ltcBake.Shutdown(m_device);
     if (m_depthTex.IsValid())
         m_device->DestroyTexture(m_depthTex);
+    if (m_solidAmbientCube.IsValid())
+        m_device->DestroyTexture(m_solidAmbientCube);
 
     m_frameUniforms.Shutdown();
     m_ready = false;
@@ -150,7 +195,10 @@ void SceneRenderer::Shutdown() {
 
 bool SceneRenderer::SetIBL(const WorldSettings& ws)
 {
+    // Reset IBL state unconditionally — cleared first, overwritten on success.
+    // This ensures stale baked textures don't persist when switching to SolidColor.
     for (int i = 0; i < 9; ++i) m_shCoeffs[i] = {};
+    m_frameUniforms.SetIBLTextures({}, {}, {});
 
     const bool hasOffline = ws.sh9.IsValid() &&
                             ws.prefilteredEnv.IsValid() &&
@@ -165,6 +213,7 @@ bool SceneRenderer::SetIBL(const WorldSettings& ws)
         if (sh9Opt && blt.IsValid() && pet.IsValid() && sky.IsValid()) {
             for (int i = 0; i < 9; ++i) m_shCoeffs[i] = (*sh9Opt)[i];
             m_frameUniforms.SetIBLTextures(blt, pet, sky);
+            m_cachedBrdfLut = blt;
             SA_LOG_INFO("SceneRenderer: IBL loaded from cook cache");
             return true;
         }
@@ -198,6 +247,7 @@ bool SceneRenderer::SetIBL(const WorldSettings& ws)
     std::copy(std::begin(r.shCoeffs), std::end(r.shCoeffs), std::begin(m_shCoeffs));
 
     m_frameUniforms.SetIBLTextures(r.brdfLut, r.prefilteredEnv, r.skyboxCubemap);
+    m_cachedBrdfLut = r.brdfLut;
 
     auto saveGpuTex = [&](RHI::RHITextureHandle tex,
                            const AssetID&        id,
@@ -256,6 +306,137 @@ bool SceneRenderer::SetIBL(const WorldSettings& ws)
                         ws.sh9.ToString().substr(0, 8));
     }
     return true;
+}
+
+// ── ApplyWorldSettings ────────────────────────────────────────────────────────
+
+void SceneRenderer::ApplyWorldSettings(const WorldSettings& ws, bool updateIBL)
+{
+    // Update skybox background mode + color immediately (no GPU work needed).
+    if (m_skyboxFeature) {
+        m_skyboxFeature->m_backgroundMode  = ws.backgroundMode;
+        m_skyboxFeature->m_backgroundColor = ws.backgroundColor;
+    }
+
+    // IBL — solid-color mode encodes backgroundColor as constant ambient (SH L0);
+    // Skybox mode loads/bakes from HDR.  SolidColor always overrides IBL state
+    // even when ws.skyboxHdr is still set from a prior Skybox session.
+    if (updateIBL) {
+        if (ws.backgroundMode == WorldSettings::BackgroundMode::SolidColor) {
+            // SH diffuse — encode backgroundColor as constant ambient (L0 term only).
+            // EvaluateSHIrradiance: irrSH[0] * 0.282095 = desired irradiance.
+            for (int i = 0; i < 9; ++i) m_shCoeffs[i] = {};
+            m_shCoeffs[0] = glm::vec4(ws.backgroundColor / 0.282095f, 0.f);
+            // Specular — write backgroundColor into a 1×1 cubemap so metallic
+            // surfaces reflect the ambient color (matches Unity "Ambient Color" mode).
+            // If no BRDF LUT is cached yet, specular falls back to the black placeholder.
+            UpdateSolidAmbientCube(ws.backgroundColor);
+            m_frameUniforms.SetIBLTextures(m_cachedBrdfLut,
+                                            m_solidAmbientCube, m_solidAmbientCube);
+        } else {
+            SetIBL(ws);
+        }
+    }
+
+    // Tonemap — update params or replace the feature if mode changed.
+    if (!m_tonemapFeature) return;
+
+    const FeatureInitContext ctx{m_device, m_matMgr, m_resMgr,
+                                  m_frameUniforms.GetLayout(), m_shaderDir};
+
+    if (ws.tonemapMode == WorldSettings::TonemapMode::Builtin) {
+        if (auto* tf = dynamic_cast<TonemapFeature*>(m_tonemapFeature)) {
+            tf->m_exposure = ws.exposure;
+            tf->m_gamma    = ws.gamma;
+        } else {
+            // Replace LUT → Builtin
+            m_device->WaitIdle();
+            auto newFeature = std::make_unique<TonemapFeature>();
+            newFeature->m_exposure = ws.exposure;
+            newFeature->m_gamma    = ws.gamma;
+            ReplaceTonemapFeature(std::move(newFeature), ctx);
+        }
+    } else {
+        // LUT tonemap — requires a valid, loaded texture.
+        // If no LUT is set, fall back to the builtin ACES pipeline instead.
+        RHI::RHITextureHandle lutTex;
+        if (ws.tonemapLut.IsValid())
+            lutTex = m_resMgr->LoadTexture(ws.tonemapLut);
+
+        if (!lutTex.IsValid()) {
+            SA_LOG_WARN("SceneRenderer: LUT mode requested but no valid LUT texture — falling back to builtin tonemap");
+            if (!dynamic_cast<TonemapFeature*>(m_tonemapFeature)) {
+                m_device->WaitIdle();
+                auto newFeature = std::make_unique<TonemapFeature>();
+                newFeature->m_exposure = ws.exposure;
+                newFeature->m_gamma    = ws.gamma;
+                ReplaceTonemapFeature(std::move(newFeature), ctx);
+            } else if (auto* tf = dynamic_cast<TonemapFeature*>(m_tonemapFeature)) {
+                tf->m_exposure = ws.exposure;
+                tf->m_gamma    = ws.gamma;
+            }
+            return;
+        }
+
+        if (auto* lf = dynamic_cast<LutTonemapFeature*>(m_tonemapFeature)) {
+            lf->m_exposure    = ws.exposure;
+            lf->m_lutStrength = ws.lutStrength;
+            lf->SetLutTexture(m_device, lutTex);
+        } else {
+            // Replace Builtin → LUT
+            m_device->WaitIdle();
+            auto newFeature = std::make_unique<LutTonemapFeature>();
+            newFeature->m_exposure    = ws.exposure;
+            newFeature->m_lutStrength = ws.lutStrength;
+            ReplaceTonemapFeature(std::move(newFeature), ctx);
+            static_cast<LutTonemapFeature*>(m_tonemapFeature)->SetLutTexture(m_device, lutTex);
+        }
+    }
+}
+
+// Creates (or recreates) a 1×1 RGBA32F cubemap filled with `color`.
+// Called by ApplyWorldSettings in SolidColor mode for the specular ambient fallback.
+void SceneRenderer::UpdateSolidAmbientCube(glm::vec3 color)
+{
+    if (m_solidAmbientCube.IsValid() && color == m_solidAmbientColor) return;
+
+    if (m_solidAmbientCube.IsValid()) {
+        m_device->WaitIdle();
+        m_device->DestroyTexture(m_solidAmbientCube);
+    }
+
+    RHI::RHITextureDesc d{};
+    d.width = d.height = 1;
+    d.cubemap   = true;
+    d.format    = RHI::RHIFormat::RGBA32F;
+    d.usage     = RHI::RHITextureUsage::Sampled;
+    d.debugName = "SolidAmbientCube";
+    m_solidAmbientCube = m_device->CreateTexture(d);
+
+    const float px[4] = { color.r, color.g, color.b, 1.f };
+    float buf[6 * 4];
+    for (int f = 0; f < 6; ++f)
+        std::copy(px, px + 4, buf + f * 4);
+    m_device->UploadTextureData(m_solidAmbientCube, buf, sizeof(buf));
+
+    m_solidAmbientColor = color;
+}
+
+// Finds the current m_tonemapFeature slot in m_features, shuts it down, replaces it,
+// and updates m_tonemapFeature.  Called only from ApplyWorldSettings.
+void SceneRenderer::ReplaceTonemapFeature(std::unique_ptr<RenderFeature> newFeature,
+                                           const FeatureInitContext& ctx)
+{
+    for (auto& slot : m_features) {
+        if (slot.get() == m_tonemapFeature) {
+            slot->OnShutdown(m_device);
+            newFeature->OnInit(ctx);
+            m_tonemapFeature = newFeature.get();
+            slot = std::move(newFeature);
+            return;
+        }
+    }
+    SA_LOG_WARN("SceneRenderer::ReplaceTonemapFeature: slot not found");
 }
 
 // ── BuildDrawList ─────────────────────────────────────────────────────────────
@@ -352,6 +533,79 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
             // Each material type owns its own G-Buffer pipeline.
             // The attachment key (3 MRT + depth) is the same for all types;
             // the pipeline is keyed per-type so different set=1 layouts are safe.
+            item.pipeline         = item.material->GetType()->GetOrCreatePipeline(m_device, gbKey);
+            item.pushConstantSize = static_cast<uint32_t>(sizeof(glm::mat4));
+
+            m_drawItems.push_back(std::move(item));
+        }
+    });
+
+    // ── Skinned meshes ────────────────────────────────────────────────────────
+    // SkinnedMeshComponent::dynVertexBuffer is updated each frame by AnimationSystem.
+    // We build draw items once (like static meshes) — same buffer handle, new contents.
+    scene.View<SkinnedMeshComponent, WorldTransformComponent>().each(
+        [&](entt::entity e,
+            const SkinnedMeshComponent&    meshComp,
+            const WorldTransformComponent& /*wt*/)
+    {
+        if (!meshComp.ready || !meshComp.dynVertexBuffer.IsValid()) return;
+
+        const auto* pbrComp   = reg.try_get<PBRSurfaceComponent>(e);
+        const auto* paramComp = reg.try_get<MaterialParamComponent>(e);
+
+        for (size_t si = 0; si < meshComp.subMeshes.size(); ++si) {
+            const auto& sub = meshComp.subMeshes[si];
+
+            MaterialInstance* base = m_defaultMaterial.get();
+
+            if (si < meshComp.materialSlots.size() && meshComp.materialSlots[si].IsValid()) {
+                MaterialInstance* loaded = m_matMgr->LoadMaterial(
+                    meshComp.materialSlots[si], m_cookCacheDir, *m_resMgr);
+                if (loaded) base = loaded;
+            } else if (sub.materialAssetID.IsValid()) {
+                MaterialInstance* loaded = m_matMgr->LoadMaterial(
+                    sub.materialAssetID, m_cookCacheDir, *m_resMgr);
+                if (loaded) base = loaded;
+            }
+
+            DrawItem item{};
+            item.entity            = e;
+            item.subLocalTransform = glm::mat4(1.f);  // skeleton drives transforms
+            item.vertexBuffer      = meshComp.dynVertexBuffer;
+            item.indexBuffer       = meshComp.indexBuffer;
+            item.firstIndex        = sub.firstIndex;
+            item.indexCount        = sub.indexCount;
+            item.vertexOffset      = sub.vertexOffset;
+
+            if (pbrComp || paramComp) {
+                auto clone = m_matMgr->CloneInstance(base);
+                if (!clone) { item.material = base; }
+                else {
+                    if (pbrComp) {
+                        clone->SetVec4 ("baseColorFactor", pbrComp->baseColor);
+                        clone->SetFloat("roughnessFactor", pbrComp->roughness);
+                        clone->SetFloat("metallicFactor",  pbrComp->metallic);
+                        if (pbrComp->albedoMap.IsValid())
+                            clone->SetTexture("t_BaseColor",
+                                m_resMgr->LoadTexture(pbrComp->albedoMap));
+                        if (pbrComp->normalMap.IsValid())
+                            clone->SetTexture("t_Normal",
+                                m_resMgr->LoadTexture(pbrComp->normalMap));
+                    }
+                    if (paramComp) {
+                        for (const auto& [name, val] : paramComp->scalars)
+                            std::visit([&](const auto& v){ clone->SetParam(name, v); }, val);
+                        for (const auto& [name, texID] : paramComp->textures)
+                            if (texID.IsValid())
+                                clone->SetTexture(name, m_resMgr->LoadTexture(texID));
+                    }
+                    item.material      = clone.get();
+                    item.ownedMaterial = std::move(clone);
+                }
+            } else {
+                item.material = base;
+            }
+
             item.pipeline         = item.material->GetType()->GetOrCreatePipeline(m_device, gbKey);
             item.pushConstantSize = static_cast<uint32_t>(sizeof(glm::mat4));
 
@@ -547,6 +801,24 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
         }
         m_depthWidth  = w;
         m_depthHeight = h;
+
+        {
+            auto recreateR8 = [&](RHI::RHITextureHandle& tex, const char* name) {
+                if (tex.IsValid()) m_device->DestroyTexture(tex);
+                RHI::RHITextureDesc d{};
+                d.width     = w;
+                d.height    = h;
+                d.format    = RHI::RHIFormat::R8_UNORM;
+                d.usage     = RHI::RHITextureUsage::RenderTarget
+                            | RHI::RHITextureUsage::Sampled;
+                d.debugName = name;
+                tex = m_device->CreateTexture(d);
+            };
+            recreateR8(m_selectionMask, "SelectionMask");
+            recreateR8(m_dilateH,       "DilateH");
+            m_selectionMaskW = w;
+            m_selectionMaskH = h;
+        }
     }
 
     // ── Phase 1: collect frame data ───────────────────────────────────────────
@@ -555,6 +827,7 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
     fu.time       = static_cast<float>(m_frameCount) / 60.f;
     std::copy(std::begin(m_shCoeffs), std::end(m_shCoeffs), std::begin(fu.irrSH));
     ApplyCameraToUniforms(camera, fu);
+    m_currentViewProj = fu.viewProj;
     const LightUniforms lu = GatherLights(scene);
 
     // Compute light-space matrix from the first directional light found.
@@ -578,6 +851,10 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
     // ── Phase 2: GPU work ─────────────────────────────────────────────────────
     m_cmd = m_device->BeginFrame();
     if (!m_cmd) return;
+
+    // Rebuild draw-list after BeginFrame so the fence-wait has already retired
+    // any GPU work that held references to the previous draw-items.
+    if (scene.IsAndClearMaterialDirty()) BuildDrawList(scene);
 
     const uint32_t fi = m_device->GetCurrentFrameIndex();
     m_frameUniforms.Upload(fi, fu, lu);
@@ -608,16 +885,22 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
         m_rgBloomMip[i] = m_rg.ImportTexture(name, m_bloomMip[i],
             RHI::RHIResourceState::Undefined, RHI::RHIResourceState::Undefined);
     }
+    m_rgSelectionMask = m_rg.ImportTexture("SelectionMask", m_selectionMask,
+        RHI::RHIResourceState::Undefined, RHI::RHIResourceState::Undefined);
+    m_rgDilateH = m_rg.ImportTexture("DilateH", m_dilateH,
+        RHI::RHIResourceState::Undefined, RHI::RHIResourceState::Undefined);
 
     // ── Build RendererHandles (RG handles for all built-in render targets) ───────
     RendererHandles handles{};
-    handles.hdr        = m_rgHdr;
-    handles.swapchain  = m_rgSwapchain;
-    handles.depth      = m_rgDepth;
-    handles.gbufferRT0 = m_rgGbRT0;
-    handles.gbufferRT1 = m_rgGbRT1;
-    handles.gbufferRT2 = m_rgGbRT2;
-    handles.shadowMap  = m_rgShadowMap;
+    handles.hdr           = m_rgHdr;
+    handles.swapchain     = m_rgSwapchain;
+    handles.depth         = m_rgDepth;
+    handles.gbufferRT0    = m_rgGbRT0;
+    handles.gbufferRT1    = m_rgGbRT1;
+    handles.gbufferRT2    = m_rgGbRT2;
+    handles.shadowMap     = m_rgShadowMap;
+    handles.selectionMask = m_rgSelectionMask;
+    handles.dilateH       = m_rgDilateH;
     handles.bloomMipCount = m_bloomMipCount;
     for (int i = 0; i < m_bloomMipCount; ++i)
         handles.bloomMip[i] = m_rgBloomMip[i];
@@ -627,7 +910,8 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
     // We build a flat array: index → RHITextureHandle.
     // RG assigns indices starting from 0; the table size = highest index + 1.
     // We pre-fill with the known mapping here; unknown indices resolve to {}.
-    const uint32_t tableSize = 8 + static_cast<uint32_t>(kMaxBloomMips);
+    // 7 non-bloom + kMaxBloomMips bloom + SelectionMask + DilateH = 9 + kMaxBloomMips slots.
+    const uint32_t tableSize = 9 + static_cast<uint32_t>(kMaxBloomMips);
     std::vector<RHI::RHITextureHandle> rhiTable(tableSize);
     auto fillEntry = [&](RGTextureHandle rg, RHI::RHITextureHandle rhi) {
         if (rg.IsValid() && rg.index < tableSize) rhiTable[rg.index] = rhi;
@@ -641,6 +925,8 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
     fillEntry(m_rgShadowMap,  m_shadowMap);
     for (int i = 0; i < m_bloomMipCount; ++i)
         fillEntry(m_rgBloomMip[i], m_bloomMip[i]);
+    fillEntry(m_rgSelectionMask, m_selectionMask);
+    fillEntry(m_rgDilateH,       m_dilateH);
 
     FrameContext ctx{};
     ctx.rg       = &m_rg;
@@ -684,7 +970,7 @@ void SceneRenderer::ShadowFeature::OnInit(const FeatureInitContext& ctx)
 {
     ctx.matMgr->RegisterTypeFromShaders(
         {"Shadow", "shadow", "shadow",
-         RHI::RHICullMode::Front, RHI::RHIBlendMode::Opaque, true, true, false}, ctx);
+         RHI::RHICullMode::Front, RHI::RHIBlendMode::Opaque, RHI::RHITopology::TriangleList, true, true, false}, ctx);
     m_type = ctx.matMgr->GetType("Shadow");
     if (!m_type) SA_LOG_WARN("ShadowFeature: shader load failed — shadows disabled");
 }
@@ -751,7 +1037,7 @@ void SceneRenderer::SkyboxFeature::OnInit(const FeatureInitContext& ctx)
 {
     ctx.matMgr->RegisterTypeFromShaders(
         {"Skybox", "skybox", "skybox",
-         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque, false, false, true}, ctx);
+         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque, RHI::RHITopology::TriangleList, false, false, true}, ctx);
     m_type = ctx.matMgr->GetType("Skybox");
     if (!m_type) SA_LOG_WARN("SkyboxFeature: shader load failed — skybox disabled");
 }
@@ -762,18 +1048,41 @@ void SceneRenderer::SkyboxFeature::AddPasses(SceneRenderer& /*renderer*/,
                                               const entt::registry& /*reg*/,
                                               uint32_t w, uint32_t h)
 {
+    const RGTextureHandle rgHdr   = handles.hdr;
+    const glm::vec3       bgColor = m_backgroundColor;
+
+    if (m_backgroundMode == WorldSettings::BackgroundMode::SolidColor) {
+        ctx.rg->AddPass("Skybox",
+            [rgHdr](RGPassBuilder& b) { b.Write(rgHdr); },
+            [rgHdr, bgColor, w, h]
+            (RHI::IRHICommandList& cmd, const RGResources& res)
+            {
+                RHI::RHIRenderPassDesc rpDesc{};
+                rpDesc.colorAttachmentCount = 1;
+                rpDesc.colorAttachments[0].texture        = res.Get(rgHdr);
+                rpDesc.colorAttachments[0].clearOnLoad    = true;
+                rpDesc.colorAttachments[0].clearColor[0]  = bgColor.r;
+                rpDesc.colorAttachments[0].clearColor[1]  = bgColor.g;
+                rpDesc.colorAttachments[0].clearColor[2]  = bgColor.b;
+                rpDesc.colorAttachments[0].clearColor[3]  = 1.f;
+                rpDesc.width  = w;
+                rpDesc.height = h;
+                cmd.BeginRenderPass(rpDesc);
+                cmd.EndRenderPass();
+            });
+        return;
+    }
+
+    // Skybox mode — draw fullscreen skybox into HDR buffer.
     if (!m_type) return;
 
-    // Skybox writes to HDR buffer (not swapchain); tonemap handles the final blit.
     AttachmentKey key{};
     key.colorCount      = 1;
     key.colorFormats[0] = RHI::RHIFormat::RGBA16F;
     key.depthFormat     = RHI::RHIFormat::Undefined;
 
     const RHI::RHIPipelineHandle pipeline = m_type->GetOrCreatePipeline(ctx.device, key);
-
-    const RHI::RHIDescSetHandle descSet = ctx.frameSet;
-    const RGTextureHandle rgHdr = handles.hdr;
+    const RHI::RHIDescSetHandle  descSet  = ctx.frameSet;
 
     ctx.rg->AddPass("Skybox",
         [rgHdr](RGPassBuilder& b) { b.Write(rgHdr); },
@@ -890,7 +1199,7 @@ void SceneRenderer::DeferredLightingFeature::OnInit(const FeatureInitContext& ct
 {
     ctx.matMgr->RegisterTypeFromShaders(
         {"DeferredLighting", "fullscreen_tri", "deferred_lighting",
-         RHI::RHICullMode::None, RHI::RHIBlendMode::AlphaBlend, false, false, true}, ctx);
+         RHI::RHICullMode::None, RHI::RHIBlendMode::AlphaBlend, RHI::RHITopology::TriangleList, false, false, true}, ctx);
     m_type = ctx.matMgr->GetType("DeferredLighting");
     if (!m_type) { SA_LOG_WARN("DeferredLightingFeature: shader load failed"); return; }
     m_gbDescSet = ctx.device->AllocateDescriptorSet(m_type->shader.GetMaterialLayout());
@@ -968,7 +1277,7 @@ void SceneRenderer::TonemapFeature::OnInit(const FeatureInitContext& ctx)
 {
     ctx.matMgr->RegisterTypeFromShaders(
         {"Tonemap", "fullscreen_tri", "postfx_tonemap",
-         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque, false, false, true}, ctx);
+         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque, RHI::RHITopology::TriangleList, false, false, true}, ctx);
     m_type = ctx.matMgr->GetType("Tonemap");
     if (!m_type) { SA_LOG_WARN("TonemapFeature: shader load failed"); return; }
     m_hdrDescSet = ctx.device->AllocateDescriptorSet(m_type->shader.GetMaterialLayout());
@@ -1001,7 +1310,7 @@ void SceneRenderer::TonemapFeature::AddPasses(SceneRenderer& /*renderer*/,
     const RGTextureHandle rgSwapchain = handles.swapchain;
 
     struct TonemapPC { float exposure; float gamma; float _pad0; float _pad1; };
-    constexpr TonemapPC pc{1.0f, 2.2f, 0.f, 0.f};
+    const TonemapPC pc{m_exposure, m_gamma, 0.f, 0.f};
 
     ctx.rg->AddPass("Tonemap",
         [rgHdr, rgSwapchain](RGPassBuilder& b) {
@@ -1030,22 +1339,106 @@ void SceneRenderer::TonemapFeature::AddPasses(SceneRenderer& /*renderer*/,
         });
 }
 
+// ── LutTonemapFeature ─────────────────────────────────────────────────────────
+
+void SceneRenderer::LutTonemapFeature::OnInit(const FeatureInitContext& ctx)
+{
+    ctx.matMgr->RegisterTypeFromShaders(
+        {"LutTonemap", "fullscreen_tri", "postfx_lut_tonemap",
+         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque, RHI::RHITopology::TriangleList, false, false, true}, ctx);
+    m_type = ctx.matMgr->GetType("LutTonemap");
+    if (!m_type) { SA_LOG_WARN("LutTonemapFeature: shader load failed"); return; }
+    m_hdrLutDescSet = ctx.device->AllocateDescriptorSet(m_type->shader.GetMaterialLayout());
+    m_trackedW = m_trackedH = 0;
+    // binding=1 (t_LUT) is written by SetLutTexture, called by ApplyWorldSettings
+    // immediately after feature construction — never rendered before that.
+}
+
+void SceneRenderer::LutTonemapFeature::OnShutdown(RHI::IRHIDevice* /*device*/)
+{
+    // Descriptor sets are pool-allocated; no explicit free needed.
+    m_hdrLutDescSet = {};
+    m_type = nullptr;
+}
+
+void SceneRenderer::LutTonemapFeature::SetLutTexture(RHI::IRHIDevice* device,
+                                                      RHI::RHITextureHandle tex)
+{
+    if (m_hdrLutDescSet.IsValid() && tex.IsValid())
+        device->WriteDescriptorTexture(m_hdrLutDescSet, 1, tex);
+}
+
+void SceneRenderer::LutTonemapFeature::AddPasses(SceneRenderer& /*renderer*/,
+                                                  const FrameContext& ctx,
+                                                  const RendererHandles& handles,
+                                                  const entt::registry& /*reg*/,
+                                                  uint32_t w, uint32_t h)
+{
+    if (!m_type || !m_hdrLutDescSet.IsValid()) return;
+
+    if (w != m_trackedW || h != m_trackedH) {
+        ctx.BindTexture(m_hdrLutDescSet, 0, handles.hdr);
+        m_trackedW = w;
+        m_trackedH = h;
+    }
+
+    AttachmentKey swapKey{};
+    swapKey.colorCount      = 1;
+    swapKey.colorFormats[0] = ctx.device->GetSwapchainFormat();
+    swapKey.depthFormat     = RHI::RHIFormat::Undefined;
+
+    const RHI::RHIPipelineHandle pipeline     = m_type->GetOrCreatePipeline(ctx.device, swapKey);
+    const RHI::RHIDescSetHandle  frameSet     = ctx.frameSet;
+    const RHI::RHIDescSetHandle  hdrLutDescSet = m_hdrLutDescSet;
+    const RGTextureHandle        rgHdr         = handles.hdr;
+    const RGTextureHandle        rgSwapchain   = handles.swapchain;
+
+    struct LutTonemapPC { float exposure; float lutStrength; float _pad0; float _pad1; };
+    const LutTonemapPC pc{m_exposure, m_lutStrength, 0.f, 0.f};
+
+    ctx.rg->AddPass("Tonemap",
+        [rgHdr, rgSwapchain](RGPassBuilder& b) {
+            b.Read(rgHdr);
+            b.Write(rgSwapchain);
+        },
+        [pipeline, frameSet, hdrLutDescSet, pc, rgSwapchain, w, h]
+        (RHI::IRHICommandList& cmd, const RGResources& res)
+        {
+            RHI::RHIRenderPassDesc rpDesc{};
+            rpDesc.colorAttachmentCount = 1;
+            rpDesc.colorAttachments[0].texture     = res.Get(rgSwapchain);
+            rpDesc.colorAttachments[0].clearOnLoad = true;
+            rpDesc.width  = w;
+            rpDesc.height = h;
+
+            cmd.BeginRenderPass(rpDesc);
+            cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
+            cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
+            cmd.SetPipeline(pipeline);
+            cmd.SetDescriptorSet(0, frameSet);
+            cmd.SetDescriptorSet(1, hdrLutDescSet);
+            cmd.SetPushConstants(&pc, sizeof(pc), RHI::RHIShaderStage::Fragment);
+            cmd.Draw(3, 1, 0, 0);
+            cmd.EndRenderPass();
+        });
+}
+
 // ── BloomFeature ──────────────────────────────────────────────────────────────
 
 void SceneRenderer::BloomFeature::OnInit(const FeatureInitContext& ctx)
 {
     ctx.matMgr->RegisterTypeFromShaders(
         {"BloomThreshold",  "fullscreen_tri", "bloom_threshold",
-         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque,    false, false, true}, ctx);
+         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque,   RHI::RHITopology::TriangleList, false, false, true}, ctx);
     ctx.matMgr->RegisterTypeFromShaders(
         {"BloomDownsample", "fullscreen_tri", "bloom_downsample",
-         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque,    false, false, true}, ctx);
+         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque,   RHI::RHITopology::TriangleList, false, false, true}, ctx);
     ctx.matMgr->RegisterTypeFromShaders(
         {"BloomUpsample",   "fullscreen_tri", "bloom_upsample",
-         RHI::RHICullMode::None, RHI::RHIBlendMode::Additive,  false, false, true}, ctx);
+         RHI::RHICullMode::None, RHI::RHIBlendMode::Additive, RHI::RHITopology::TriangleList, false, false, true}, ctx);
     ctx.matMgr->RegisterTypeFromShaders(
         {"BloomComposite",  "fullscreen_tri", "bloom_composite",
-         RHI::RHICullMode::None, RHI::RHIBlendMode::Additive,  false, false, true}, ctx);
+         RHI::RHICullMode::None, RHI::RHIBlendMode::Additive, RHI::RHITopology::TriangleList, false, false, true}, ctx);
 
     m_thresholdType  = ctx.matMgr->GetType("BloomThreshold");
     m_downsampleType = ctx.matMgr->GetType("BloomDownsample");
@@ -1231,6 +1624,407 @@ void SceneRenderer::BloomFeature::AddPasses(SceneRenderer& renderer,
                 cmd.EndRenderPass();
             });
     }
+}
+
+// ── DebugOverlayFeature ───────────────────────────────────────────────────────
+
+void SceneRenderer::DebugOverlayFeature::OnInit(const FeatureInitContext& ctx)
+{
+    if (!ctx.matMgr->RegisterTypeFromShaders(
+            {"DebugLine", "debug_line", "debug_line",
+             RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque,
+             RHI::RHITopology::LineList, true, false, true}, ctx)) {
+        SA_LOG_WARN("DebugOverlayFeature: shader load failed");
+        return;
+    }
+    m_type = ctx.matMgr->GetType("DebugLine");
+    if (!m_type) return;
+
+    m_descSet = ctx.device->AllocateDescriptorSet(m_type->shader.GetMaterialLayout());
+
+    RHI::RHIBufferDesc bd{};
+    bd.size       = DebugDraw::kMaxVertices * sizeof(DebugDraw::Vertex);
+    bd.usage      = RHI::RHIBufferUsage::Storage;
+    bd.cpuVisible = true;
+    bd.debugName  = "DebugLineSSBO";
+    m_ssbo = ctx.device->CreateBuffer(bd);
+
+    ctx.device->WriteDescriptorBuffer(m_descSet, 0, m_ssbo, 0, bd.size);
+}
+
+void SceneRenderer::DebugOverlayFeature::OnShutdown(RHI::IRHIDevice* device)
+{
+    if (m_ssbo.IsValid()) device->DestroyBuffer(m_ssbo);
+    m_ssbo    = {};
+    m_descSet = {};
+    m_type    = nullptr;
+}
+
+void SceneRenderer::DebugOverlayFeature::AddPasses(
+    SceneRenderer& renderer, const FrameContext& ctx,
+    const RendererHandles& handles, const entt::registry& /*reg*/,
+    uint32_t w, uint32_t h)
+{
+    if (!m_type || !m_ssbo.IsValid() || !m_descSet.IsValid()) return;
+
+    DebugDraw* dd = renderer.m_debugDraw;
+    if (!dd) return;
+
+    const auto     verts     = dd->GetVertices();
+    const uint32_t vertCount = static_cast<uint32_t>(verts.size());
+    if (vertCount == 0) return;
+
+    ctx.device->UploadBufferData(m_ssbo, verts.data(),
+                                 vertCount * sizeof(DebugDraw::Vertex));
+
+    AttachmentKey key{};
+    key.colorCount      = 1;
+    key.colorFormats[0] = ctx.device->GetSwapchainFormat();
+    key.depthFormat     = RHI::RHIFormat::D32F;
+
+    const RHI::RHIPipelineHandle pipeline = m_type->GetOrCreatePipeline(ctx.device, key);
+    if (!pipeline.IsValid()) return;
+
+    const RHI::RHIDescSetHandle frameSet  = ctx.frameSet;
+    const RHI::RHIDescSetHandle descSet   = m_descSet;
+    const RGTextureHandle       rgSwap    = handles.swapchain;
+    const RGTextureHandle       rgDepth   = handles.depth;
+    const glm::mat4             viewProj  = renderer.m_currentViewProj;
+
+    ctx.rg->AddPass("DebugOverlay",
+        [rgSwap, rgDepth](RGPassBuilder& b) {
+            b.Read(rgSwap);
+            b.Write(rgSwap);
+            b.WriteDepth(rgDepth);
+        },
+        [pipeline, frameSet, descSet, viewProj, vertCount, rgSwap, rgDepth, w, h]
+        (RHI::IRHICommandList& cmd, const RGResources& res)
+        {
+            RHI::RHIRenderPassDesc rpDesc{};
+            rpDesc.colorAttachmentCount            = 1;
+            rpDesc.colorAttachments[0].texture     = res.Get(rgSwap);
+            rpDesc.colorAttachments[0].clearOnLoad = false;
+            rpDesc.depthAttachment.texture         = res.Get(rgDepth);
+            rpDesc.depthAttachment.clearOnLoad     = false;
+            rpDesc.hasDepth = true;
+            rpDesc.width    = w;
+            rpDesc.height   = h;
+
+            cmd.BeginRenderPass(rpDesc);
+            cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
+            cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
+            cmd.SetPipeline(pipeline);
+            cmd.SetDescriptorSet(0, frameSet);
+            cmd.SetDescriptorSet(1, descSet);
+            cmd.SetPushConstants(&viewProj, sizeof(glm::mat4), RHI::RHIShaderStage::Vertex);
+            cmd.Draw(vertCount, 1, 0, 0);
+            cmd.EndRenderPass();
+        });
+}
+
+// ── SelectionMaskFeature ──────────────────────────────────────────────────────
+
+void SceneRenderer::SelectionMaskFeature::OnInit(const FeatureInitContext& ctx)
+{
+    if (!ctx.matMgr->RegisterTypeFromShaders(
+            {"SelectionMask", "selection_mask", "selection_mask",
+             RHI::RHICullMode::Back, RHI::RHIBlendMode::Opaque,
+             RHI::RHITopology::TriangleList, false, false, false}, ctx)) {
+        SA_LOG_WARN("SelectionMaskFeature: shader load failed");
+        return;
+    }
+    m_type = ctx.matMgr->GetType("SelectionMask");
+    if (!m_type) SA_LOG_WARN("SelectionMaskFeature: type not found after register");
+}
+
+void SceneRenderer::SelectionMaskFeature::AddPasses(
+    SceneRenderer& renderer, const FrameContext& ctx,
+    const RendererHandles& handles, const entt::registry& reg,
+    uint32_t w, uint32_t h)
+{
+    if (!m_type || renderer.m_selectionEntity == entt::null) return;
+
+    // BFS: collect the selected entity and all descendants so child meshes
+    // are included in the outline (e.g. selecting a skeleton root outlines all parts).
+    std::vector<entt::entity> subtree;
+    subtree.push_back(renderer.m_selectionEntity);
+    for (size_t i = 0; i < subtree.size(); ++i) {
+        if (const auto* hc = reg.try_get<HierarchyComponent>(subtree[i]))
+            for (entt::entity child : hc->children)
+                subtree.push_back(child);
+    }
+
+    struct DC {
+        RHI::RHIBufferHandle vb, ib;
+        uint32_t firstIndex, indexCount;
+        int32_t  vertexOffset;
+        glm::mat4 model;
+    };
+    std::vector<DC> dcs;
+    for (const auto& di : renderer.m_drawItems) {
+        bool inSubtree = false;
+        for (entt::entity e : subtree) { if (di.entity == e) { inSubtree = true; break; } }
+        if (!inSubtree) continue;
+        const auto* wt = reg.try_get<WorldTransformComponent>(di.entity);
+        if (!wt) continue;
+        dcs.push_back({di.vertexBuffer, di.indexBuffer,
+                       di.firstIndex, di.indexCount, di.vertexOffset,
+                       wt->matrix * di.subLocalTransform});
+    }
+    if (dcs.empty()) return;
+
+    // No depth attachment — depthTest=false avoids z-fighting with GBuffer geometry,
+    // giving a clean filled silhouette with no interior holes or edge artifacts.
+    AttachmentKey maskKey{};
+    maskKey.colorCount      = 1;
+    maskKey.colorFormats[0] = RHI::RHIFormat::R8_UNORM;
+    maskKey.depthFormat     = RHI::RHIFormat::Undefined;
+
+    const RHI::RHIPipelineHandle pipeline = m_type->GetOrCreatePipeline(ctx.device, maskKey);
+    if (!pipeline.IsValid()) return;
+
+    const RHI::RHIDescSetHandle frameSet = ctx.frameSet;
+    const RGTextureHandle       rgMask   = handles.selectionMask;
+
+    ctx.rg->AddPass("SelectionMask",
+        [rgMask](RGPassBuilder& b) {
+            b.Write(rgMask);
+        },
+        [pipeline, frameSet, dcs = std::move(dcs), rgMask, w, h]
+        (RHI::IRHICommandList& cmd, const RGResources& res)
+        {
+            RHI::RHIRenderPassDesc rpDesc{};
+            rpDesc.colorAttachmentCount            = 1;
+            rpDesc.colorAttachments[0].texture     = res.Get(rgMask);
+            rpDesc.colorAttachments[0].clearOnLoad = true;
+            rpDesc.hasDepth = false;
+            rpDesc.width    = w;
+            rpDesc.height   = h;
+
+            cmd.BeginRenderPass(rpDesc);
+            cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
+            cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
+            cmd.SetPipeline(pipeline);
+            cmd.SetDescriptorSet(0, frameSet);
+            for (const auto& dc : dcs) {
+                cmd.SetVertexBuffer(0, dc.vb);
+                cmd.SetIndexBuffer(dc.ib);
+                cmd.SetPushConstants(&dc.model, sizeof(glm::mat4),
+                                     RHI::RHIShaderStage::Vertex);
+                cmd.DrawIndexed(dc.indexCount, 1, dc.firstIndex,
+                                dc.vertexOffset, 0);
+            }
+            cmd.EndRenderPass();
+        });
+}
+
+// ── SelectionOutlineFeature ───────────────────────────────────────────────────
+
+void SceneRenderer::SelectionOutlineFeature::OnInit(const FeatureInitContext& ctx)
+{
+    // Pass 1: horizontal max-dilation → R8 intermediate.
+    if (!ctx.matMgr->RegisterTypeFromShaders(
+            {"SelectionDilateH", "fullscreen_tri", "selection_dilate_h",
+             RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque,
+             RHI::RHITopology::TriangleList, false, false, true}, ctx)) {
+        SA_LOG_WARN("SelectionOutlineFeature: dilate_h shader load failed");
+        return;
+    }
+    m_dilateHType = ctx.matMgr->GetType("SelectionDilateH");
+    if (!m_dilateHType) return;
+    m_dilateHDescSet = ctx.device->AllocateDescriptorSet(m_dilateHType->shader.GetMaterialLayout());
+
+    // Pass 2: vertical max-dilation + composite → swapchain.
+    if (!ctx.matMgr->RegisterTypeFromShaders(
+            {"SelectionOutline", "fullscreen_tri", "selection_outline",
+             RHI::RHICullMode::None, RHI::RHIBlendMode::AlphaBlend,
+             RHI::RHITopology::TriangleList, false, false, true}, ctx)) {
+        SA_LOG_WARN("SelectionOutlineFeature: outline shader load failed");
+        return;
+    }
+    m_type = ctx.matMgr->GetType("SelectionOutline");
+    if (!m_type) return;
+    m_descSet = ctx.device->AllocateDescriptorSet(m_type->shader.GetMaterialLayout());
+}
+
+void SceneRenderer::SelectionOutlineFeature::OnShutdown(RHI::IRHIDevice* /*device*/)
+{
+    m_dilateHDescSet = {};
+    m_dilateHType    = nullptr;
+    m_descSet        = {};
+    m_type           = nullptr;
+}
+
+void SceneRenderer::SelectionOutlineFeature::AddPasses(
+    SceneRenderer& renderer, const FrameContext& ctx,
+    const RendererHandles& handles, const entt::registry& /*reg*/,
+    uint32_t w, uint32_t h)
+{
+    if (!m_dilateHType || !m_dilateHDescSet.IsValid()) return;
+    if (!m_type        || !m_descSet.IsValid())        return;
+    if (renderer.m_selectionEntity == entt::null) return;
+
+    struct OutlinePC { glm::vec4 texelSize; glm::vec4 outlineColor; float outlineWidth; };
+    const OutlinePC pc{
+        {1.f / float(w), 1.f / float(h), 0.f, 0.f},
+        {1.f, 0.5f, 0.f, 1.f},
+        renderer.m_selectionOutlineWidth
+    };
+
+    // ── Pass 1: horizontal dilation ───────────────────────────────────────────
+    ctx.BindTexture(m_dilateHDescSet, 0, handles.selectionMask);
+
+    AttachmentKey r8Key{};
+    r8Key.colorCount      = 1;
+    r8Key.colorFormats[0] = RHI::RHIFormat::R8_UNORM;
+    r8Key.depthFormat     = RHI::RHIFormat::Undefined;
+
+    const RHI::RHIPipelineHandle dilateHPipeline = m_dilateHType->GetOrCreatePipeline(ctx.device, r8Key);
+    if (!dilateHPipeline.IsValid()) return;
+
+    {
+        const RHI::RHIDescSetHandle frameSet    = ctx.frameSet;
+        const RHI::RHIDescSetHandle dilateHDesc = m_dilateHDescSet;
+        const RGTextureHandle       rgMask      = handles.selectionMask;
+        const RGTextureHandle       rgDilateH   = handles.dilateH;
+
+        ctx.rg->AddPass("SelectionDilateH",
+            [rgMask, rgDilateH](RGPassBuilder& b) {
+                b.Read(rgMask);
+                b.Write(rgDilateH);
+            },
+            [dilateHPipeline, frameSet, dilateHDesc, pc, rgDilateH, w, h]
+            (RHI::IRHICommandList& cmd, const RGResources& res)
+            {
+                RHI::RHIRenderPassDesc rpDesc{};
+                rpDesc.colorAttachmentCount            = 1;
+                rpDesc.colorAttachments[0].texture     = res.Get(rgDilateH);
+                rpDesc.colorAttachments[0].clearOnLoad = true;
+                rpDesc.width  = w;
+                rpDesc.height = h;
+
+                cmd.BeginRenderPass(rpDesc);
+                cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
+                cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
+                cmd.SetPipeline(dilateHPipeline);
+                cmd.SetDescriptorSet(0, frameSet);
+                cmd.SetDescriptorSet(1, dilateHDesc);
+                cmd.SetPushConstants(&pc, sizeof(pc), RHI::RHIShaderStage::Fragment);
+                cmd.Draw(3, 1, 0, 0);
+                cmd.EndRenderPass();
+            });
+    }
+
+    // ── Pass 2: vertical dilation + composite ─────────────────────────────────
+    ctx.BindTexture(m_descSet, 0, handles.dilateH);
+    ctx.BindTexture(m_descSet, 1, handles.selectionMask);
+
+    AttachmentKey swapKey{};
+    swapKey.colorCount      = 1;
+    swapKey.colorFormats[0] = ctx.device->GetSwapchainFormat();
+    swapKey.depthFormat     = RHI::RHIFormat::Undefined;
+
+    const RHI::RHIPipelineHandle outlinePipeline = m_type->GetOrCreatePipeline(ctx.device, swapKey);
+    if (!outlinePipeline.IsValid()) return;
+
+    {
+        const RHI::RHIDescSetHandle frameSet    = ctx.frameSet;
+        const RHI::RHIDescSetHandle outlineDesc = m_descSet;
+        const RGTextureHandle       rgDilateH   = handles.dilateH;
+        const RGTextureHandle       rgMask      = handles.selectionMask;
+        const RGTextureHandle       rgSwap      = handles.swapchain;
+
+        ctx.rg->AddPass("SelectionOutline",
+            [rgDilateH, rgMask, rgSwap](RGPassBuilder& b) {
+                b.Read(rgDilateH);
+                b.Read(rgMask);
+                b.Read(rgSwap);
+                b.Write(rgSwap);
+            },
+            [outlinePipeline, frameSet, outlineDesc, pc, rgSwap, w, h]
+            (RHI::IRHICommandList& cmd, const RGResources& res)
+            {
+                RHI::RHIRenderPassDesc rpDesc{};
+                rpDesc.colorAttachmentCount            = 1;
+                rpDesc.colorAttachments[0].texture     = res.Get(rgSwap);
+                rpDesc.colorAttachments[0].clearOnLoad = false;
+                rpDesc.width  = w;
+                rpDesc.height = h;
+
+                cmd.BeginRenderPass(rpDesc);
+                cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
+                cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
+                cmd.SetPipeline(outlinePipeline);
+                cmd.SetDescriptorSet(0, frameSet);
+                cmd.SetDescriptorSet(1, outlineDesc);
+                cmd.SetPushConstants(&pc, sizeof(pc), RHI::RHIShaderStage::Fragment);
+                cmd.Draw(3, 1, 0, 0);
+                cmd.EndRenderPass();
+            });
+    }
+}
+
+// ── InfiniteGridFeature ───────────────────────────────────────────────────────
+
+void SceneRenderer::InfiniteGridFeature::OnInit(const FeatureInitContext& ctx)
+{
+    if (!ctx.matMgr->RegisterTypeFromShaders(
+            {"InfiniteGrid", "infinite_grid", "infinite_grid",
+             RHI::RHICullMode::None, RHI::RHIBlendMode::AlphaBlend,
+             RHI::RHITopology::TriangleList, true, false, true}, ctx)) {
+        SA_LOG_WARN("InfiniteGridFeature: shader load failed");
+        return;
+    }
+    m_type = ctx.matMgr->GetType("InfiniteGrid");
+    if (!m_type) SA_LOG_WARN("InfiniteGridFeature: type not found after register");
+}
+
+void SceneRenderer::InfiniteGridFeature::AddPasses(
+    SceneRenderer& renderer, const FrameContext& ctx,
+    const RendererHandles& handles, const entt::registry& /*reg*/,
+    uint32_t w, uint32_t h)
+{
+    if (!m_type || !renderer.m_infiniteGrid) return;
+
+    AttachmentKey key{};
+    key.colorCount      = 1;
+    key.colorFormats[0] = ctx.device->GetSwapchainFormat();
+    key.depthFormat     = RHI::RHIFormat::D32F;
+
+    const RHI::RHIPipelineHandle pipeline = m_type->GetOrCreatePipeline(ctx.device, key);
+    if (!pipeline.IsValid()) return;
+
+    const RHI::RHIDescSetHandle frameSet = ctx.frameSet;
+    const RGTextureHandle       rgSwap   = handles.swapchain;
+    const RGTextureHandle       rgDepth  = handles.depth;
+
+    ctx.rg->AddPass("InfiniteGrid",
+        [rgSwap, rgDepth](RGPassBuilder& b) {
+            b.Read(rgSwap);
+            b.Write(rgSwap);
+            b.WriteDepth(rgDepth);
+        },
+        [pipeline, frameSet, rgSwap, rgDepth, w, h]
+        (RHI::IRHICommandList& cmd, const RGResources& res)
+        {
+            RHI::RHIRenderPassDesc rpDesc{};
+            rpDesc.colorAttachmentCount            = 1;
+            rpDesc.colorAttachments[0].texture     = res.Get(rgSwap);
+            rpDesc.colorAttachments[0].clearOnLoad = false;
+            rpDesc.depthAttachment.texture         = res.Get(rgDepth);
+            rpDesc.depthAttachment.clearOnLoad     = false;
+            rpDesc.hasDepth = true;
+            rpDesc.width    = w;
+            rpDesc.height   = h;
+
+            cmd.BeginRenderPass(rpDesc);
+            cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
+            cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
+            cmd.SetPipeline(pipeline);
+            cmd.SetDescriptorSet(0, frameSet);
+            cmd.Draw(3, 1, 0, 0);
+            cmd.EndRenderPass();
+        });
 }
 
 } // namespace StellarAlia

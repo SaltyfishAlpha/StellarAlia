@@ -18,6 +18,11 @@ namespace StellarAlia {
 // entity.  Serialized as a top-level "world" key in .sascene JSON.
 // ─────────────────────────────────────────────────────────────────────────────
 struct WorldSettings {
+    // ── Background ────────────────────────────────────────────────────────────
+    enum class BackgroundMode { SolidColor, Skybox };
+    BackgroundMode backgroundMode  = BackgroundMode::SolidColor;
+    glm::vec3      backgroundColor = { 0.08f, 0.08f, 0.08f };  // linear HDR
+
     // Source HDR panorama (.satex, RGBA32F equirect).  Read-only input for GpuIblBake.
     AssetID skyboxHdr;
 
@@ -27,6 +32,14 @@ struct WorldSettings {
     AssetID prefilteredEnv;   // GGX prefiltered specular cubemap (mip chain, .satex)
     AssetID brdfLut;          // Split-sum BRDF LUT 2D (fixed UUID, .satex)
     AssetID skyboxCubemap;    // Equirect HDR converted to cubemap (.satex)
+
+    // ── Tonemap ───────────────────────────────────────────────────────────────
+    enum class TonemapMode { Builtin, LUT };
+    TonemapMode tonemapMode  = TonemapMode::Builtin;
+    AssetID     tonemapLut;       // only used when tonemapMode == LUT
+    float       exposure     = 1.f;
+    float       gamma        = 2.2f;
+    float       lutStrength  = 1.f;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -92,6 +105,11 @@ public:
     // Call after manually modifying a TransformComponent.
     void MarkDirty(entt::entity entity);
 
+    // Signal that a material-override component was edited and the renderer's
+    // draw-list needs to be rebuilt before the next frame.
+    void MarkMaterialDirty()       { m_materialDirty = true; }
+    bool IsAndClearMaterialDirty() { bool v = m_materialDirty; m_materialDirty = false; return v; }
+
 private:
     std::string    m_name;
     WorldSettings  m_worldSettings;
@@ -101,6 +119,7 @@ private:
     // Rebuilt lazily whenever m_hierarchyDirty is set.
     std::vector<entt::entity> m_sortedEntities;
     bool                      m_hierarchyDirty = true;
+    bool                      m_materialDirty  = false;
 
     void RebuildSortedOrder();
     void MarkDirtyRecursive(entt::entity entity);

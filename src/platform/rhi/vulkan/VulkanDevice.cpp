@@ -1221,6 +1221,15 @@ RHIDescSetHandle VulkanDevice::AllocateDescriptorSet(RHIDescLayoutHandle layoutH
     return h;
 }
 
+void VulkanDevice::FreeDescriptorSet(RHIDescSetHandle handle) {
+    if (!handle.IsValid() || handle.index >= m_descSets.size()) return;
+    DescSetEntry& entry = m_descSets[handle.index];
+    if (!entry.valid || entry.set == VK_NULL_HANDLE) return;
+    vkFreeDescriptorSets(m_device, m_descPool, 1, &entry.set);
+    entry.set   = VK_NULL_HANDLE;
+    entry.valid = false;
+}
+
 void VulkanDevice::WriteDescriptorTexture(RHIDescSetHandle dsHandle,
                                            uint32_t binding,
                                            RHITextureHandle textureHandle) {

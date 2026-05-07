@@ -52,6 +52,10 @@ struct RendererHandles {
     // ── Bloom pyramid ─────────────────────────────────────────────────────────
     int             bloomMipCount = 0;
     RGTextureHandle bloomMip[8];  // [0]=1/2 … [n-1]=1/(2^n) resolution
+
+    // ── Selection outline mask + intermediate ─────────────────────────────────
+    RGTextureHandle selectionMask; // R8_UNORM  1-bit per-pixel coverage mask
+    RGTextureHandle dilateH;       // R8_UNORM  horizontally-dilated mask (separable pass 1)
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

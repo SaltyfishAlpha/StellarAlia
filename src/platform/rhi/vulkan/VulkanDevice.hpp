@@ -45,6 +45,7 @@ public:
     RHIPipelineHandle   CreateComputePipeline(const RHIComputePipelineDesc& desc) override;
 
     RHIDescSetHandle AllocateDescriptorSet(RHIDescLayoutHandle layout) override;
+    void FreeDescriptorSet(RHIDescSetHandle ds) override;
     void WriteDescriptorTexture(RHIDescSetHandle ds, uint32_t binding,
                                 RHITextureHandle texture) override;
     void WriteDescriptorStorageImage(RHIDescSetHandle ds, uint32_t binding,

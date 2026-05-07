@@ -98,16 +98,22 @@ bool SceneSerializer::SaveToFile(const Scene& scene,
     root["name"]    = scene.GetName();
 
     // World settings (global, not entity-bound)
-    const WorldSettings& ws = scene.GetWorldSettings();
-    if (ws.skyboxHdr.IsValid() || ws.sh9.IsValid() ||
-        ws.prefilteredEnv.IsValid() || ws.brdfLut.IsValid() ||
-        ws.skyboxCubemap.IsValid()) {
+    {
+        const WorldSettings& ws = scene.GetWorldSettings();
         json wj;
+        wj["backgroundMode"]  = (ws.backgroundMode == WorldSettings::BackgroundMode::Skybox)
+                                 ? "Skybox" : "SolidColor";
+        wj["backgroundColor"] = Vec3ToJson(ws.backgroundColor);
         if (ws.skyboxHdr.IsValid())       wj["skyboxHdr"]       = AssetToStr(ws.skyboxHdr);
         if (ws.sh9.IsValid())             wj["sh9"]             = AssetToStr(ws.sh9);
         if (ws.prefilteredEnv.IsValid())  wj["prefilteredEnv"]  = AssetToStr(ws.prefilteredEnv);
         if (ws.brdfLut.IsValid())         wj["brdfLut"]         = AssetToStr(ws.brdfLut);
         if (ws.skyboxCubemap.IsValid())   wj["skyboxCubemap"]   = AssetToStr(ws.skyboxCubemap);
+        wj["tonemapMode"]  = (ws.tonemapMode == WorldSettings::TonemapMode::LUT) ? "LUT" : "Builtin";
+        if (ws.tonemapLut.IsValid())      wj["tonemapLut"]      = AssetToStr(ws.tonemapLut);
+        wj["exposure"]     = ws.exposure;
+        wj["gamma"]        = ws.gamma;
+        wj["lutStrength"]  = ws.lutStrength;
         root["world"] = std::move(wj);
     }
 
@@ -156,6 +162,53 @@ bool SceneSerializer::SaveToFile(const Scene& scene,
             for (const auto& slot : m->materialSlots)
                 mj["materials"].push_back(AssetToStr(slot));
             ej["staticMesh"] = std::move(mj);
+        }
+
+        // Skinned mesh
+        if (const auto* m = reg.try_get<SkinnedMeshComponent>(e)) {
+            json mj;
+            mj["mesh"]      = AssetToStr(m->meshAsset);
+            mj["materials"] = json::array();
+            for (const auto& slot : m->materialSlots)
+                mj["materials"].push_back(AssetToStr(slot));
+            ej["skinnedMesh"] = std::move(mj);
+        }
+
+        // Skeleton
+        if (const auto* s = reg.try_get<SkeletonComponent>(e))
+            ej["skeleton"] = { {"asset", AssetToStr(s->skeletonAsset)} };
+
+        // Animator
+        if (const auto* a = reg.try_get<AnimatorComponent>(e)) {
+            ej["animator"] = {
+                {"clip",    AssetToStr(a->clipAsset)},
+                {"speed",   a->speed},
+                {"looping", a->looping}
+            };
+        }
+
+        // Rigid body
+        if (const auto* rb = reg.try_get<RigidBodyComponent>(e)) {
+            const char* typeStr = (rb->type == RigidBodyComponent::Type::Static)    ? "static"
+                                : (rb->type == RigidBodyComponent::Type::Kinematic) ? "kinematic"
+                                                                                     : "dynamic";
+            ej["rigidBody"] = {
+                {"type",        typeStr},
+                {"mass",        rb->mass},
+                {"friction",    rb->friction},
+                {"restitution", rb->restitution}
+            };
+        }
+
+        // Collider
+        if (const auto* col = reg.try_get<ColliderComponent>(e)) {
+            const char* shapeStr = (col->shape == ColliderComponent::Shape::Sphere)  ? "sphere"
+                                 : (col->shape == ColliderComponent::Shape::Capsule) ? "capsule"
+                                                                                     : "box";
+            ej["collider"] = {
+                {"shape",   shapeStr},
+                {"extents", Vec3ToJson(col->extents)}
+            };
         }
 
         // Lights
@@ -277,11 +330,27 @@ bool SceneSerializer::LoadFromFile(Scene& scene,
     if (root.contains("world")) {
         const auto& wj = root["world"];
         WorldSettings& ws = scene.GetWorldSettings();
+
+        if (wj.value("backgroundMode", "SolidColor") == "Skybox")
+            ws.backgroundMode = WorldSettings::BackgroundMode::Skybox;
+        else
+            ws.backgroundMode = WorldSettings::BackgroundMode::SolidColor;
+        if (wj.contains("backgroundColor")) ws.backgroundColor = JsonToVec3(wj["backgroundColor"]);
+
         if (wj.contains("skyboxHdr"))      ws.skyboxHdr      = StrToAsset(wj["skyboxHdr"].get<std::string>());
         if (wj.contains("sh9"))            ws.sh9            = StrToAsset(wj["sh9"].get<std::string>());
         if (wj.contains("prefilteredEnv")) ws.prefilteredEnv = StrToAsset(wj["prefilteredEnv"].get<std::string>());
         if (wj.contains("brdfLut"))        ws.brdfLut        = StrToAsset(wj["brdfLut"].get<std::string>());
         if (wj.contains("skyboxCubemap"))  ws.skyboxCubemap  = StrToAsset(wj["skyboxCubemap"].get<std::string>());
+
+        if (wj.value("tonemapMode", "Builtin") == "LUT")
+            ws.tonemapMode = WorldSettings::TonemapMode::LUT;
+        else
+            ws.tonemapMode = WorldSettings::TonemapMode::Builtin;
+        if (wj.contains("tonemapLut")) ws.tonemapLut = StrToAsset(wj["tonemapLut"].get<std::string>());
+        ws.exposure    = wj.value("exposure",    ws.exposure);
+        ws.gamma       = wj.value("gamma",       ws.gamma);
+        ws.lutStrength = wj.value("lutStrength", ws.lutStrength);
     }
 
     const auto& entities = root["entities"];
@@ -332,6 +401,61 @@ bool SceneSerializer::LoadFromFile(Scene& scene,
             m.castShadow    = mj.value("castShadow",    m.castShadow);
             m.receiveShadow = mj.value("receiveShadow", m.receiveShadow);
             reg.emplace<StaticMeshComponent>(e, std::move(m));
+        }
+
+        // Skinned mesh
+        if (ej.contains("skinnedMesh")) {
+            const auto& mj = ej["skinnedMesh"];
+            auto& smc = reg.emplace<SkinnedMeshComponent>(e);
+            if (mj.contains("mesh"))
+                smc.meshAsset = StrToAsset(mj["mesh"].get<std::string>());
+            if (mj.contains("materials"))
+                for (const auto& slot : mj["materials"])
+                    smc.materialSlots.push_back(StrToAsset(slot.get<std::string>()));
+        }
+
+        // Skeleton
+        if (ej.contains("skeleton")) {
+            SkeletonComponent s;
+            s.skeletonAsset = StrToAsset(ej["skeleton"].value("asset", std::string{}));
+            reg.emplace<SkeletonComponent>(e, s);
+        }
+
+        // Animator
+        if (ej.contains("animator")) {
+            const auto& aj = ej["animator"];
+            AnimatorComponent a;
+            if (aj.contains("clip"))
+                a.clipAsset = StrToAsset(aj["clip"].get<std::string>());
+            a.speed   = aj.value("speed",   a.speed);
+            a.looping = aj.value("looping", a.looping);
+            reg.emplace<AnimatorComponent>(e, a);
+        }
+
+        // Rigid body
+        if (ej.contains("rigidBody")) {
+            const auto& rj = ej["rigidBody"];
+            RigidBodyComponent rb;
+            const std::string typeStr = rj.value("type", "dynamic");
+            if      (typeStr == "static")    rb.type = RigidBodyComponent::Type::Static;
+            else if (typeStr == "kinematic") rb.type = RigidBodyComponent::Type::Kinematic;
+            else                             rb.type = RigidBodyComponent::Type::Dynamic;
+            rb.mass        = rj.value("mass",        rb.mass);
+            rb.friction    = rj.value("friction",    rb.friction);
+            rb.restitution = rj.value("restitution", rb.restitution);
+            reg.emplace<RigidBodyComponent>(e, rb);
+        }
+
+        // Collider
+        if (ej.contains("collider")) {
+            const auto& cj = ej["collider"];
+            ColliderComponent col;
+            const std::string shapeStr = cj.value("shape", "box");
+            if      (shapeStr == "sphere")  col.shape = ColliderComponent::Shape::Sphere;
+            else if (shapeStr == "capsule") col.shape = ColliderComponent::Shape::Capsule;
+            else                            col.shape = ColliderComponent::Shape::Box;
+            if (cj.contains("extents")) col.extents = JsonToVec3(cj["extents"]);
+            reg.emplace<ColliderComponent>(e, col);
         }
 
         // Lights

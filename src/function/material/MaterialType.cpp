@@ -64,6 +64,7 @@ RHI::RHIPipelineHandle MaterialType::GetOrCreatePipeline(RHI::IRHIDevice*     de
     return shader.GetOrCreatePipeline(device, key,
                                        defaultCullMode,
                                        defaultBlendMode,
+                                       defaultTopology,
                                        defaultDepthTest,
                                        defaultDepthWrite,
                                        noVertexInput);

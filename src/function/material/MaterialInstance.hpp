@@ -32,6 +32,8 @@ class MaterialType;
 // ─────────────────────────────────────────────────────────────────────────────
 class MaterialInstance {
 public:
+    ~MaterialInstance();
+
     // ── Parameter setters (mark dirty → flushed on next Bind) ────────────────
 
     // Generic setter: copies sizeof(T) bytes from value into the UBO blob at the

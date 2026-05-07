@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/asset/AssetID.hpp"
+#include "resource/types/AnimData.hpp"
 #include <glm/glm.hpp>
 #include <cstdint>
 #include <string>
@@ -34,6 +35,9 @@ struct CookedSubMesh {
 //   vec3 normal    (12 bytes, location = 1)
 //   vec4 tangent   (16 bytes, location = 2, w = handedness)
 //   vec2 texCoord0 ( 8 bytes, location = 3)
+//
+// Skinning data (v5+, optional): SkinVertex[vertexCount] parallel to vertexData.
+//   SkinVertex = uvec4 joints (16 bytes) + vec4 weights (16 bytes) = 32 bytes each.
 struct CookedMesh {
     AssetID  id;
     uint32_t vertexCount  = 0;
@@ -44,24 +48,26 @@ struct CookedMesh {
     std::vector<CookedSubMesh> subMeshes;
     std::vector<uint8_t>       vertexData;  // vertexCount * vertexStride bytes
     std::vector<uint8_t>       indexData;   // indexCount  * indexStride  bytes
+    std::vector<uint8_t>       skinData;    // vertexCount * sizeof(SkinVertex) bytes; empty = static
 
-    bool IsValid() const { return vertexCount > 0 && !vertexData.empty(); }
+    bool IsValid()    const { return vertexCount > 0 && !vertexData.empty(); }
+    bool IsSkinned()  const { return !skinData.empty(); }
 };
 
-// ─── .samesh binary layout (v4) ──────────────────────────────────────────────
+// ─── .samesh binary layout (v5) ──────────────────────────────────────────────
 //
 //  FileHeader              (48 bytes)
 //  SubMeshEntry[count]     (104 bytes each)
 //  vertex data blob
 //  index  data blob
+//  skin   data blob        (only if skin_data_size > 0; vertexCount × 32 bytes)
 //
-// v3 → v4: SubMeshEntry shrinks from 216 → 104 bytes.  Per-submesh PBR data
-//           (textures + scalars) is replaced by a single defaultMaterialID
-//           pointing to a companion .samat asset.  v3 files trigger re-cook.
+// v4 → v5: FileHeader._pad replaced by skin_data_size (0 = static mesh).
+//           Skin data blob appended after index blob.
 //
 namespace SameshFormat {
     static constexpr uint32_t Magic   = 0x48534D53u; // 'SMSH' LE
-    static constexpr uint32_t Version = 4u;          // v4: .samat material reference
+    static constexpr uint32_t Version = 5u;          // v5: optional skin data blob
 
 #pragma pack(push, 1)
     struct FileHeader {
@@ -74,7 +80,7 @@ namespace SameshFormat {
         uint32_t vertex_stride;
         uint32_t index_stride;
         uint32_t submesh_count;
-        uint32_t _pad;
+        uint32_t skin_data_size;  // bytes of SkinVertex data after index blob; 0 = no skinning
     };
     static_assert(sizeof(FileHeader) == 48);
 
@@ -98,5 +104,26 @@ namespace SameshFormat {
 
 bool SaveCookedMesh(const CookedMesh& mesh, const std::string& path);
 bool LoadCookedMesh(const std::string& path, CookedMesh& out);
+
+// ─── Per-node mesh ID derivation ─────────────────────────────────────────────
+//
+// When a glTF is cooked with the per-node split (static, non-skinned), each
+// node that carries geometry gets its own .samesh.  The ID is deterministically
+// derived from the glTF file's AssetID and the node index so that scene files
+// can reference per-node meshes by a stable UUID without extra metadata.
+//
+// NOTE: nodeIdx is the node's index in SceneData::nodes (0-based).
+inline AssetID DeriveNodeMeshID(const AssetID& fileId, uint32_t nodeIdx) {
+    // High offset (0x10000) avoids collision with image IDs (1-based) and
+    // material IDs (also low indices) that also derive from the same fileId.
+    const uint64_t n = static_cast<uint64_t>(nodeIdx) + 0x10000u;
+    AssetID id;
+    id.hi = fileId.hi ^ (n * 0x517cc1b727220a95ULL);
+    id.lo = fileId.lo ^ (n * 0x6c62272e07bb0142ULL);
+    // Stamp as UUID v4 / variant 1 (RFC 4122).
+    id.hi = (id.hi & 0xFFFFFFFFFFFF0FFFull) | 0x0000000000004000ull;
+    id.lo = (id.lo & 0x3FFFFFFFFFFFFFFFull) | 0x8000000000000000ull;
+    return id;
+}
 
 } // namespace StellarAlia::Resource

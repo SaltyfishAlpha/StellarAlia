@@ -16,10 +16,15 @@ namespace StellarAlia::Resource {
 //   - Scene hierarchy (nodes + transforms)
 //   - Embedded and external textures (loaded via ImageLoader)
 //
-// Does NOT support (deferred to Stage 4+):
-//   - Skinning / morph targets
-//   - Animations
+// Also supports (Stage 8+):
+//   - Skeletal skinning (JOINTS_0 + WEIGHTS_0 per primitive)
+//   - Inverse bind matrices per skin joint
+//   - Keyframe animations (Translation, Rotation, Scale channels)
+//
+// Does NOT support:
+//   - Morph targets
 //   - Sparse accessors
+//   - CubicSpline interpolation (downgraded to Linear)
 // ─────────────────────────────────────────────────────────────────────────────
 class GltfLoader {
 public:

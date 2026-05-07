@@ -47,6 +47,7 @@ public:
         const AttachmentKey&   key,
         RHI::RHICullMode       cullMode      = RHI::RHICullMode::Back,
         RHI::RHIBlendMode      blendMode     = RHI::RHIBlendMode::Opaque,
+        RHI::RHITopology       topology      = RHI::RHITopology::TriangleList,
         bool                   depthTest     = true,
         bool                   depthWrite    = true,
         bool                   noVertexInput = false);

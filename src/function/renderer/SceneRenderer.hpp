@@ -8,6 +8,7 @@
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 
+#include "function/debug/DebugDraw.hpp"
 #include "function/FrameUniforms.hpp"
 #include "function/renderer/CameraData.hpp"
 #include "function/FrameUniformsBuffer.hpp"
@@ -93,6 +94,13 @@ public:
     // Returns false only when the scene has no HDR source at all.
     bool SetIBL(const WorldSettings& ws);
 
+    // Apply WorldSettings to the live renderer: updates background color/mode,
+    // calls SetIBL for IBL assets, and replaces the tonemap feature if the mode
+    // changes (Builtin ↔ LUT).  Calls WaitIdle before replacing GPU resources.
+    // Pass updateIBL=false to skip the IBL load/bake step (e.g. for live param
+    // updates where IBL assets have not changed).
+    void ApplyWorldSettings(const WorldSettings& ws, bool updateIBL = true);
+
     // Build (or rebuild) the per-entity draw list. Loads GPU meshes, resolves
     // materials via 3-tier fallback, pre-bakes pipelines.
     void BuildDrawList(Scene& scene);
@@ -103,6 +111,20 @@ public:
     // OnInit is invoked immediately; otherwise it is deferred to Init().
     // User features always execute after the built-in skybox and geometry passes.
     void AddFeature(std::unique_ptr<RenderFeature> feature);
+
+    // Bind a DebugDraw source for the per-frame line overlay pass.
+    // Call after Init(). The overlay is a no-op when dd is null or has no lines.
+    void SetDebugDraw(DebugDraw* dd) { m_debugDraw = dd; }
+
+    // Set the entity whose silhouette should be outlined this frame.
+    // Pass entt::null to disable the outline.
+    void SetSelectedEntity(entt::entity e) { m_selectionEntity = e; }
+
+    // Set the screen-space dilation radius for the selection outline (pixels).
+    void SetOutlineWidth(float px) { m_selectionOutlineWidth = px; }
+
+    // Enable or disable the infinite XZ grid overlay.
+    void SetInfiniteGrid(bool enabled) { m_infiniteGrid = enabled; }
 
     // ── Render tick ───────────────────────────────────────────────────────────
     //
@@ -171,12 +193,16 @@ private:
     };
 
     // Renders a fullscreen skybox into the HDR buffer (raw HDR, no tonemap).
+    // In SolidColor mode, just clears the HDR buffer to m_backgroundColor.
     class SkyboxFeature final : public RenderFeature {
     public:
         void OnInit(const FeatureInitContext& ctx) override;
         void AddPasses(SceneRenderer& renderer, const FrameContext& ctx,
                        const RendererHandles& handles, const entt::registry& reg,
                        uint32_t w, uint32_t h) override;
+
+        WorldSettings::BackgroundMode m_backgroundMode  = WorldSettings::BackgroundMode::SolidColor;
+        glm::vec3                     m_backgroundColor = { 0.08f, 0.08f, 0.08f };
     private:
         MaterialType* m_type = nullptr;
     };
@@ -217,11 +243,94 @@ private:
         void AddPasses(SceneRenderer& renderer, const FrameContext& ctx,
                        const RendererHandles& handles, const entt::registry& reg,
                        uint32_t w, uint32_t h) override;
+
+        float m_exposure = 1.f;
+        float m_gamma    = 2.2f;
     private:
         MaterialType*         m_type = nullptr;
         RHI::RHIDescSetHandle m_hdrDescSet;
         uint32_t              m_trackedW = 0;
         uint32_t              m_trackedH = 0;
+    };
+
+    // LUT-based tonemap: ACES + color grading from a 2D strip LUT.
+    class LutTonemapFeature final : public RenderFeature {
+    public:
+        void OnInit    (const FeatureInitContext& ctx) override;
+        void OnShutdown(RHI::IRHIDevice* device)       override;
+        void AddPasses (SceneRenderer& renderer, const FrameContext& ctx,
+                        const RendererHandles& handles, const entt::registry& reg,
+                        uint32_t w, uint32_t h) override;
+
+        void SetLutTexture(RHI::IRHIDevice* device, RHI::RHITextureHandle tex);
+
+        float m_exposure    = 1.f;
+        float m_lutStrength = 1.f;
+    private:
+        MaterialType*         m_type = nullptr;
+        RHI::RHIDescSetHandle m_hdrLutDescSet;
+        uint32_t              m_trackedW = 0;
+        uint32_t              m_trackedH = 0;
+    };
+
+    // Editor line overlay: reads DebugDraw vertex data each frame, renders after Tonemap.
+    // noVertexInput pipeline; vertex positions sourced from a CPU-visible SSBO.
+    class DebugOverlayFeature final : public RenderFeature {
+    public:
+        void OnInit    (const FeatureInitContext& ctx)          override;
+        void OnShutdown(RHI::IRHIDevice* device)               override;
+        void AddPasses (SceneRenderer& renderer, const FrameContext& ctx,
+                        const RendererHandles& handles, const entt::registry& reg,
+                        uint32_t w, uint32_t h)                override;
+    private:
+        MaterialType*         m_type    = nullptr;
+        RHI::RHIBufferHandle  m_ssbo;       // CPU-visible SSBO, kMaxVertices × 16 B
+        RHI::RHIDescSetHandle m_descSet;    // set=1: SSBO binding
+    };
+
+    // Renders the selected entity's geometry into a 1-channel R8 mask texture for
+    // depth-correct outline extraction. Runs after DeferredLighting so the existing
+    // scene depth can be used to occlude hidden parts of the selection.
+    class SelectionMaskFeature final : public RenderFeature {
+    public:
+        explicit SelectionMaskFeature(SceneRenderer* owner) : m_owner(owner) {}
+        void OnInit   (const FeatureInitContext& ctx) override;
+        void AddPasses(SceneRenderer& renderer, const FrameContext& ctx,
+                       const RendererHandles& handles, const entt::registry& reg,
+                       uint32_t w, uint32_t h) override;
+    private:
+        SceneRenderer* m_owner = nullptr;
+        MaterialType*  m_type  = nullptr;
+    };
+
+    // Fullscreen infinite XZ grid rendered at the Y=0 plane.
+    // Ray-plane intersection in the fragment shader; fwidth anti-aliasing;
+    // gl_FragDepth for correct geometry occlusion; distance fade-out.
+    class InfiniteGridFeature final : public RenderFeature {
+    public:
+        void OnInit   (const FeatureInitContext& ctx) override;
+        void AddPasses(SceneRenderer& renderer, const FrameContext& ctx,
+                       const RendererHandles& handles, const entt::registry& reg,
+                       uint32_t w, uint32_t h) override;
+    private:
+        MaterialType* m_type = nullptr;
+    };
+
+    // Two-pass separable dilation outline:
+    //   Pass 1 (DilateH): reads selectionMask, writes horizontally-dilated R8 intermediate.
+    //   Pass 2 (Composite): reads dilateH + selectionMask, writes outline to swapchain.
+    class SelectionOutlineFeature final : public RenderFeature {
+    public:
+        void OnInit    (const FeatureInitContext& ctx) override;
+        void OnShutdown(RHI::IRHIDevice* device)       override;
+        void AddPasses (SceneRenderer& renderer, const FrameContext& ctx,
+                        const RendererHandles& handles, const entt::registry& reg,
+                        uint32_t w, uint32_t h) override;
+    private:
+        MaterialType*         m_dilateHType   = nullptr;  // horizontal pass
+        MaterialType*         m_type          = nullptr;  // composite pass
+        RHI::RHIDescSetHandle m_dilateHDescSet;
+        RHI::RHIDescSetHandle m_descSet;
     };
 
     // Hard upper bound for bloom pyramid array allocation.
@@ -275,6 +384,39 @@ private:
 
     std::vector<std::unique_ptr<RenderFeature>> m_features;
 
+    // Raw pointers into m_features — stable as long as the vector doesn't reallocate.
+    // Set during Init, updated by ApplyWorldSettings on tonemap replacement.
+    SkyboxFeature*   m_skyboxFeature  = nullptr;
+    RenderFeature*   m_tonemapFeature = nullptr;  // either TonemapFeature or LutTonemapFeature
+
+    // ── Solid-color ambient environment ──────────────────────────────────────
+    // A 1×1 RGBA32F cubemap filled with backgroundColor.  Written to
+    // t_PrefilteredEnv in SolidColor mode so metallic surfaces reflect the
+    // background instead of sampling the black placeholder.
+    RHI::RHITextureHandle m_solidAmbientCube;
+    glm::vec3             m_solidAmbientColor = { -1.f, -1.f, -1.f };  // sentinel
+
+    // BRDF LUT from the most recent successful IBL load/bake.
+    // Reused when switching to SolidColor so specular split-sum stays correct.
+    RHI::RHITextureHandle m_cachedBrdfLut;
+
+    // ── Debug overlay ─────────────────────────────────────────────────────────
+    DebugDraw*  m_debugDraw      = nullptr;  // set by SetDebugDraw; not owned
+    glm::mat4   m_currentViewProj = glm::mat4(1.f);  // updated each RenderFrame
+
+    // ── Infinite grid ─────────────────────────────────────────────────────────
+    bool m_infiniteGrid = false;
+
+    // ── Selection outline ─────────────────────────────────────────────────────
+    entt::entity          m_selectionEntity      = entt::null;
+    float                 m_selectionOutlineWidth = 2.f;
+    RHI::RHITextureHandle m_selectionMask;
+    RGTextureHandle       m_rgSelectionMask;
+    RHI::RHITextureHandle m_dilateH;          // R8 horizontal-dilation intermediate
+    RGTextureHandle       m_rgDilateH;
+    uint32_t              m_selectionMaskW  = 0;
+    uint32_t              m_selectionMaskH  = 0;
+
     // ── Shadow map (fixed 2048×2048, never resized) ───────────────────────────
     RHI::RHITextureHandle m_shadowMap;
     RGTextureHandle       m_rgShadowMap;
@@ -316,6 +458,15 @@ private:
     // ── Frame data helpers (private, called from RenderFrame) ─────────────────
     [[nodiscard]] LightUniforms GatherLights(const Scene& scene) const;
     static void ApplyCameraToUniforms(const CameraData& cam, FrameUniforms& fu);
+
+    // Shuts down the current tonemap feature, initialises the replacement, and
+    // updates m_tonemapFeature.  Caller must call WaitIdle before invoking this.
+    void ReplaceTonemapFeature(std::unique_ptr<RenderFeature> newFeature,
+                               const FeatureInitContext& ctx);
+
+    // Creates (or recreates) m_solidAmbientCube with the given color.
+    // No-op when the color has not changed since the last call.
+    void UpdateSolidAmbientCube(glm::vec3 color);
 };
 
 } // namespace StellarAlia

@@ -7,6 +7,15 @@
 
 namespace StellarAlia {
 
+// ─── Destructor ───────────────────────────────────────────────────────────────
+
+MaterialInstance::~MaterialInstance() {
+    if (m_device) {
+        if (m_descSet.IsValid()) m_device->FreeDescriptorSet(m_descSet);
+        if (m_ubo.IsValid())     m_device->DestroyBuffer(m_ubo);
+    }
+}
+
 // ─── Parameter setters ────────────────────────────────────────────────────────
 
 void MaterialInstance::SetRawParam(std::string_view name,

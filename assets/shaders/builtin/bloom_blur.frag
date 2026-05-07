@@ -15,16 +15,22 @@ layout(push_constant) uniform PushConstants {
 layout(location = 0) in  vec2 v_UV;
 layout(location = 0) out vec4 out_Color;
 
+// Clamp to half-texel centres so bilinear+REPEAT never interpolates across the edge.
+vec3 S(vec2 uv) {
+    vec2 ht = 0.5 / vec2(textureSize(t_Input, 0));
+    return texture(t_Input, clamp(uv, ht, 1.0 - ht)).rgb;
+}
+
 // σ ≈ 1.4 Gaussian weights for offsets 0..4
 const float kWeights[5] = float[](0.227027, 0.194595, 0.121622, 0.054054, 0.016216);
 
 void main() {
     vec2 texelSize = vec2(pc.dirX, pc.dirY) / vec2(textureSize(t_Input, 0));
-    vec3 result    = texture(t_Input, v_UV).rgb * kWeights[0];
+    vec3 result    = S(v_UV) * kWeights[0];
     for (int i = 1; i < 5; ++i) {
         vec2 offset = texelSize * float(i);
-        result += texture(t_Input, v_UV + offset).rgb * kWeights[i];
-        result += texture(t_Input, v_UV - offset).rgb * kWeights[i];
+        result += S(v_UV + offset) * kWeights[i];
+        result += S(v_UV - offset) * kWeights[i];
     }
     out_Color = vec4(result, 1.0);
 }

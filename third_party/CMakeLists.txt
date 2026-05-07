@@ -303,6 +303,34 @@ else()
     message(WARNING "ImGui submodule not found at third_party/imgui/ — editor UI will be unavailable")
 endif()
 
+# ============================================================================
+# JoltPhysics — rigid body physics engine
+# Preferred: git submodule at third_party/JoltPhysics/
+# ============================================================================
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/JoltPhysics/Jolt/Jolt.h)
+    # Do not let Jolt override our project's CMAKE_CXX_FLAGS_*
+    set(OVERRIDE_CXX_FLAGS                OFF CACHE BOOL "" FORCE)
+    # Disable Jolt's aggressive warning-as-error settings
+    set(ENABLE_ALL_WARNINGS               OFF CACHE BOOL "" FORCE)
+    # LTO can break MinGW / non-MSVC builds
+    set(INTERPROCEDURAL_OPTIMIZATION      OFF CACHE BOOL "" FORCE)
+    # FP exceptions are MSVC-only; skip on other toolchains
+    set(FLOATING_POINT_EXCEPTIONS_ENABLED OFF CACHE BOOL "" FORCE)
+    # Disable GPU compute backends — Vulkan is managed by the engine
+    set(JPH_USE_DX12                      OFF CACHE BOOL "" FORCE)
+    set(JPH_USE_VK                        OFF CACHE BOOL "" FORCE)
+    set(JPH_USE_MTL                       OFF CACHE BOOL "" FORCE)
+    # Keep debug renderer available in Debug + Release for the editor overlay
+    set(DEBUG_RENDERER_IN_DEBUG_AND_RELEASE ON  CACHE BOOL "" FORCE)
+    # Disable unit tests / samples to cut build time
+    set(BUILD_TESTING                     OFF CACHE BOOL "" FORCE)
+    add_subdirectory(JoltPhysics/Build EXCLUDE_FROM_ALL)
+    message(STATUS "JoltPhysics: using local submodule (v5)")
+else()
+    message(WARNING "JoltPhysics submodule not found at third_party/JoltPhysics/ — physics unavailable")
+endif()
+# Target available: Jolt  (alias: Jolt::Jolt)
+
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/SPIRV-Cross/CMakeLists.txt)
     add_subdirectory(SPIRV-Cross)
     message(STATUS "SPIRV-Cross: Using local submodule at third_party/SPIRV-Cross")

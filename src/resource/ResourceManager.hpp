@@ -8,6 +8,10 @@
 #include "platform/rhi/IRHIDevice.hpp"
 #include "platform/rhi/RHITypes.hpp"
 #include "resource/types/ImageData.hpp"
+#include "resource/types/AnimData.hpp"
+#include "resource/cook/CookedMesh.hpp"
+#include "resource/cook/CookedSkeleton.hpp"
+#include "resource/cook/CookedAnim.hpp"
 #include <array>
 #include <glm/glm.hpp>
 
@@ -93,6 +97,19 @@ public:
     // The handle is owned by ResourceManager; do not destroy it.
     [[nodiscard]] RHI::RHITextureHandle GetBuiltin(BuiltinTexture which) const;
 
+    // Load a skeleton (bone hierarchy + inverse bind matrices) from a .saskel file.
+    // CPU-side data only — no GPU upload. Returns nullptr on failure.
+    [[nodiscard]] const CookedSkeleton* LoadSkeleton(const AssetID& id);
+
+    // Load an animation clip from a .saanim file.
+    // CPU-side data only — no GPU upload. Returns nullptr on failure.
+    [[nodiscard]] const CookedAnim* LoadAnimClip(const AssetID& id);
+
+    // Load the cooked mesh data (CPU-side) without uploading to GPU.
+    // Used by the animation system to access rest-pose vertices and skin data.
+    // Returns nullptr on failure.
+    [[nodiscard]] const CookedMesh* LoadMeshData(const AssetID& id);
+
 private:
     RHI::IRHIDevice*   m_device = nullptr;
 
@@ -101,8 +118,12 @@ private:
     std::unordered_map<uint64_t, RHI::RHITextureHandle> m_textures;
     std::unordered_map<uint64_t, GPUMesh>               m_meshes;
     // File-path-keyed textures loaded via LoadTextureFromFile().
-    // Key: std::hash of the canonical path string.
     std::unordered_map<std::size_t, RHI::RHITextureHandle> m_fileTextures;
+
+    // CPU-only caches (no GPU memory; lifetime = ResourceManager lifetime).
+    std::unordered_map<uint64_t, CookedSkeleton> m_skeletons;
+    std::unordered_map<uint64_t, CookedAnim>     m_animClips;
+    std::unordered_map<uint64_t, CookedMesh>     m_cookedMeshes;
 
     // Simple hash: XOR the two halves of the UUID (sufficient for cache key).
     static uint64_t HashID(const AssetID& id) { return id.hi ^ id.lo; }

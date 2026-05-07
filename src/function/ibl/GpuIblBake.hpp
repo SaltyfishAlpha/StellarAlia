@@ -44,6 +44,11 @@ public:
     bool Init(RHI::IRHIDevice* device, const std::string& shaderDir);
     void Shutdown(RHI::IRHIDevice* device);
 
+    // Bake only the BRDF split-sum LUT (512×512 RGBA32F).
+    // Does not require an HDR image — safe to call immediately after Init().
+    // The returned handle is owned by the caller; destroy it with IRHIDevice::DestroyTexture.
+    [[nodiscard]] RHI::RHITextureHandle BakeBrdfLut(RHI::IRHIDevice* device);
+
     [[nodiscard]] Result Bake(RHI::IRHIDevice* device, const Resource::ImageData& hdr);
 
     [[nodiscard]] bool IsInitialized() const { return m_brdfProg.IsLoaded(); }

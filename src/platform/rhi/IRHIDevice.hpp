@@ -116,6 +116,8 @@ public:
     [[nodiscard]] virtual RHIDescSetHandle AllocateDescriptorSet(
         RHIDescLayoutHandle layout) = 0;
 
+    virtual void FreeDescriptorSet(RHIDescSetHandle ds) = 0;
+
     virtual void WriteDescriptorTexture(RHIDescSetHandle ds,
                                         uint32_t         binding,
                                         RHITextureHandle texture) = 0;

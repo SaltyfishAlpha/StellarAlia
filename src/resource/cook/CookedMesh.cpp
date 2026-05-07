@@ -12,15 +12,16 @@ bool SaveCookedMesh(const CookedMesh& mesh, const std::string& path) {
     if (!f) return false;
 
     SameshFormat::FileHeader hdr{};
-    hdr.magic         = SameshFormat::Magic;
-    hdr.version       = SameshFormat::Version;
-    hdr.uuid_hi       = mesh.id.hi;
-    hdr.uuid_lo       = mesh.id.lo;
-    hdr.vertex_count  = mesh.vertexCount;
-    hdr.index_count   = mesh.indexCount;
-    hdr.vertex_stride = mesh.vertexStride;
-    hdr.index_stride  = mesh.indexStride;
-    hdr.submesh_count = static_cast<uint32_t>(mesh.subMeshes.size());
+    hdr.magic          = SameshFormat::Magic;
+    hdr.version        = SameshFormat::Version;
+    hdr.uuid_hi        = mesh.id.hi;
+    hdr.uuid_lo        = mesh.id.lo;
+    hdr.vertex_count   = mesh.vertexCount;
+    hdr.index_count    = mesh.indexCount;
+    hdr.vertex_stride  = mesh.vertexStride;
+    hdr.index_stride   = mesh.indexStride;
+    hdr.submesh_count  = static_cast<uint32_t>(mesh.subMeshes.size());
+    hdr.skin_data_size = static_cast<uint32_t>(mesh.skinData.size());
 
     f.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
 
@@ -33,11 +34,8 @@ bool SaveCookedMesh(const CookedMesh& mesh, const std::string& path) {
         entry.material_index = sm.materialIndex;
         std::memcpy(entry.local_transform, &sm.localTransform[0][0],
                     sizeof(entry.local_transform));
-
-        // v4: default material reference
         entry.default_mat_hi = sm.defaultMaterialID.hi;
         entry.default_mat_lo = sm.defaultMaterialID.lo;
-
         f.write(reinterpret_cast<const char*>(&entry), sizeof(entry));
     }
 
@@ -45,6 +43,10 @@ bool SaveCookedMesh(const CookedMesh& mesh, const std::string& path) {
             static_cast<std::streamsize>(mesh.vertexData.size()));
     f.write(reinterpret_cast<const char*>(mesh.indexData.data()),
             static_cast<std::streamsize>(mesh.indexData.size()));
+
+    if (!mesh.skinData.empty())
+        f.write(reinterpret_cast<const char*>(mesh.skinData.data()),
+                static_cast<std::streamsize>(mesh.skinData.size()));
 
     return f.good();
 }
@@ -58,12 +60,12 @@ bool LoadCookedMesh(const std::string& path, CookedMesh& out) {
     if (!f || hdr.magic != SameshFormat::Magic || hdr.version != SameshFormat::Version)
         return false;
 
-    out.id.hi        = hdr.uuid_hi;
-    out.id.lo        = hdr.uuid_lo;
-    out.vertexCount  = hdr.vertex_count;
-    out.indexCount   = hdr.index_count;
-    out.vertexStride = hdr.vertex_stride;
-    out.indexStride  = hdr.index_stride;
+    out.id.hi         = hdr.uuid_hi;
+    out.id.lo         = hdr.uuid_lo;
+    out.vertexCount   = hdr.vertex_count;
+    out.indexCount    = hdr.index_count;
+    out.vertexStride  = hdr.vertex_stride;
+    out.indexStride   = hdr.index_stride;
 
     out.subMeshes.resize(hdr.submesh_count);
     for (auto& sm : out.subMeshes) {
@@ -77,8 +79,6 @@ bool LoadCookedMesh(const std::string& path, CookedMesh& out) {
         sm.materialIndex = entry.material_index;
         std::memcpy(&sm.localTransform[0][0], entry.local_transform,
                     sizeof(entry.local_transform));
-
-        // v4: default material reference
         sm.defaultMaterialID.hi = entry.default_mat_hi;
         sm.defaultMaterialID.lo = entry.default_mat_lo;
     }
@@ -91,6 +91,12 @@ bool LoadCookedMesh(const std::string& path, CookedMesh& out) {
 
     f.read(reinterpret_cast<char*>(out.vertexData.data()), static_cast<std::streamsize>(vbSize));
     f.read(reinterpret_cast<char*>(out.indexData.data()),  static_cast<std::streamsize>(ibSize));
+
+    if (hdr.skin_data_size > 0) {
+        out.skinData.resize(hdr.skin_data_size);
+        f.read(reinterpret_cast<char*>(out.skinData.data()),
+               static_cast<std::streamsize>(hdr.skin_data_size));
+    }
 
     return f.good() || f.eof();
 }

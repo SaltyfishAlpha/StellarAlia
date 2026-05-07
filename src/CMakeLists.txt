@@ -136,6 +136,12 @@ if(TARGET volk::volk)
     message(STATUS "Linking against volk")
 endif()
 
+# Link JoltPhysics if available
+if(TARGET Jolt)
+    target_link_libraries(StellarAliaRuntime PUBLIC Jolt)
+    message(STATUS "Linking against JoltPhysics")
+endif()
+
 # Link GLFW if available
 if(TARGET glfw)
     target_link_libraries(StellarAliaRuntime

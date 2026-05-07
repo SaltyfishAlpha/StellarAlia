@@ -34,6 +34,13 @@ layout(location = 0) out vec4 out_Color;
 
 float Luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 
+// Clamp to half-texel centres so bilinear+REPEAT never interpolates across the edge.
+// clamp(uv, 0, 1) is insufficient: at UV=0 or 1 bilinear still wraps to the opposite edge.
+vec3 S(vec2 uv) {
+    vec2 ht = 0.5 / vec2(textureSize(t_HDR, 0));
+    return texture(t_HDR, clamp(uv, ht, 1.0 - ht)).rgb;
+}
+
 // Karis-weighted average of a 2×2 group.
 vec3 KarisBox(vec3 a, vec3 b, vec3 c, vec3 d) {
     float wa = 1.0 / (1.0 + Luma(a));
@@ -46,19 +53,19 @@ vec3 KarisBox(vec3 a, vec3 b, vec3 c, vec3 d) {
 void main() {
     vec2 ts = 1.0 / vec2(textureSize(t_HDR, 0));
 
-    vec3 a = texture(t_HDR, v_UV + ts * vec2(-2,-2)).rgb;
-    vec3 b = texture(t_HDR, v_UV + ts * vec2( 0,-2)).rgb;
-    vec3 c = texture(t_HDR, v_UV + ts * vec2( 2,-2)).rgb;
-    vec3 d = texture(t_HDR, v_UV + ts * vec2(-1,-1)).rgb;
-    vec3 e = texture(t_HDR, v_UV + ts * vec2( 1,-1)).rgb;
-    vec3 f = texture(t_HDR, v_UV + ts * vec2(-2, 0)).rgb;
-    vec3 g = texture(t_HDR, v_UV + ts * vec2( 0, 0)).rgb;
-    vec3 h = texture(t_HDR, v_UV + ts * vec2( 2, 0)).rgb;
-    vec3 i = texture(t_HDR, v_UV + ts * vec2(-1, 1)).rgb;
-    vec3 j = texture(t_HDR, v_UV + ts * vec2( 1, 1)).rgb;
-    vec3 k = texture(t_HDR, v_UV + ts * vec2(-2, 2)).rgb;
-    vec3 l = texture(t_HDR, v_UV + ts * vec2( 0, 2)).rgb;
-    vec3 m = texture(t_HDR, v_UV + ts * vec2( 2, 2)).rgb;
+    vec3 a = S(v_UV + ts * vec2(-2,-2));
+    vec3 b = S(v_UV + ts * vec2( 0,-2));
+    vec3 c = S(v_UV + ts * vec2( 2,-2));
+    vec3 d = S(v_UV + ts * vec2(-1,-1));
+    vec3 e = S(v_UV + ts * vec2( 1,-1));
+    vec3 f = S(v_UV + ts * vec2(-2, 0));
+    vec3 g = S(v_UV + ts * vec2( 0, 0));
+    vec3 h = S(v_UV + ts * vec2( 2, 0));
+    vec3 i = S(v_UV + ts * vec2(-1, 1));
+    vec3 j = S(v_UV + ts * vec2( 1, 1));
+    vec3 k = S(v_UV + ts * vec2(-2, 2));
+    vec3 l = S(v_UV + ts * vec2( 0, 2));
+    vec3 m = S(v_UV + ts * vec2( 2, 2));
 
     vec3 color = KarisBox(d, e, i, j) * 0.500
                + KarisBox(a, b, f, g) * 0.125
