@@ -1,0 +1,48 @@
+#version 450
+
+// ─── Bindings ─────────────────────────────────────────────────────────────────
+// set=0, binding=0 : output storage image (rgba16f, written by this shader)
+layout(set = 0, binding = 0, rgba16f) uniform writeonly image2D u_Output;
+
+// ─── Push constants ───────────────────────────────────────────────────────────
+layout(push_constant) uniform PC {
+    float time;
+    float pad0;
+    float pad1;
+    float pad2;
+} pc;
+
+// ─── Work group size (8×8 tiles) ─────────────────────────────────────────────
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const float PI = 3.14159265359;
+
+float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+void main() {
+    ivec2 size  = imageSize(u_Output);
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= size.x || coord.y >= size.y) return;
+
+    vec2 uv = vec2(coord) / vec2(size);
+
+    // Animated grid of ripples
+    vec2 center = uv - 0.5;
+    float dist  = length(center * vec2(float(size.x) / float(size.y), 1.0));
+    float ripple = 0.5 + 0.5 * sin(dist * 40.0 - pc.time * 4.0);
+
+    // Hue rotation over time
+    float hue = uv.x + uv.y * 0.5 + pc.time * 0.1;
+    vec3 col;
+    col.r = 0.5 + 0.5 * sin(hue * 2.0 * PI);
+    col.g = 0.5 + 0.5 * sin(hue * 2.0 * PI + 2.094);   // +120°
+    col.b = 0.5 + 0.5 * sin(hue * 2.0 * PI + 4.189);   // +240°
+
+    col *= ripple;
+
+    imageStore(u_Output, coord, vec4(col, 1.0));
+}

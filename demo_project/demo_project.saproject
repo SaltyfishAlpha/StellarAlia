@@ -1,0 +1,5 @@
+{
+  "name": "DemoProject",
+  "version": 1,
+  "startupScene": "assets/scenes/area_light_test.sascene"
+}

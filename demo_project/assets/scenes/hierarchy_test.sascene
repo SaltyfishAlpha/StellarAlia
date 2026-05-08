@@ -1,0 +1,124 @@
+{
+  "name": "HierarchyTest",
+  "version": 1,
+  "world": {
+    "skyboxHdr":      "7a735f5c-b3c4-4361-b342-699c816fa64d",
+    "sh9":            "79735f5c-b3c4-4362-b342-699c816fa64e",
+    "prefilteredEnv": "78735f5c-b3c4-4363-b142-699c816fa64f",
+    "brdfLut":        "c5b06992-5a8f-4dc9-9d11-406e12b969d4",
+    "skyboxCubemap":  "7e735f5c-b3c4-4365-b342-699c816fa649"
+  },
+  "entities": [
+    {
+      "id": 0,
+      "parent": -1,
+      "tag": "Camera",
+      "activeCamera": true,
+      "camera": { "fovY": 1.0472, "near": 0.1, "far": 500.0 },
+      "transform": {
+        "position": [0.0, 3.5, 9.0],
+        "rotation": [0.9914, -0.1305, 0.0, 0.0],
+        "scale":    [1.0, 1.0, 1.0]
+      }
+    },
+    {
+      "id": 1,
+      "parent": -1,
+      "tag": "Sun",
+      "directionalLight": {
+        "color":      [1.0, 0.95, 0.85],
+        "intensity":  1.5,
+        "castShadow": false
+      },
+      "transform": {
+        "position": [0.0, 0.0, 0.0],
+        "rotation": [0.8924, -0.3007, 0.3007, 0.1014],
+        "scale":    [1.0, 1.0, 1.0]
+      }
+    },
+    {
+      "id": 2,
+      "parent": -1,
+      "tag": "Root",
+      "staticMesh": {
+        "mesh":          "c0be0000-0000-4000-0000-000000000001",
+        "materials":     ["d3f4abb0-0000-4000-0000-000000000001"],
+        "castShadow":    true,
+        "receiveShadow": true
+      },
+      "pbrSurface": {
+        "baseColor": [0.0, 0.0, 0.0, 1.0],
+        "roughness": 0.1,
+        "metallic":  0.9
+      },
+      "transform": {
+        "position": [0.0, 0.0, 0.0],
+        "rotation": [1.0, 0.0, 0.0, 0.0],
+        "scale":    [1.0, 1.0, 1.0]
+      }
+    },
+    {
+      "id": 3,
+      "parent": 2,
+      "tag": "ChildL",
+      "staticMesh": {
+        "mesh":          "c0be0000-0000-4000-0000-000000000001",
+        "materials":     ["d3f4abb0-0000-4000-0000-000000000001"],
+        "castShadow":    true,
+        "receiveShadow": true
+      },
+      "pbrSurface": {
+        "baseColor": [0.0, 0.0, 0.0, 1.0],
+        "roughness": 0.7,
+        "metallic":  0.2
+      },
+      "transform": {
+        "position": [-3.0, 0.0, 0.0],
+        "rotation": [1.0, 0.0, 0.0, 0.0],
+        "scale":    [1.0, 1.0, 1.0]
+      }
+    },
+    {
+      "id": 4,
+      "parent": 3,
+      "tag": "Moon",
+      "staticMesh": {
+        "mesh":          "c0be0000-0000-4000-0000-000000000001",
+        "materials":     ["d3f4abb0-0000-4000-0000-000000000001"],
+        "castShadow":    true,
+        "receiveShadow": true
+      },
+      "pbrSurface": {
+        "baseColor": [0.0, 0.0, 0.0, 1.0],
+        "roughness": 0.9,
+        "metallic":  0.0
+      },
+      "transform": {
+        "position": [1.5, 0.0, 0.0],
+        "rotation": [1.0, 0.0, 0.0, 0.0],
+        "scale":    [0.35, 0.35, 0.35]
+      }
+    },
+    {
+      "id": 5,
+      "parent": 2,
+      "tag": "ChildR",
+      "staticMesh": {
+        "mesh":          "c0be0000-0000-4000-0000-000000000001",
+        "materials":     ["d3f4abb0-0000-4000-0000-000000000001"],
+        "castShadow":    true,
+        "receiveShadow": true
+      },
+      "pbrSurface": {
+        "baseColor": [0.0, 0.0, 0.0, 1.0],
+        "roughness": 0.3,
+        "metallic":  0.8
+      },
+      "transform": {
+        "position": [3.0, 0.0, 0.0],
+        "rotation": [1.0, 0.0, 0.0, 0.0],
+        "scale":    [1.0, 1.0, 1.0]
+      }
+    }
+  ]
+}

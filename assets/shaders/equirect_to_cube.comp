@@ -1,0 +1,50 @@
+#version 450
+
+// equirect_to_cube.comp
+// Converts an equirectangular HDR panorama to a cubemap (image2DArray, 6 faces).
+//
+// Bindings:
+//   set=0, binding=0 : rgba32f image2DArray  (output cubemap)
+//   set=0, binding=1 : sampler2D             (input equirect HDR)
+//
+// Dispatch: ceil(faceSize/8), ceil(faceSize/8), 6
+//   gl_GlobalInvocationID.z = face index [0..5]
+
+layout(set = 0, binding = 0, rgba32f) uniform writeonly image2DArray u_Output;
+layout(set = 0, binding = 1) uniform sampler2D u_HdrMap;
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+const float PI = 3.14159265359;
+
+vec2 DirToEquirect(vec3 d) {
+    float phi   = atan(d.z, d.x);
+    float theta = asin(clamp(d.y, -1.0, 1.0));
+    return vec2(phi / (2.0 * PI) + 0.5, 0.5 - theta / PI);
+}
+
+// Convert cubemap face + pixel UV [0,1] to world-space direction.
+// Follows the Vulkan/OpenGL cubemap face orientation convention.
+vec3 CubeFaceDir(uint face, vec2 uv) {
+    float s = uv.x * 2.0 - 1.0;
+    float t = uv.y * 2.0 - 1.0;
+    if      (face == 0u) return normalize(vec3( 1.0,  -t,  -s)); // +X
+    else if (face == 1u) return normalize(vec3(-1.0,  -t,   s)); // -X
+    else if (face == 2u) return normalize(vec3(   s, 1.0,   t)); // +Y
+    else if (face == 3u) return normalize(vec3(   s, -1.0, -t)); // -Y
+    else if (face == 4u) return normalize(vec3(   s,  -t, 1.0)); // +Z
+    else                 return normalize(vec3(  -s,  -t, -1.0)); // -Z
+}
+
+void main() {
+    ivec3 size  = imageSize(u_Output);
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    uint  face  = gl_GlobalInvocationID.z;
+    if (coord.x >= size.x || coord.y >= size.y) return;
+
+    vec2 uv  = (vec2(coord) + 0.5) / vec2(size.xy);
+    vec3 dir = CubeFaceDir(face, uv);
+    vec3 col = textureLod(u_HdrMap, DirToEquirect(dir), 0.0).rgb;
+
+    imageStore(u_Output, ivec3(coord, face), vec4(col, 1.0));
+}
