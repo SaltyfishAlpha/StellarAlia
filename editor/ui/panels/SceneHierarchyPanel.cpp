@@ -31,6 +31,9 @@ void SceneHierarchyPanel::SetTemplateRegistry(const EntityTemplateRegistry* tmpl
 void SceneHierarchyPanel::SetSceneLoadCallback(SceneLoadCallback cb) {
     m_onSceneLoad = std::move(cb);
 }
+void SceneHierarchyPanel::SetFocusEntityCallback(FocusEntityCallback cb) {
+    m_onFocusEntity = std::move(cb);
+}
 
 // ── Hierarchy helpers ──────────────────────────────────────────────────────────
 
@@ -116,6 +119,24 @@ entt::entity SceneHierarchyPanel::DuplicateEntity(entt::entity src) {
     return dst;
 }
 
+// ── SelectRange ───────────────────────────────────────────────────────────────
+void SceneHierarchyPanel::SelectRange(uint32_t to) {
+    // Walk m_drawOrder (previous frame's visible sequence).
+    // Select every entity between m_shiftAnchor and 'to', inclusive.
+    const auto& order = m_drawOrder;
+    auto itA = std::find(order.begin(), order.end(), m_shiftAnchor);
+    auto itB = std::find(order.begin(), order.end(), to);
+    if (itA == order.end() || itB == order.end()) {
+        // Anchor or target not in visible order — fall back to single select.
+        m_selection = { to };
+        return;
+    }
+    if (itA > itB) std::swap(itA, itB);
+    m_selection.clear();
+    for (auto it = itA; it != std::next(itB); ++it)
+        m_selection.insert(*it);
+}
+
 // ── DrawNode ───────────────────────────────────────────────────────────────────
 void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
     const auto& tag       = reg.get<TagComponent>(entity);
@@ -128,8 +149,10 @@ void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
 
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth
                              | ImGuiTreeNodeFlags_OpenOnArrow;
-    if (!hasChildren)          flags |= ImGuiTreeNodeFlags_Leaf;
-    if (ebits == m_selected)   flags |= ImGuiTreeNodeFlags_Selected;
+    if (!hasChildren)                     flags |= ImGuiTreeNodeFlags_Leaf;
+    if (m_selection.count(ebits))         flags |= ImGuiTreeNodeFlags_Selected;
+
+    m_drawOrderBuild.push_back(ebits);
 
     // Render tree node; when renaming use an empty label so SameLine() lands at
     // the text start and we can overlay an InputText there.
@@ -161,24 +184,45 @@ void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
         }
     } else {
         // ── Normal interaction ─────────────────────────────────────────────────
-        if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
-            m_selected = ebits;
+        if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
+            const bool ctrlHeld  = ImGui::GetIO().KeyCtrl;
+            const bool shiftHeld = ImGui::GetIO().KeyShift;
+            if (ctrlHeld) {
+                if (m_selection.count(ebits)) m_selection.erase(ebits);
+                else                          m_selection.insert(ebits);
+                m_primarySelected = ebits;
+                m_shiftAnchor     = ebits;
+            } else if (shiftHeld && m_shiftAnchor != ~0u) {
+                SelectRange(ebits);
+                m_primarySelected = ebits;
+            } else {
+                m_selection = { ebits };
+                m_primarySelected = ebits;
+                m_shiftAnchor     = ebits;
+            }
+        }
 
         if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
-            m_renamingEntity  = ebits;
-            m_selected        = ebits;
-            m_renameFocusNext = true;
-            std::snprintf(m_renameBuffer, sizeof(m_renameBuffer), "%s", name);
+            m_selection       = { ebits };
+            m_primarySelected = ebits;
+            m_shiftAnchor     = ebits;
+            m_dblClickEntity  = ebits;
+            m_dblClick.OnDoubleClicked();
         }
 
         // ── Right-click context menu ───────────────────────────────────────────
         ImGui::PushID(static_cast<int>(ebits));
         if (ImGui::BeginPopupContextItem()) {
-            m_selected = ebits;
+            // Right-clicking always makes the node the primary selection.
+            if (!m_selection.count(ebits)) {
+                m_selection       = { ebits };
+                m_primarySelected = ebits;
+                m_shiftAnchor     = ebits;
+            }
 
             if (ImGui::MenuItem("Rename\tF2")) {
                 m_renamingEntity  = ebits;
-                m_selected        = ebits;
+                m_primarySelected = ebits;
                 m_renameFocusNext = true;
                 std::snprintf(m_renameBuffer, sizeof(m_renameBuffer), "%s", name);
             }
@@ -202,17 +246,17 @@ void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Duplicate\tCtrl+D"))
-                m_pendingDuplicate = entity;
+                m_pendingDuplicates.push_back(entity);
             ImGui::Separator();
             if (ImGui::MenuItem("Delete\tDel"))
-                m_pendingDelete = entity;
+                m_pendingDeletes.push_back(entity);
 
             ImGui::EndPopup();
         }
         ImGui::PopID();
 
         // ── Drag source ────────────────────────────────────────────────────────
-        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
+        if (!m_dblClick.IsTracking() && ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
             uint32_t bits = ebits;
             ImGui::SetDragDropPayload("SAENTITY", &bits, sizeof(bits));
             ImGui::TextUnformatted(name);
@@ -278,6 +322,26 @@ void SceneHierarchyPanel::RequestSpawnTemplate(const fs::path& templatePath) {
 void SceneHierarchyPanel::OnDraw() {
     auto& reg = m_scene->Registry();
 
+    // ── Double-click result (short = focus, long = rename) ─────────────────────
+    {
+        const auto dblResult = m_dblClick.Update(ImGui::GetIO().DeltaTime);
+        if (dblResult != DoubleClickClassifier::Result::None) {
+            auto entity = static_cast<entt::entity>(m_dblClickEntity);
+            if (reg.valid(entity)) {
+                if (dblResult == DoubleClickClassifier::Result::Short) {
+                    if (m_onFocusEntity && reg.all_of<WorldTransformComponent>(entity))
+                        m_onFocusEntity(glm::vec3(reg.get<WorldTransformComponent>(entity).matrix[3]));
+                } else {
+                    auto& t = reg.get<TagComponent>(entity);
+                    m_renamingEntity  = m_dblClickEntity;
+                    m_primarySelected = m_dblClickEntity;
+                    m_renameFocusNext = true;
+                    std::snprintf(m_renameBuffer, sizeof(m_renameBuffer), "%s", t.name.c_str());
+                }
+            }
+        }
+    }
+
     // ── Create-entity popup (triggered by menu bar or background right-click) ──
     // Shared lambda so both triggers show identical items.
     auto drawCreateItems = [&]() {
@@ -298,17 +362,22 @@ void SceneHierarchyPanel::OnDraw() {
     };
 
     // ── Entity tree ────────────────────────────────────────────────────────────
+    m_drawOrderBuild.clear();
     auto view = reg.view<TagComponent>();
     for (auto entity : view) {
         const auto* hc = reg.try_get<HierarchyComponent>(entity);
         if (hc && hc->parent != entt::null) continue;
         DrawNode(entity, reg);
     }
+    m_drawOrder = m_drawOrderBuild;  // make this frame's order available next frame
 
     // Click on empty space → deselect
     if (ImGui::IsMouseClicked(0) && ImGui::IsWindowHovered()
-        && !ImGui::IsAnyItemHovered())
-        m_selected = ~0u;
+        && !ImGui::IsAnyItemHovered()) {
+        m_selection.clear();
+        m_primarySelected = ~0u;
+        m_shiftAnchor     = ~0u;
+    }
 
     // Empty-area InvisibleButton: handles both right-click (create) and
     // drag-drop (detach to root). Using BeginPopupContextWindow+NoOpenOverItems
@@ -340,24 +409,31 @@ void SceneHierarchyPanel::OnDraw() {
 
     // ── Keyboard shortcuts via InputSystem ────────────────────────────────────
     const bool wantInput = (ImGui::IsWindowFocused() || ImGui::IsWindowHovered())
-                         && m_renamingEntity == ~0u
-                         && m_selected != ~0u;
+                         && m_renamingEntity == ~0u;
     if (wantInput) {
-        auto sel = static_cast<entt::entity>(m_selected);
-        if (reg.valid(sel)) {
-            if (m_input->WasActivated("EntityDelete"))
-                m_pendingDelete = sel;
-
-            const bool ctrlHeld = m_input->GetDeviceButton("Keyboard/LeftControl")  > 0.f
-                                || m_input->GetDeviceButton("Keyboard/RightControl") > 0.f;
-            if (ctrlHeld && m_input->WasActivated("EntityDuplicate"))
-                m_pendingDuplicate = sel;
-
-            if (m_input->WasActivated("EntityRename")) {
-                m_renamingEntity  = m_selected;
-                m_renameFocusNext = true;
-                auto& t = reg.get<TagComponent>(sel);
-                std::snprintf(m_renameBuffer, sizeof(m_renameBuffer), "%s", t.name.c_str());
+        if (m_input->WasActivated("SelectAll")) {
+            m_selection.clear();
+            for (auto entity : reg.view<TagComponent>())
+                m_selection.insert(static_cast<uint32_t>(entity));
+            if (!m_selection.empty())
+                m_primarySelected = *m_selection.begin();
+        } else if (!m_selection.empty()) {
+            if (m_input->WasActivated("EntityDelete")) {
+                for (uint32_t bits : m_selection)
+                    m_pendingDeletes.push_back(static_cast<entt::entity>(bits));
+            }
+            if (m_input->WasActivated("EntityDuplicate")) {
+                for (uint32_t bits : m_selection)
+                    m_pendingDuplicates.push_back(static_cast<entt::entity>(bits));
+            }
+            if (m_input->WasActivated("EntityRename") && m_primarySelected != ~0u) {
+                auto sel = static_cast<entt::entity>(m_primarySelected);
+                if (reg.valid(sel)) {
+                    m_renamingEntity  = m_primarySelected;
+                    m_renameFocusNext = true;
+                    auto& t = reg.get<TagComponent>(sel);
+                    std::snprintf(m_renameBuffer, sizeof(m_renameBuffer), "%s", t.name.c_str());
+                }
             }
         }
     }
@@ -382,26 +458,41 @@ void SceneHierarchyPanel::OnDraw() {
         if (reg.valid(e)) {
             if (reg.valid(op.parent))
                 m_scene->SetParent(e, op.parent);
-            m_selected = static_cast<uint32_t>(e);
+            m_selection       = { static_cast<uint32_t>(e) };
+            m_primarySelected = static_cast<uint32_t>(e);
+            m_shiftAnchor     = m_primarySelected;
         }
     }
-    if (m_pendingDuplicate != entt::null) {
-        entt::entity src = m_pendingDuplicate;
-        m_pendingDuplicate = entt::null;
-        if (reg.valid(src)) {
-            entt::entity dst = DuplicateEntity(src);
-            m_selected = static_cast<uint32_t>(dst);
+    if (!m_pendingDuplicates.empty()) {
+        std::vector<entt::entity> srcs = std::move(m_pendingDuplicates);
+        m_pendingDuplicates.clear();
+        m_selection.clear();
+        entt::entity lastDst = entt::null;
+        for (entt::entity src : srcs) {
+            if (reg.valid(src)) {
+                lastDst = DuplicateEntity(src);
+                m_selection.insert(static_cast<uint32_t>(lastDst));
+            }
+        }
+        if (reg.valid(lastDst)) {
+            m_primarySelected = static_cast<uint32_t>(lastDst);
+            m_shiftAnchor     = m_primarySelected;
             m_scene->MarkMaterialDirty();
         }
     }
-    if (m_pendingDelete != entt::null) {
-        entt::entity e = m_pendingDelete;
-        m_pendingDelete = entt::null;
-        if (reg.valid(e)) {
-            if (static_cast<entt::entity>(m_selected) == e)
-                m_selected = ~0u;
-            m_scene->DestroyEntity(e);
+    if (!m_pendingDeletes.empty()) {
+        std::vector<entt::entity> es = std::move(m_pendingDeletes);
+        m_pendingDeletes.clear();
+        for (entt::entity e : es) {
+            if (reg.valid(e)) {
+                m_selection.erase(static_cast<uint32_t>(e));
+                if (m_primarySelected == static_cast<uint32_t>(e))
+                    m_primarySelected = ~0u;
+                m_scene->DestroyEntity(e);
+            }
         }
+        if (m_primarySelected == ~0u && !m_selection.empty())
+            m_primarySelected = *m_selection.begin();
     }
 
     // ── Asset drop execution ───────────────────────────────────────────────────
@@ -429,7 +520,9 @@ void SceneHierarchyPanel::OnDraw() {
                         *m_scene, assetPath.stem().string(), entry->id);
                     if (reg.valid(parent))
                         m_scene->SetParent(e, parent);
-                    m_selected = static_cast<uint32_t>(e);
+                    m_selection       = { static_cast<uint32_t>(e) };
+                    m_primarySelected = static_cast<uint32_t>(e);
+                    m_shiftAnchor     = m_primarySelected;
                     m_scene->MarkMaterialDirty();
                 }
             }

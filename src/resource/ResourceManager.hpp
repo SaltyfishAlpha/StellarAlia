@@ -63,9 +63,13 @@ public:
     ResourceManager() = default;
     ~ResourceManager() = default;
 
-    // Initialize: set the cook cache root and the device to upload through.
+    // Initialize: set the engine cook cache root and the device to upload through.
     // Must be called before any Load*() methods.
-    void Init(const std::filesystem::path& cookCacheDir, RHI::IRHIDevice* device);
+    void Init(const std::filesystem::path& engineCookCacheDir, RHI::IRHIDevice* device);
+
+    // Update the active project's cook cache. Call when the user switches projects.
+    // VFS will check this path before the engine cache when resolving assets.
+    void SetProjectCookCache(const std::filesystem::path& projectCookCacheDir);
 
     // Destroy all GPU resources. Call before the device is destroyed.
     void Shutdown();

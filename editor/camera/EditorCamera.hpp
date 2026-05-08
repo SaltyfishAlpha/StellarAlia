@@ -47,6 +47,10 @@ public:
     //   mouseLook — only rotate the view when true (right mouse button held).
     void Update(const InputSystem& input, float dt, bool mouseLook);
 
+    // Reposition along the current forward vector so 'target' appears centred
+    // at 'distance' units. Yaw and pitch are unchanged.
+    void FocusOn(const glm::vec3& target, float distance = 5.f);
+
     // Build CameraData for the renderer.
     //   aspectRatio — viewport width / height.
     [[nodiscard]] CameraData GetCameraData(float aspectRatio) const;

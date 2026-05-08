@@ -13,10 +13,16 @@ int main() {
     desc.title        = "StellarAlia Editor";
     desc.vsync        = true;
     desc.validation   = false;
-    desc.engineAssetsDir = StellarAliaApp::ASSETS_DIR;
-    desc.projectDir      = StellarAliaApp::PROJECT_DIR;
-    desc.cookCacheDir    = StellarAliaApp::COOK_CACHE_DIR;
-    desc.shaderDir       = StellarAliaApp::BUILTIN_SHADER_DIR;
+    desc.engineAssetsDir    = StellarAliaApp::ASSETS_DIR;
+    desc.engineCookCacheDir = StellarAliaApp::COOK_CACHE_DIR;
+    desc.shaderDir          = StellarAliaApp::BUILTIN_SHADER_DIR;
+    // projectDir and cookCacheDir are left empty so the editor's project
+    // browser is shown on startup.  Override with SA_PROJECT_DIR at build
+    // time for quick iteration on a specific project:
+#ifdef SA_DEBUG_PROJECT
+    desc.projectDir   = StellarAliaApp::PROJECT_DIR;
+    desc.cookCacheDir = StellarAliaApp::COOK_CACHE_DIR;
+#endif
 
     if (!app.Init(desc))
         return 1;

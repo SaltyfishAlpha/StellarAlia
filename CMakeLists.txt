@@ -62,6 +62,9 @@ endif()
 # Override with -DSA_PROJECT_DIR=<path> to work on a custom project.
 set(SA_PROJECT_DIR "${CMAKE_SOURCE_DIR}/demo_project" CACHE PATH "Active project root (contains .saproject and assets/)")
 
+# When ON, skip the project browser at startup and load SA_PROJECT_DIR directly.
+option(SA_DEBUG_PROJECT "Skip project browser and load SA_PROJECT_DIR directly at startup" OFF)
+
 # Shader compilation + asset pipeline
 include(cmake/CompileShaders.cmake)
 include(cmake/Assets.cmake)
@@ -176,6 +179,11 @@ if(STELLAR_BUILD_EDITOR)
     target_include_directories(${PROJECT_NAME}
         PRIVATE ${CMAKE_SOURCE_DIR}/editor
     )
+endif()
+
+# When SA_DEBUG_PROJECT is ON, skip the project browser and load SA_PROJECT_DIR directly.
+if(SA_DEBUG_PROJECT)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE SA_DEBUG_PROJECT)
 endif()
 
 # Setup built-in assets: compile assets/shaders/ → bin/assets/shaders/

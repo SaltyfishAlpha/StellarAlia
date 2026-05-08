@@ -2,36 +2,50 @@
 
 #include "ui/IEditorWindow.hpp"
 #include "EditorDiagnostics.hpp"
+#include "EditorLogCapture.hpp"
+#include <vector>
+#include <memory>
 
 namespace StellarAlia::Editor {
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ConsolePanel — persistent editor diagnostic log.
+// ConsolePanel — two-tab console.
 //
-// Displays all items pushed to EditorDiagnostics: shader cook failures,
-// material load errors, scene errors, and (future) script compile errors.
-// Colour-coded by severity; filterable by level.
+// "Diagnostics" tab: editor-facing events that require user action
+//   (shader cook failures, material errors, scene errors …).
 //
-// Does NOT duplicate the engine log stream — only editor-facing events that
-// require user action are surfaced here.  Background info stays in SA_LOG_*.
+// "Engine Logs" tab: real-time mirror of SA_LOG_* via EditorLogSink.
+//   Only available when an EditorLogCapture is passed to the constructor.
 // ─────────────────────────────────────────────────────────────────────────────
 class ConsolePanel : public IEditorWindow {
 public:
-    explicit ConsolePanel(EditorDiagnostics& diags) : m_diags(&diags) {}
+    explicit ConsolePanel(EditorDiagnostics& diags,
+                          std::shared_ptr<EditorLogSink> logSink = nullptr)
+        : m_diags(&diags), m_logSink(std::move(logSink)) {}
 
     std::string_view GetName() const override { return "Console"; }
     void OnDraw() override;
 
 private:
-    EditorDiagnostics* m_diags = nullptr;
+    // ── Diagnostics tab ───────────────────────────────────────────────────────
+    EditorDiagnostics* m_diags       = nullptr;
+    bool m_showErrors                = true;
+    bool m_showWarnings              = true;
+    bool m_showInfo                  = true;
+    size_t m_lastCount               = 0;
 
-    // Per-panel filter toggles.
-    bool m_showErrors   = true;
-    bool m_showWarnings = true;
-    bool m_showInfo     = true;
+    // ── Engine Logs tab ───────────────────────────────────────────────────────
+    std::shared_ptr<EditorLogSink> m_logSink;
+    std::vector<LogEntry>          m_logEntries;
+    int                            m_logUnread      = 0;
+    float                          m_logDrainTimer  = 0.f;  // drain once per second
+    // Indexed by spdlog::level::level_enum (0=trace … 5=critical)
+    bool m_logLevelShow[6] = { false, false, true, true, true, true };
+    static constexpr size_t  kMaxLogEntries  = 2000;
+    static constexpr float   kDrainInterval  = 1.f;
 
-    // Tracks the previous item count so new arrivals trigger auto-scroll.
-    size_t m_lastCount = 0;
+    void DrawDiagnosticsTab();
+    void DrawEngineLogsTab();
 };
 
 } // namespace StellarAlia::Editor

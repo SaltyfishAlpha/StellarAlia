@@ -17,7 +17,11 @@
 #include "ui/panels/WorldSettingsPanel.hpp"
 #include "ui/panels/AssetsPanel.hpp"
 #include "ui/panels/ConsolePanel.hpp"
+#include "ui/panels/ShortcutsPanel.hpp"
 #include "resource/EntityTemplateRegistry.hpp"
+
+#include "project/ProjectManager.hpp"
+#include "ui/panels/ProjectBrowserPanel.hpp"
 
 #include "engine/SaProject.hpp"
 #include "function/scene/SceneSerializer.hpp"
@@ -49,15 +53,16 @@ void EditorMode::OnAttach(Application& app) {
 
     // ── Input maps ────────────────────────────────────────────────────────────
     InputSystem& input = app.GetInputSystem();
-    input.RegisterMaps(MakeViewportMaps());
+    m_shortcutConfig.Load(fs::path(StellarAliaApp::BIN_DIR) / "editor_shortcuts.json");
+    input.RegisterMaps(m_shortcutConfig.ApplyTo(MakeViewportMaps()));
     input.PushMap("Viewport");
     m_viewportActive = true;
 
     // ── Load project and startup scene ───────────────────────────────────────
     Scene& scene = app.GetScene();
     const std::string& projectDir = app.GetDesc().projectDir;
+    fs::path projFile;
     if (!projectDir.empty()) {
-        fs::path projFile;
         std::error_code ec;
         for (const auto& entry : fs::directory_iterator(projectDir, ec)) {
             if (entry.path().extension() == ".saproject") {
@@ -100,6 +105,9 @@ void EditorMode::OnAttach(Application& app) {
     app.GetRenderer().ApplyWorldSettings(scene.GetWorldSettings());
     SA_LOG_INFO("EditorMode: world settings applied");
 
+    // ── Log capture (attach before panels so early SA_LOG_* calls are caught) ──
+    m_logCapture = std::make_unique<EditorLogCapture>();
+
     // ── EditorUI ──────────────────────────────────────────────────────────────
     auto* glfwWin = static_cast<GLFWwindow*>(app.GetNativeWindow());
     if (!m_ui.Init(glfwWin, &app.GetVulkanDevice()))
@@ -117,6 +125,9 @@ void EditorMode::OnAttach(Application& app) {
         LoadScene(path);
     });
     m_hierarchyPanel = hierarchyOwned.get();
+    hierarchyOwned->SetFocusEntityCallback([this](glm::vec3 worldPos) {
+        m_camera.FocusOn(worldPos);
+    });
     m_ui.RegisterWindow(std::move(hierarchyOwned));
     {
         auto inspOwned = std::make_unique<InspectorPanel>(scene, *m_hierarchyPanel,
@@ -126,7 +137,7 @@ void EditorMode::OnAttach(Application& app) {
         m_ui.RegisterWindow(std::move(inspOwned));
     }
     m_ui.RegisterWindow(std::make_unique<SettingsPanel>(
-        &m_overlaySettings, &app.GetPhysicsDebugSettings()));
+        &m_overlaySettings, &app.GetPhysicsDebugSettings(), &app.GetRenderer().GetRenderGraph()));
     m_ui.RegisterWindow(std::make_unique<WorldSettingsPanel>(scene, app.GetRenderer(), m_assetRegistry));
     {
         auto assetsOwned = std::make_unique<AssetsPanel>(
@@ -142,6 +153,7 @@ void EditorMode::OnAttach(Application& app) {
                 pd.empty() ? fs::path{} : fs::path(pd) / "assets",
                 m_app->GetDesc().engineAssetsDir);
         });
+        m_assetsPanel->SetInput(&input);
         m_assetsPanel->SetCookShadersCallback([this]() { CookProjectShaders(); });
         m_assetsPanel->SetDiagnostics(&m_diagnostics);
         m_assetsPanel->SetMaterialManager(app.GetRenderer().GetMaterialManager());
@@ -153,7 +165,10 @@ void EditorMode::OnAttach(Application& app) {
 
     if (m_inspectorPanel) m_inspectorPanel->SetAssetsPanel(m_assetsPanel);
 
-    m_ui.RegisterWindow(std::make_unique<ConsolePanel>(m_diagnostics));
+    m_ui.RegisterWindow(std::make_unique<ConsolePanel>(m_diagnostics, m_logCapture->GetSink()));
+    m_ui.RegisterWindow(std::make_unique<ShortcutsPanel>(
+        m_shortcutConfig, input,
+        fs::path(StellarAliaApp::BIN_DIR) / "editor_shortcuts.json"));
 
     // ── GLFW drop callback (import via drag-and-drop from Explorer) ────────────
     // GLFWWindow already owns the window user pointer for resize events, so we
@@ -165,8 +180,10 @@ void EditorMode::OnAttach(Application& app) {
 
     // ── File menu callbacks ───────────────────────────────────────────────────
     m_ui.SetFileCallbacks({
-        [this]() { NewScene(); },
-        [this]() { SaveScene(); }
+        .onNewScene    = [this]() { NewScene(); },
+        .onSaveScene   = [this]() { SaveScene(); },
+        .onNewProject  = [this]() { m_showProjectBrowser = true; },
+        .onOpenProject = [this]() { m_showProjectBrowser = true; },
     });
 
     // ── Assets menu callbacks ─────────────────────────────────────────────────
@@ -175,6 +192,20 @@ void EditorMode::OnAttach(Application& app) {
         [this]() { if (m_assetsPanel) m_assetsPanel->RequestRefresh(); },
         [this]() { if (m_assetsPanel) m_assetsPanel->RequestReimportAll(); }
     });
+
+    // ── Project browser ───────────────────────────────────────────────────────
+    const fs::path binDir = fs::path(StellarAliaApp::BIN_DIR);
+    m_recentsConfigPath   = binDir / "recent_projects.json";
+    m_projectManager.LoadRecents(m_recentsConfigPath);
+
+    m_projectBrowserPanel = std::make_unique<ProjectBrowserPanel>(
+        m_projectManager, app.GetDesc().engineAssetsDir);
+    m_projectBrowserPanel->SetOnProjectSelected([this](const fs::path& path) {
+        LoadProject(path);
+    });
+
+    if (projectDir.empty() || projFile.empty())
+        m_showProjectBrowser = true;
 
     SA_LOG_INFO("EditorMode: attached");
     SA_LOG_INFO("  RMB + Mouse / Right stick — Look");
@@ -188,7 +219,11 @@ void EditorMode::OnDetach() {
         auto* glfwWin = static_cast<GLFWwindow*>(m_app->GetNativeWindow());
         if (glfwWin) glfwSetDropCallback(glfwWin, nullptr);
     }
+    const fs::path defaultPath = fs::path(StellarAliaApp::BIN_DIR) / "editor_shortcuts.json";
+    if (m_shortcutConfig.IsDirty() && m_shortcutConfig.GetConfigPath() != defaultPath)
+        m_shortcutConfig.Save();
     m_ui.Shutdown();
+    m_logCapture.reset();  // removes sink from spdlog before logger shuts down
 
     // Restore cursor in case it was captured during shutdown.
     if (m_app)
@@ -199,6 +234,15 @@ void EditorMode::OnDetach() {
 
 void EditorMode::OnRenderUI(RHI::IRHICommandList* cmd) {
     m_ui.NewFrame();
+
+    if (m_projectBrowserPanel) {
+        if (m_showProjectBrowser) {
+            m_projectBrowserPanel->Open();
+            m_showProjectBrowser = false;
+        }
+        m_projectBrowserPanel->OnDraw();
+    }
+
     m_ui.DrawPanels();
     DrawImGuizmo();
     m_ui.Render(cmd);
@@ -207,6 +251,20 @@ void EditorMode::OnRenderUI(RHI::IRHICommandList* cmd) {
 void EditorMode::OnUpdate(float dt) {
     InputSystem&         input    = m_app->GetInputSystem();
     Platform::GLFWInputProvider& provider = m_app->GetInputProvider();
+
+    // Push "TextInput" map only when an InputText widget is actively consuming
+    // typed characters. WantCaptureKeyboard is too broad — it is also true when
+    // any ImGui panel has keyboard-nav focus, which would block WASD/shortcuts
+    // whenever the user clicks a panel. WantTextInput is set only for actual
+    // text-entry widgets (rename, console, etc.).
+    const bool wantKeys = ImGui::GetIO().WantTextInput;
+    if (wantKeys && !m_textInputMapPushed) {
+        input.PushMap("TextInput");
+        m_textInputMapPushed = true;
+    } else if (!wantKeys && m_textInputMapPushed) {
+        input.PopMap();
+        m_textInputMapPushed = false;
+    }
 
     // Release cursor capture while the transform gizmo is being dragged so the
     // mouse pointer remains visible and ImGuizmo can process the drag correctly.
@@ -221,6 +279,13 @@ void EditorMode::OnUpdate(float dt) {
         provider.SetCursorCapture(true);
     else if (input.WasDeactivated("MouseLook"))
         provider.SetCursorCapture(false);
+
+    // File shortcuts — Ctrl+N / Ctrl+S; composite bindings also prevent N/S from
+    // leaking into camera WASD or gizmo-scale when the modifier is held.
+    if (input.WasActivated("NewScene"))
+        NewScene();
+    else if (input.WasActivated("SaveScene"))
+        SaveScene();
 
     // Gizmo mode shortcuts — T / R / S; guard S with !mouseLook to avoid WASD conflict.
     if (input.WasActivated("GizmoTranslate"))
@@ -406,6 +471,55 @@ void EditorMode::LoadScene(const fs::path& path) {
     m_app->GetRenderer().ApplyWorldSettings(scene.GetWorldSettings());
     m_app->PrepareAnimatedEntities();
     m_app->RebuildDrawList();
+}
+
+void EditorMode::LoadProject(const fs::path& saprojectPath) {
+    if (m_app->GetPlayState() != EnginePlayState::Editing) {
+        SA_LOG_WARN("EditorMode::LoadProject — cannot switch project while not in Editing state");
+        return;
+    }
+
+    const fs::path projectDir = saprojectPath.parent_path();
+    const fs::path cookCacheDir = projectDir / "cook_cache";
+
+    // Clear scene first
+    Scene& scene = m_app->GetScene();
+    scene.Clear();
+    m_currentScenePath.clear();
+
+    // Update Application paths
+    m_app->UpdateProjectPaths(projectDir, cookCacheDir);
+
+    // Rescan asset registry
+    m_assetRegistry->Scan(projectDir / "assets", m_app->GetDesc().engineAssetsDir);
+    SA_LOG_INFO("EditorMode: asset registry rescanned ({} assets)", m_assetRegistry->Count());
+
+    // Update AssetsPanel root
+    if (m_assetsPanel)
+        m_assetsPanel->SetProjectDir(projectDir / "assets");
+
+    // Load startup scene
+    SaProject proj;
+    if (LoadSaProject(saprojectPath, proj) && !proj.startupScene.empty()) {
+        const fs::path scenePath = projectDir / proj.startupScene;
+        if (SceneSerializer::LoadFromFile(scene, scenePath)) {
+            m_currentScenePath = scenePath;
+            SA_LOG_INFO("EditorMode: loaded startup scene '{}'", scenePath.string());
+        } else {
+            SA_LOG_WARN("EditorMode: could not load startup scene '{}'", scenePath.string());
+        }
+    }
+
+    m_app->GetRenderer().ApplyWorldSettings(scene.GetWorldSettings());
+    m_app->PrepareAnimatedEntities();
+    m_app->RebuildDrawList();
+
+    // Update recent projects
+    m_projectManager.AddRecent(proj.name.empty() ? saprojectPath.stem().string() : proj.name,
+                                saprojectPath);
+    m_projectManager.SaveRecents(m_recentsConfigPath);
+
+    SA_LOG_INFO("EditorMode: switched to project '{}'", projectDir.string());
 }
 
 void EditorMode::NewScene() {

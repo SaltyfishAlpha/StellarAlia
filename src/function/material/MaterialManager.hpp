@@ -85,9 +85,7 @@ public:
     // Returns nullptr on failure (missing file, unknown type, etc.).
     // The returned pointer is owned by this manager — do not delete it.
     [[nodiscard]] MaterialInstance*
-    LoadMaterial(const AssetID& id,
-                 const std::filesystem::path& cookCacheDir,
-                 Resource::ResourceManager& resMgr);
+    LoadMaterial(const AssetID& id, Resource::ResourceManager& resMgr);
 
     // Return an independent copy of src with the same type, parameters, and
     // textures. The caller owns the returned instance.

@@ -139,6 +139,13 @@ void EditorUI::DrawPanels() {
             if (ImGui::MenuItem("Save Scene", "Ctrl+S")) {
                 if (m_fileCallbacks.onSaveScene) m_fileCallbacks.onSaveScene();
             }
+            ImGui::Separator();
+            if (ImGui::MenuItem("New Project...")) {
+                if (m_fileCallbacks.onNewProject) m_fileCallbacks.onNewProject();
+            }
+            if (ImGui::MenuItem("Open Project...")) {
+                if (m_fileCallbacks.onOpenProject) m_fileCallbacks.onOpenProject();
+            }
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Assets")) {

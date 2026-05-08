@@ -2,6 +2,7 @@
 #include "resource/AssetRegistry.hpp"
 #include "core/logs/Log.hpp"
 #include "core/asset/AssetID.hpp"
+#include "function/input/InputSystem.hpp"
 
 #include "importer/ImportScanner.hpp"
 #include "importer/MeshImporter.hpp"
@@ -301,6 +302,14 @@ void AssetsPanel::ProcessNFDImport() {
 #endif
 }
 
+void AssetsPanel::SetProjectDir(const std::filesystem::path& assetsRoot) {
+    m_assetsRoot      = assetsRoot;
+    m_projectDir      = assetsRoot.parent_path().string();
+    m_cookCacheDir    = (assetsRoot.parent_path() / "cook_cache").string();
+    m_selectedPath.clear();
+    m_initialScanDone = false;
+}
+
 void AssetsPanel::RequestRefresh() {
     if (m_onImport)
         m_onImport();
@@ -597,6 +606,7 @@ void AssetsPanel::OnDraw() {
         ImGui::TextDisabled("No project loaded.");
         return;
     }
+    m_drawOrderFilesBuild.clear();
     DrawDirTree(m_assetsRoot);
 
     // ── Panel empty area: single InvisibleButton handles both context menu
@@ -631,7 +641,30 @@ void AssetsPanel::OnDraw() {
         }
     }
 
-    // ── Delete confirmation modal ────────────────────────────────────────────
+    // ── Keyboard shortcuts (InputSystem) ─────────────────────────────────────
+    if (m_input && (ImGui::IsWindowFocused() || ImGui::IsWindowHovered())) {
+        if (m_input->WasActivated("SelectAll")) {
+            m_selectedPaths.clear();
+            for (const auto& p : m_drawOrderFiles)
+                m_selectedPaths.insert(p.string());
+            if (!m_selectedPaths.empty()) {
+                m_selectedPath    = m_drawOrderFiles.front();
+                m_shiftAnchorPath = m_selectedPath.string();
+            }
+        }
+        if (m_input->WasActivated("EntityDelete") && !m_selectedPaths.empty()) {
+            m_pendingDeletePaths.clear();
+            for (const auto& s : m_selectedPaths)
+                m_pendingDeletePaths.push_back(fs::path(s));
+            m_batchDeleteConfirmOpen = true;
+        }
+    }
+
+    // ── Swap draw order for next frame's range-select ─────────────────────────
+    m_drawOrderFiles = std::move(m_drawOrderFilesBuild);
+    m_drawOrderFilesBuild.clear();
+
+    // ── Delete confirmation modal (single path, from context menu) ───────────
     if (m_deleteConfirmOpen) {
         ImGui::OpenPopup("Delete##confirm");
         m_deleteConfirmOpen = false;
@@ -652,6 +685,32 @@ void AssetsPanel::OnDraw() {
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(120, 0))) {
             m_pendingDeletePath.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    // ── Batch delete confirmation modal (keyboard Delete, multiple files) ─────
+    if (m_batchDeleteConfirmOpen) {
+        ImGui::OpenPopup("Delete##batch");
+        m_batchDeleteConfirmOpen = false;
+    }
+    if (ImGui::BeginPopupModal("Delete##batch", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Delete %zu item(s)?", m_pendingDeletePaths.size());
+        ImGui::TextDisabled("This cannot be undone.");
+        ImGui::Separator();
+        if (ImGui::Button("Delete", ImVec2(120, 0))) {
+            for (const auto& p : m_pendingDeletePaths) {
+                DeletePath(p);
+                m_selectedPaths.erase(p.string());
+            }
+            m_pendingDeletePaths.clear();
+            if (m_selectedPaths.empty()) m_selectedPath.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+            m_pendingDeletePaths.clear();
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
@@ -781,7 +840,8 @@ void AssetsPanel::DrawDirTree(const fs::path& dir) {
     for (const auto& entry : files) {
         const std::string name     = entry.path().filename().string();
         const std::string fullPath = entry.path().string();
-        const bool selected        = (entry.path() == m_selectedPath);
+        const bool selected        = m_selectedPaths.count(entry.path().string()) > 0
+                                  || entry.path() == m_selectedPath;
         const bool isRenaming      = (entry.path() == m_renamingPath);
 
         ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf
@@ -823,8 +883,38 @@ void AssetsPanel::DrawDirTree(const fs::path& dir) {
             continue;  // skip normal click/drag/context logic while renaming
         }
 
-        if (ImGui::IsItemClicked())
-            m_selectedPath = entry.path();
+        m_drawOrderFilesBuild.push_back(entry.path());
+
+        if (ImGui::IsItemClicked()) {
+            const bool ctrlHeld  = ImGui::GetIO().KeyCtrl;
+            const bool shiftHeld = ImGui::GetIO().KeyShift;
+            const std::string pathStr = entry.path().string();
+            if (ctrlHeld) {
+                if (m_selectedPaths.count(pathStr)) m_selectedPaths.erase(pathStr);
+                else                                m_selectedPaths.insert(pathStr);
+                m_selectedPath    = entry.path();
+                m_shiftAnchorPath = pathStr;
+            } else if (shiftHeld && !m_shiftAnchorPath.empty()) {
+                // Range: find anchor and current in draw order from previous frame.
+                const auto& ord = m_drawOrderFiles;
+                auto itA = std::find_if(ord.begin(), ord.end(),
+                    [&](const fs::path& p){ return p.string() == m_shiftAnchorPath; });
+                auto itB = std::find(ord.begin(), ord.end(), entry.path());
+                if (itA != ord.end() && itB != ord.end()) {
+                    if (itA > itB) std::swap(itA, itB);
+                    m_selectedPaths.clear();
+                    for (auto it = itA; it != std::next(itB); ++it)
+                        m_selectedPaths.insert(it->string());
+                } else {
+                    m_selectedPaths = { pathStr };
+                }
+                m_selectedPath = entry.path();
+            } else {
+                m_selectedPaths   = { pathStr };
+                m_selectedPath    = entry.path();
+                m_shiftAnchorPath = pathStr;
+            }
+        }
 
         // Drag source.
         if (ImGui::BeginDragDropSource()) {

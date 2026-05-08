@@ -70,6 +70,8 @@ public:
     struct FileCallbacks {
         std::function<void()> onNewScene;
         std::function<void()> onSaveScene;
+        std::function<void()> onNewProject;
+        std::function<void()> onOpenProject;
     };
     void SetFileCallbacks(FileCallbacks cbs) { m_fileCallbacks = std::move(cbs); }
 

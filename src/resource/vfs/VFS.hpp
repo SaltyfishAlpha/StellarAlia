@@ -22,14 +22,21 @@ namespace fs = std::filesystem;
 // ─────────────────────────────────────────────────────────────────────────────
 class VFS {
 public:
-    // Set the root cook cache directory (called once at startup from ResourceManager).
+    // Set the engine cook cache — fixed at startup, never changes between projects.
+    // Contains cooked engine built-in assets (meshes, textures, materials).
+    static void SetEngineCookCacheDir(const fs::path& dir);
+
+    // Set the active project's cook cache — updated when the user switches projects.
+    // Contains cooked assets imported into the current project.
+    // Checked before the engine cache in ResolveCookedPath.
     static void SetCookCacheDir(const fs::path& dir);
 
-    // Returns the cook cache dir set via SetCookCacheDir.
+    // Returns the project cook cache (or the engine cache if no project is loaded).
     static const fs::path& GetCookCacheDir();
 
     // Resolve an AssetID to a cooked file path.
-    // Returns std::nullopt if the file does not exist.
+    // Checks the project cache first, then falls back to the engine cache.
+    // Returns std::nullopt if the file is not found in either location.
     // ext must include the leading dot, e.g. ".satex", ".samesh".
     [[nodiscard]] static std::optional<fs::path>
     ResolveCookedPath(const AssetID& id, std::string_view ext);

@@ -4,9 +4,13 @@
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <unordered_set>
+#include <vector>
 
 #include "ui/IEditorWindow.hpp"
+#include "ui/DoubleClickClassifier.hpp"
 #include <entt/entt.hpp>
+#include <glm/vec3.hpp>
 
 namespace StellarAlia { class Scene; }
 namespace StellarAlia { class InputSystem; }
@@ -18,6 +22,12 @@ namespace StellarAlia::Editor {
 // ─────────────────────────────────────────────────────────────────────────────
 // SceneHierarchyPanel — lists every entity in the scene by name.
 // Clicking an entity selects it; the InspectorPanel reads the selection.
+//
+// Selection model:
+//   Normal click   — single-select (clears previous selection)
+//   Ctrl+click     — toggle individual entity
+//   Shift+click    — range-select from last anchor to clicked entity
+//   Ctrl+A         — select all entities
 //
 // Supports entity CRUD via toolbar button, right-click context menu, and
 // keyboard shortcuts driven by the InputSystem.
@@ -35,7 +45,8 @@ namespace StellarAlia::Editor {
 // ─────────────────────────────────────────────────────────────────────────────
 class SceneHierarchyPanel : public IEditorWindow {
 public:
-    using SceneLoadCallback = std::function<void(const std::filesystem::path&)>;
+    using SceneLoadCallback     = std::function<void(const std::filesystem::path&)>;
+    using FocusEntityCallback   = std::function<void(glm::vec3)>;
 
     SceneHierarchyPanel(Scene& scene, InputSystem& input)
         : m_scene(&scene), m_input(&input) {}
@@ -49,12 +60,18 @@ public:
     // Optional: called when a .sascene is dropped onto the panel.
     void SetSceneLoadCallback(SceneLoadCallback cb);
 
+    // Optional: called on short double-click with the entity's world position.
+    void SetFocusEntityCallback(FocusEntityCallback cb);
+
     std::string_view GetName()    const override { return "Scene Hierarchy"; }
     ImGuiWindowFlags GetWindowFlags() const override { return ImGuiWindowFlags_HorizontalScrollbar; }
     void OnDraw() override;
 
-    // Returns the currently selected entity raw bits (~0u = none).
-    uint32_t GetSelectedEntity() const { return m_selected; }
+    // Primary selected entity raw bits (~0u = none).
+    uint32_t GetSelectedEntity() const { return m_primarySelected; }
+
+    // All currently selected entity raw bits.
+    const std::unordered_set<uint32_t>& GetSelectedEntities() const { return m_selection; }
 
     // Called from the top menu bar Entity entries to create at scene root.
     void RequestCreateEmpty();
@@ -62,6 +79,10 @@ public:
 
 private:
     void DrawNode(entt::entity entity, entt::registry& reg);
+
+    // Select a contiguous range of entities from m_shiftAnchor to 'to'
+    // using the previous frame's visual draw order.
+    void SelectRange(uint32_t to);
 
     // Copies all value-type components from src to a new entity.
     // Children are recursively duplicated and re-parented.
@@ -72,8 +93,20 @@ private:
     const Resource::AssetRegistry*   m_registry       = nullptr;
     const EntityTemplateRegistry*    m_tmplRegistry   = nullptr;
     SceneLoadCallback                m_onSceneLoad;
-    uint32_t                         m_selected = ~0u;
+    FocusEntityCallback              m_onFocusEntity;
 
+    // ── Selection state ────────────────────────────────────────────────────
+    std::unordered_set<uint32_t>  m_selection;                // all selected entities
+    uint32_t                      m_primarySelected = ~0u;    // inspector target + rename anchor
+    uint32_t                      m_shiftAnchor     = ~0u;    // Shift+click range start
+
+    // Visual draw order from the previous frame — used for Shift+click range selection.
+    std::vector<uint32_t>         m_drawOrder;
+    std::vector<uint32_t>         m_drawOrderBuild;           // accumulated this frame
+
+    // ── Double-click classification ────────────────────────────────────────
+    DoubleClickClassifier            m_dblClick;
+    uint32_t                         m_dblClickEntity = ~0u;
 
     // ── Rename state ───────────────────────────────────────────────────────
     uint32_t m_renamingEntity  = ~0u;
@@ -89,8 +122,8 @@ private:
     CreateOp m_pendingCreate;
 
     // ── Deferred operations (applied after tree traversal) ─────────────────
-    entt::entity m_pendingDelete    = entt::null;
-    entt::entity m_pendingDuplicate = entt::null;
+    std::vector<entt::entity> m_pendingDeletes;
+    std::vector<entt::entity> m_pendingDuplicates;
 
     // ── Drag-and-drop ──────────────────────────────────────────────────────
     struct DnDOp {

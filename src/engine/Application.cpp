@@ -30,7 +30,10 @@ bool Application::Init(const Desc& desc) {
     Core::Log::Initialize();
     SA_LOG_INFO("Application: initialising");
 
-    fs::create_directories(desc.cookCacheDir);
+    if (!desc.engineCookCacheDir.empty())
+        fs::create_directories(desc.engineCookCacheDir);
+    if (!desc.cookCacheDir.empty())
+        fs::create_directories(desc.cookCacheDir);
 
     // ── Window ────────────────────────────────────────────────────────────────
     m_window = GLFWWindow::Create(WindowDesc{
@@ -61,7 +64,9 @@ bool Application::Init(const Desc& desc) {
     }
 
     // ── Resource / Material managers ──────────────────────────────────────────
-    m_resMgr.Init(desc.cookCacheDir, m_device.get());
+    m_resMgr.Init(desc.engineCookCacheDir, m_device.get());
+    if (!desc.cookCacheDir.empty())
+        m_resMgr.SetProjectCookCache(desc.cookCacheDir);
     m_matMgr.Init(m_device.get(), &m_resMgr);
 
     // ── SceneRenderer ─────────────────────────────────────────────────────────
@@ -70,7 +75,8 @@ bool Application::Init(const Desc& desc) {
     rendDesc.matMgr       = &m_matMgr;
     rendDesc.resMgr       = &m_resMgr;
     rendDesc.shaderDir    = desc.shaderDir;
-    rendDesc.cookCacheDir = desc.cookCacheDir;
+    // IBL bake output goes to the project cache when loaded, engine cache otherwise.
+    rendDesc.cookCacheDir = desc.cookCacheDir.empty() ? desc.engineCookCacheDir : desc.cookCacheDir;
     if (!m_renderer.Init(rendDesc)) {
         SA_LOG_CRITICAL("Application: renderer init failed");
         return false;
@@ -242,6 +248,16 @@ void Application::SetPlayState(EnginePlayState newState) {
 
     m_playState = newState;
     m_mode->OnPlayStateChanged(m_playState);
+}
+
+void Application::UpdateProjectPaths(const std::filesystem::path& projectDir,
+                                      const std::filesystem::path& cookCacheDir) {
+    m_desc.projectDir   = projectDir.string();
+    m_desc.cookCacheDir = cookCacheDir.string();
+    if (!cookCacheDir.empty())
+        fs::create_directories(cookCacheDir);
+    m_resMgr.SetProjectCookCache(cookCacheDir);
+    m_renderer.SetCookCacheDir(cookCacheDir.string());
 }
 
 } // namespace StellarAlia

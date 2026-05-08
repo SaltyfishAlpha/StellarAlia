@@ -100,6 +100,25 @@ private:
 //   rg.Execute(dev, *cmd); // emit barriers + execute lambdas
 //
 // ─────────────────────────────────────────────────────────────────────────────
+// Per-frame render graph statistics. Physical == logical until aliasing (#16).
+struct RGStats {
+    uint32_t transientCount       = 0;
+    uint32_t importedCount        = 0;
+    uint32_t physicalSlotCount    = 0;   // == transientCount until aliasing
+    uint64_t transientBytesLogical  = 0; // sum of all logical transient sizes
+    uint64_t transientBytesPhysical = 0; // == logical until aliasing
+
+    struct Entry {
+        std::string name;
+        uint32_t    width      = 0;
+        uint32_t    height     = 0;
+        uint32_t    mipLevels  = 1;
+        const char* formatStr  = nullptr; // points to a static string literal
+        uint64_t    bytes      = 0;
+    };
+    std::vector<Entry> entries; // transient textures only
+};
+
 class RenderGraph {
 public:
     using SetupFn   = std::function<void(RGPassBuilder&)>;
@@ -128,6 +147,8 @@ public:
     // Emit barriers and invoke execute lambdas in sorted order.
     void Execute(RHI::IRHIDevice& device, RHI::IRHICommandList& cmd);
 
+    [[nodiscard]] const RGStats& GetLastFrameStats() const { return m_lastStats; }
+
 private:
     struct TextureEntry {
         std::string            name;
@@ -148,6 +169,7 @@ private:
     std::vector<TextureEntry> m_textures;
     std::vector<PassEntry>    m_passes;
     std::vector<uint32_t>     m_sortedPassIndices;
+    RGStats                   m_lastStats;
 };
 
 } // namespace StellarAlia

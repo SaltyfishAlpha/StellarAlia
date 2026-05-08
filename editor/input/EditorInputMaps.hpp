@@ -69,42 +69,75 @@ inline std::vector<ActionMapDef> MakeViewportMaps() {
                     .bindings = {
                         BindingDef::Direct("Keyboard/Escape"),
                         BindingDef::Direct("Gamepad/Start"),
-                    }
+                    },
+                    .userConfigurable = true,
                 },
                 // ── Gizmo mode shortcuts ──────────────────────────────────
                 {
                     .name = "GizmoTranslate",
                     .type = ActionType::Button,
-                    .bindings = { BindingDef::Direct("Keyboard/T") }
+                    .bindings = { BindingDef::Direct("Keyboard/T") },
+                    .userConfigurable = true,
                 },
                 {
                     .name = "GizmoRotate",
                     .type = ActionType::Button,
-                    .bindings = { BindingDef::Direct("Keyboard/R") }
+                    .bindings = { BindingDef::Direct("Keyboard/R") },
+                    .userConfigurable = true,
                 },
                 {
                     .name = "GizmoScale",
                     .type = ActionType::Button,
-                    .bindings = { BindingDef::Direct("Keyboard/S") }
+                    .bindings = { BindingDef::Direct("Keyboard/S") },
+                    .userConfigurable = true,
+                },
+                // ── Selection shortcuts ───────────────────────────────────
+                {
+                    .name = "SelectAll",
+                    .type = ActionType::Button,
+                    .bindings = { BindingDef::Composite("Keyboard/LeftControl", "Keyboard/A") },
+                    .userConfigurable = true,
+                },
+                // ── File shortcuts ────────────────────────────────────────
+                {
+                    .name = "NewScene",
+                    .type = ActionType::Button,
+                    .bindings = { BindingDef::Composite("Keyboard/LeftControl", "Keyboard/N") },
+                    .userConfigurable = true,
+                },
+                {
+                    .name = "SaveScene",
+                    .type = ActionType::Button,
+                    .bindings = { BindingDef::Composite("Keyboard/LeftControl", "Keyboard/S") },
+                    .userConfigurable = true,
                 },
                 // ── Scene Hierarchy shortcuts ─────────────────────────────
                 {
                     .name = "EntityDelete",
                     .type = ActionType::Button,
-                    .bindings = { BindingDef::Direct("Keyboard/Delete") }
+                    .bindings = { BindingDef::Direct("Keyboard/Delete") },
+                    .userConfigurable = true,
                 },
                 {
-                    // Ctrl gate is checked at the call site via GetDeviceButton
                     .name = "EntityDuplicate",
                     .type = ActionType::Button,
-                    .bindings = { BindingDef::Direct("Keyboard/D") }
+                    .bindings = { BindingDef::Composite("Keyboard/LeftControl", "Keyboard/D") },
+                    .userConfigurable = true,
                 },
                 {
                     .name = "EntityRename",
                     .type = ActionType::Button,
-                    .bindings = { BindingDef::Direct("Keyboard/F2") }
+                    .bindings = { BindingDef::Direct("Keyboard/F2") },
+                    .userConfigurable = true,
                 },
             }
+        },
+        {
+            // Pushed while ImGui has keyboard focus (text input fields, rename, etc.).
+            // Empty actions + passthrough=false blocks all key/gamepad actions below.
+            .name = "TextInput",
+            .actions = {},
+            .passthrough = false,
         },
         {
             .name = "UI",

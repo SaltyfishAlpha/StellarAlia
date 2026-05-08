@@ -5,6 +5,7 @@
 #include <string_view>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace StellarAlia {
 
@@ -99,6 +100,11 @@ private:
     ActionState EvaluateAction(const ActionDef& def) const;
     DeviceFamily DetectActiveFamily() const;
 
+    // Pre-pass: collect keyPaths claimed by active Composite bindings this frame.
+    // Any Direct/WASD reading a blocked path returns 0, preventing key conflicts.
+    void  ComputeBlockedPaths();
+    float GetButtonFiltered(std::string_view path) const;
+
     // ── State ─────────────────────────────────────────────────────────────────
 
     Platform::IInputProvider* m_provider = nullptr;
@@ -108,6 +114,8 @@ private:
 
     std::unordered_map<std::string, ActionState> m_curr; // this frame
     std::unordered_map<std::string, ActionState> m_prev; // last frame
+
+    std::unordered_set<std::string> m_blockedPaths;  // keys claimed by Composite this frame
 
     DeviceFamily m_activeFamily = DeviceFamily::KeyboardMouse;
 

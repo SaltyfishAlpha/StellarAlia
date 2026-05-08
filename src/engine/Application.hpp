@@ -12,6 +12,7 @@
 #include "resource/ResourceManager.hpp"
 #include "resource/AssetRegistry.hpp"
 
+#include <filesystem>
 #include <memory>
 #include <string>
 
@@ -43,13 +44,14 @@ public:
         bool        vsync           = true;
         bool        validation      = false;  // Vulkan validation layers
 
-        std::string engineAssetsDir; // engine builtin assets root (shaders, default materials…)
-        std::string projectDir;      // project root — .saproject lives here
-        std::string shaderDir;       // compiled .spv / .refl files
+        std::string engineAssetsDir;      // engine builtin assets root (shaders, default materials…)
+        std::string engineCookCacheDir;   // engine cook cache — fixed at startup, always searched
+        std::string projectDir;           // project root — .saproject lives here
+        std::string shaderDir;            // compiled .spv / .refl files
 
         // Legacy / examples: path to assets/ used when projectDir is not set.
         std::string assetsDir;
-        std::string cookCacheDir;    // cook cache; merged engine+project in dev builds
+        std::string cookCacheDir;         // project cook cache; searched before engineCookCacheDir
     };
 
     explicit Application(std::unique_ptr<AppMode> mode);
@@ -93,6 +95,11 @@ public:
 
     // Call after changing scene content at runtime (e.g. loading a new level).
     void RebuildDrawList();
+
+    // Update the active project and cook-cache paths at runtime.
+    // Call this before rescanning the AssetRegistry and loading a new scene.
+    void UpdateProjectPaths(const std::filesystem::path& projectDir,
+                             const std::filesystem::path& cookCacheDir);
 
     // ── Play-state control ────────────────────────────────────────────────────
     // Editing  — animation paused, scene freely editable.

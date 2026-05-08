@@ -1,62 +1,120 @@
 {
-  "name": "AnimTest",
-  "version": 1,
-  "world": {
-    "skyboxHdr":      "7a735f5c-b3c4-4361-b342-699c816fa64d",
-    "sh9":            "79735f5c-b3c4-4362-b342-699c816fa64e",
-    "prefilteredEnv": "78735f5c-b3c4-4363-b142-699c816fa64f",
-    "brdfLut":        "c5b06992-5a8f-4dc9-9d11-406e12b969d4",
-    "skyboxCubemap":  "7e735f5c-b3c4-4365-b342-699c816fa649"
-  },
   "entities": [
     {
+      "camera": {
+        "far": 500.0,
+        "fovY": 1.0471999645233154,
+        "near": 0.10000000149011612,
+        "priority": 1
+      },
       "id": 0,
       "parent": -1,
       "tag": "Camera",
-      "activeCamera": true,
-      "camera": { "fovY": 1.0472, "near": 0.1, "far": 500.0 },
       "transform": {
-        "position": [0.0, 1.2, 4.5],
-        "rotation": [0.9914, -0.1305, 0.0, 0.0],
-        "scale":    [1.0, 1.0, 1.0]
+        "position": [
+          0.0,
+          1.2000000476837158,
+          4.5
+        ],
+        "rotation": [
+          0.9914000034332275,
+          -0.13050000369548798,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
       }
     },
     {
+      "directionalLight": {
+        "castShadow": false,
+        "color": [
+          1.0,
+          0.949999988079071,
+          0.8500000238418579
+        ],
+        "intensity": 2.0
+      },
       "id": 1,
       "parent": -1,
       "tag": "Sun",
-      "directionalLight": {
-        "color":      [1.0, 0.95, 0.85],
-        "intensity":  2.0,
-        "castShadow": false
-      },
       "transform": {
-        "position": [0.0, 0.0, 0.0],
-        "rotation": [0.8924, -0.3007, 0.3007, 0.1014],
-        "scale":    [1.0, 1.0, 1.0]
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.8924000263214111,
+          -0.30070000886917114,
+          0.30070000886917114,
+          0.10140000283718109
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
       }
     },
     {
+      "animator": {
+        "clip": "123cac7d-ff6c-4b00-8d0d-a2e77ebb95a0",
+        "looping": true,
+        "speed": 1.0
+      },
       "id": 2,
+      "meshRenderer": {
+        "castShadow": true,
+        "materials": [],
+        "receiveShadow": true
+      },
       "parent": -1,
+      "skinnedMesh": {
+        "mesh": "7e5e8b53-f8d7-4a42-9c71-635059999f35"
+      },
       "tag": "CesiumMan",
       "transform": {
-        "position": [0.0, 0.0, 0.0],
-        "rotation": [0.7071068, -0.7071068, 0.0, 0.0],
-        "scale":    [1.0, 1.0, 1.0]
-      },
-      "skinnedMesh": {
-        "mesh":      "ce510000-0000-4000-8000-000000000001",
-        "materials": []
-      },
-      "skeleton": {
-        "asset": "9f2dc1b7-2722-4a95-9e37-79b97f4a7c14"
-      },
-      "animator": {
-        "clip":    "a233272e-07bb-4142-917c-c1b727220a94",
-        "speed":   1.0,
-        "looping": true
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.7071068286895752,
+          -0.7071068286895752,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
       }
     }
-  ]
+  ],
+  "name": "AnimTest",
+  "version": 1,
+  "world": {
+    "backgroundColor": [
+      0.07999999821186066,
+      0.07999999821186066,
+      0.07999999821186066
+    ],
+    "backgroundMode": "SolidColor",
+    "brdfLut": "c5b06992-5a8f-4dc9-9d11-406e12b969d4",
+    "exposure": 1.0,
+    "gamma": 2.200000047683716,
+    "lutStrength": 1.0,
+    "prefilteredEnv": "78735f5c-b3c4-4363-b142-699c816fa64f",
+    "sh9": "79735f5c-b3c4-4362-b342-699c816fa64e",
+    "skyboxCubemap": "7e735f5c-b3c4-4365-b342-699c816fa649",
+    "skyboxHdr": "7a735f5c-b3c4-4361-b342-699c816fa64d",
+    "tonemapMode": "Builtin"
+  }
 }

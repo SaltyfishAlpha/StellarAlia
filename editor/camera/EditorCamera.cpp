@@ -26,6 +26,11 @@ void EditorCamera::Update(const InputSystem& input, float dt, bool mouseLook) {
     position += (right * move.x + fwd * move.y) * spd * dt;
 }
 
+void EditorCamera::FocusOn(const glm::vec3& target, float distance) {
+    const glm::vec3 fwd = Rotation() * glm::vec3{ 0.f, 0.f, -1.f };
+    position = target - fwd * distance;
+}
+
 CameraData EditorCamera::GetCameraData(float aspectRatio) const {
     const glm::mat4 worldTransform =
         glm::translate(glm::mat4(1.f), position) *

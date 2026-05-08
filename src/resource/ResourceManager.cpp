@@ -15,10 +15,10 @@
 
 namespace StellarAlia::Resource {
 
-void ResourceManager::Init(const std::filesystem::path& cookCacheDir, RHI::IRHIDevice* device) {
+void ResourceManager::Init(const std::filesystem::path& engineCookCacheDir, RHI::IRHIDevice* device) {
     m_device = device;
-    VFS::SetCookCacheDir(cookCacheDir);
-    SA_LOG_INFO("ResourceManager: cook cache = {}", cookCacheDir.string());
+    VFS::SetEngineCookCacheDir(engineCookCacheDir);
+    SA_LOG_INFO("ResourceManager: engine cook cache = {}", engineCookCacheDir.string());
 
     // Create built-in textures.
     RHI::RHITextureDesc whiteDesc{};
@@ -29,6 +29,11 @@ void ResourceManager::Init(const std::filesystem::path& cookCacheDir, RHI::IRHID
     m_white1x1 = m_device->CreateTexture(whiteDesc);
     const uint32_t whitePixel = 0xFFFFFFFFu;
     m_device->UploadTextureData(m_white1x1, &whitePixel, sizeof(whitePixel));
+}
+
+void ResourceManager::SetProjectCookCache(const std::filesystem::path& projectCookCacheDir) {
+    VFS::SetCookCacheDir(projectCookCacheDir);
+    SA_LOG_INFO("ResourceManager: project cook cache = {}", projectCookCacheDir.string());
 }
 
 void ResourceManager::Shutdown() {

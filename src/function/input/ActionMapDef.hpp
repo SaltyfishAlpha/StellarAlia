@@ -18,7 +18,7 @@ namespace StellarAlia {
 //   BindingDef::TwoButton("Keyboard/Q", "Keyboard/E")  // → Axis [-1,1]
 // ─────────────────────────────────────────────────────────────────────────────
 struct BindingDef {
-    enum class Kind { Direct, WASD, TwoButtonAxis };
+    enum class Kind { Direct, WASD, TwoButtonAxis, Composite };
 
     Kind   kind = Kind::Direct;
     std::string path;                       // Direct: device path
@@ -35,6 +35,11 @@ struct BindingDef {
         std::string negative;
         std::string positive;
     } twoButton;
+
+    struct CompositeKeys {
+        std::vector<std::string> modifierPaths;  // all must be held; empty = no modifier
+        std::string keyPath;
+    } composite;
 
     ProcessorChain processors;
 
@@ -67,6 +72,30 @@ struct BindingDef {
         return b;
     }
 
+    // Composite: all modifiers AND the key must be held to activate (AND gate).
+    // Single-modifier convenience overload:
+    [[nodiscard]] static BindingDef Composite(std::string modifier, std::string key) {
+        BindingDef b;
+        b.kind = Kind::Composite;
+        b.composite = { { std::move(modifier) }, std::move(key) };
+        return b;
+    }
+    // Multi-modifier overload (e.g. Ctrl+Shift+Z):
+    [[nodiscard]] static BindingDef Composite(std::initializer_list<std::string> modifiers,
+                                               std::string key) {
+        BindingDef b;
+        b.kind = Kind::Composite;
+        b.composite = { std::vector<std::string>(modifiers), std::move(key) };
+        return b;
+    }
+    [[nodiscard]] static BindingDef Composite(std::vector<std::string> modifiers,
+                                               std::string key) {
+        BindingDef b;
+        b.kind = Kind::Composite;
+        b.composite = { std::move(modifiers), std::move(key) };
+        return b;
+    }
+
     // ── Processor chain (fluent, return *this) ────────────────────────────────
 
     BindingDef& WithScale(float uniform)         { processors.Scale(uniform);     return *this; }
@@ -81,10 +110,11 @@ struct BindingDef {
 // ActionDef — one semantic action with its bindings
 // ─────────────────────────────────────────────────────────────────────────────
 struct ActionDef {
-    std::string           name;
-    ActionType            type                = ActionType::Button;
+    std::string             name;
+    ActionType              type                = ActionType::Button;
     std::vector<BindingDef> bindings;
-    float                 activationThreshold = 0.5f;
+    float                   activationThreshold = 0.5f;
+    bool                    userConfigurable    = false;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1,7 +1,77 @@
 #include "function/render_graph/RenderGraph.hpp"
 #include "core/logs/Log.hpp"
 
+#include <algorithm>
+
 namespace StellarAlia {
+
+static uint64_t CalcTextureBytes(const RHI::RHITextureDesc& desc) {
+    using F = RHI::RHIFormat;
+
+    // Block-compressed: 4×4 texels per block, fixed block size in bytes.
+    auto bcBytes = [&](uint64_t blockBytes) -> uint64_t {
+        uint64_t total = 0;
+        uint32_t w = desc.width, h = desc.height;
+        for (uint32_t m = 0; m < desc.mipLevels; ++m) {
+            uint32_t bw = std::max(1u, (w + 3) / 4);
+            uint32_t bh = std::max(1u, (h + 3) / 4);
+            total += static_cast<uint64_t>(bw) * bh * blockBytes * (desc.cubemap ? 6u : 1u);
+            w = std::max(1u, w / 2); h = std::max(1u, h / 2);
+        }
+        return total;
+    };
+    switch (desc.format) {
+        case F::BC1_UNORM: return bcBytes(8);
+        case F::BC3_UNORM: return bcBytes(16);
+        case F::BC5_UNORM: return bcBytes(16);
+        case F::BC7_UNORM: return bcBytes(16);
+        default: break;
+    }
+
+    uint64_t bpp = 0;
+    switch (desc.format) {
+        case F::RGBA8_UNORM: case F::RGBA8_SRGB:
+        case F::BGRA8_UNORM: case F::BGRA8_SRGB:
+        case F::RG16F:       case F::R32F:
+        case F::D32F:        case F::D24_S8:      bpp = 4; break;
+        case F::RGBA16F:     case F::RG32F:        bpp = 8; break;
+        case F::RGBA32F:                           bpp = 16; break;
+        case F::R8_UNORM:                          bpp = 1; break;
+        case F::D16_UNORM:                         bpp = 2; break;
+        default:                                   bpp = 4; break;
+    }
+    uint64_t total = 0;
+    uint32_t w = desc.width, h = desc.height;
+    for (uint32_t m = 0; m < desc.mipLevels; ++m) {
+        total += static_cast<uint64_t>(w) * h * bpp * (desc.cubemap ? 6u : 1u);
+        w = std::max(1u, w / 2); h = std::max(1u, h / 2);
+    }
+    return total;
+}
+
+static const char* FormatName(RHI::RHIFormat f) {
+    using F = RHI::RHIFormat;
+    switch (f) {
+        case F::RGBA8_UNORM:  return "RGBA8";
+        case F::RGBA8_SRGB:   return "RGBA8_SRGB";
+        case F::BGRA8_UNORM:  return "BGRA8";
+        case F::BGRA8_SRGB:   return "BGRA8_SRGB";
+        case F::RGBA16F:      return "RGBA16F";
+        case F::RGBA32F:      return "RGBA32F";
+        case F::RG16F:        return "RG16F";
+        case F::RG32F:        return "RG32F";
+        case F::R8_UNORM:     return "R8";
+        case F::R32F:         return "R32F";
+        case F::D32F:         return "D32F";
+        case F::D24_S8:       return "D24_S8";
+        case F::D16_UNORM:    return "D16";
+        case F::BC1_UNORM:    return "BC1";
+        case F::BC3_UNORM:    return "BC3";
+        case F::BC5_UNORM:    return "BC5";
+        case F::BC7_UNORM:    return "BC7";
+        default:              return "Unknown";
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RGResources
@@ -220,6 +290,30 @@ void RenderGraph::Execute(RHI::IRHIDevice& /*device*/, RHI::IRHICommandList& cmd
         cmd.TransitionTexture(rhi, states[i], t.finalState);
         states[i] = t.finalState;
     }
+
+    // Fill per-frame stats (logical only; physical == logical until aliasing #16).
+    m_lastStats = {};
+    m_lastStats.entries.reserve(texCount);
+    for (uint32_t i = 0; i < texCount; i++) {
+        const auto& t = m_textures[i];
+        if (t.isImported) {
+            m_lastStats.importedCount++;
+        } else {
+            const uint64_t bytes = CalcTextureBytes(t.desc);
+            m_lastStats.transientCount++;
+            m_lastStats.transientBytesLogical += bytes;
+            RGStats::Entry e;
+            e.name      = t.name;
+            e.width     = t.desc.width;
+            e.height    = t.desc.height;
+            e.mipLevels = t.desc.mipLevels;
+            e.formatStr = FormatName(t.desc.format);
+            e.bytes     = bytes;
+            m_lastStats.entries.push_back(e);
+        }
+    }
+    m_lastStats.physicalSlotCount    = m_lastStats.transientCount;
+    m_lastStats.transientBytesPhysical = m_lastStats.transientBytesLogical;
 }
 
 } // namespace StellarAlia

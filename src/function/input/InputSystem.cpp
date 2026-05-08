@@ -82,6 +82,9 @@ void InputSystem::Poll() {
     // Detect which device family was active this frame.
     m_activeFamily = DetectActiveFamily();
 
+    // Block keys claimed by Composite bindings whose modifiers are held.
+    ComputeBlockedPaths();
+
     // Rotate state buffers.
     m_prev = std::move(m_curr);
     m_curr.clear();
@@ -144,6 +147,7 @@ DeviceFamily InputSystem::ClassifyBinding(const BindingDef& b) {
     case BindingDef::Kind::WASD:          return DeviceFamily::KeyboardMouse;
     case BindingDef::Kind::TwoButtonAxis: return ClassifyPath(b.twoButton.positive);
     case BindingDef::Kind::Direct:        return ClassifyPath(b.path);
+    case BindingDef::Kind::Composite:     return ClassifyPath(b.composite.keyPath);
     }
     return DeviceFamily::Unknown;
 }
@@ -196,6 +200,60 @@ DeviceFamily InputSystem::DetectActiveFamily() const {
     return m_activeFamily; // silent — keep last active family
 }
 
+// ── Composite key blocking ────────────────────────────────────────────────────
+//
+// Pre-pass run at the top of Poll(): any Composite binding whose modifiers are
+// ALL held "claims" its keyPath. Direct / WASD bindings that read a claimed key
+// return 0, so pressing Ctrl+D does not also trigger the D camera-move.
+
+// Canonical modifier device paths checked for strict matching.
+static constexpr std::string_view kKnownModifiers[] = {
+    "Keyboard/LeftControl",  "Keyboard/RightControl",
+    "Keyboard/LeftShift",    "Keyboard/RightShift",
+    "Keyboard/LeftAlt",      "Keyboard/RightAlt",
+    "Keyboard/LeftSuper",    "Keyboard/RightSuper",
+};
+
+// Returns true when a held modifier key is NOT listed in specifiedMods.
+// Enforces strict (exclusive) modifier matching so Ctrl+Shift+S does not
+// fire a Ctrl+S binding.
+static bool HasExtraModifiers(Platform::IInputProvider* provider,
+                               const std::vector<std::string>& specifiedMods)
+{
+    for (std::string_view mod : kKnownModifiers) {
+        if (provider->GetButton(mod) <= 0.5f) continue;
+        bool listed = std::any_of(specifiedMods.begin(), specifiedMods.end(),
+                                   [&](const std::string& s){ return s == mod; });
+        if (!listed) return true;
+    }
+    return false;
+}
+
+void InputSystem::ComputeBlockedPaths() {
+    m_blockedPaths.clear();
+    for (auto it = m_stack.rbegin(); it != m_stack.rend(); ++it) {
+        const ActionMapDef& map = m_registry[*it];
+        for (const auto& action : map.actions) {
+            for (const auto& binding : action.bindings) {
+                if (binding.kind != BindingDef::Kind::Composite) continue;
+                if (binding.composite.modifierPaths.empty()) continue;
+                bool allMods = std::all_of(
+                    binding.composite.modifierPaths.begin(),
+                    binding.composite.modifierPaths.end(),
+                    [&](const std::string& mod){ return m_provider->GetButton(mod) > 0.5f; });
+                if (allMods && !HasExtraModifiers(m_provider, binding.composite.modifierPaths))
+                    m_blockedPaths.insert(binding.composite.keyPath);
+            }
+        }
+        if (!map.passthrough) break;
+    }
+}
+
+float InputSystem::GetButtonFiltered(std::string_view path) const {
+    if (m_blockedPaths.count(std::string(path))) return 0.f;
+    return m_provider->GetButton(path);
+}
+
 // ── Binding value readers ─────────────────────────────────────────────────────
 
 float InputSystem::ReadBindingFloat(const BindingDef& b) const {
@@ -208,7 +266,7 @@ float InputSystem::ReadBindingFloat(const BindingDef& b) const {
             b.path == "Mouse/ScrollY")
             raw = m_provider->GetAxis(b.path);
         else
-            raw = m_provider->GetButton(b.path);
+            raw = GetButtonFiltered(b.path);
         break;
     case BindingDef::Kind::TwoButtonAxis:
         raw = m_provider->GetButton(b.twoButton.positive) -
@@ -219,6 +277,15 @@ float InputSystem::ReadBindingFloat(const BindingDef& b) const {
         // misconfiguration, but return the Y component as a fallback.
         raw = m_provider->GetButton(b.wasd.up) - m_provider->GetButton(b.wasd.down);
         break;
+    case BindingDef::Kind::Composite: {
+        bool allMods = std::all_of(
+            b.composite.modifierPaths.begin(), b.composite.modifierPaths.end(),
+            [&](const std::string& mod){ return m_provider->GetButton(mod) > 0.5f; });
+        raw = (allMods
+               && !HasExtraModifiers(m_provider, b.composite.modifierPaths)
+               && m_provider->GetButton(b.composite.keyPath) > 0.5f) ? 1.f : 0.f;
+        break;
+    }
     }
     return b.processors.Apply(raw);
 }
@@ -230,8 +297,8 @@ glm::vec2 InputSystem::ReadBindingVec2(const BindingDef& b) const {
         raw = m_provider->GetAxis2D(b.path);
         break;
     case BindingDef::Kind::WASD: {
-        const float x = m_provider->GetButton(b.wasd.right) - m_provider->GetButton(b.wasd.left);
-        const float y = m_provider->GetButton(b.wasd.up)    - m_provider->GetButton(b.wasd.down);
+        const float x = GetButtonFiltered(b.wasd.right) - GetButtonFiltered(b.wasd.left);
+        const float y = GetButtonFiltered(b.wasd.up)    - GetButtonFiltered(b.wasd.down);
         raw = { x, y };
         if (b.wasd.normalize) {
             const float len = glm::length(raw);

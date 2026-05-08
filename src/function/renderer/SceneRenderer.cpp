@@ -511,18 +511,18 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
             if (meshRenderer && si < meshRenderer->materialSlots.size() &&
                 meshRenderer->materialSlots[si].IsValid()) {
                 MaterialInstance* loaded = m_matMgr->LoadMaterial(
-                    meshRenderer->materialSlots[si], m_cookCacheDir, *m_resMgr);
+                    meshRenderer->materialSlots[si], *m_resMgr);
                 if (loaded) base = loaded;
             } else if (sub.defaultMaterialID.IsValid()) {
                 MaterialInstance* loaded = m_matMgr->LoadMaterial(
-                    sub.defaultMaterialID, m_cookCacheDir, *m_resMgr);
+                    sub.defaultMaterialID, *m_resMgr);
                 if (loaded) base = loaded;
             }
 
             // materialAsset override replaces the resolved base for all sub-meshes.
             if (matOverride && matOverride->materialAsset.IsValid()) {
                 MaterialInstance* loaded = m_matMgr->LoadMaterial(
-                    matOverride->materialAsset, m_cookCacheDir, *m_resMgr);
+                    matOverride->materialAsset, *m_resMgr);
                 if (loaded) base = loaded;
             }
 
@@ -582,18 +582,18 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
             if (meshRenderer && si < meshRenderer->materialSlots.size() &&
                 meshRenderer->materialSlots[si].IsValid()) {
                 MaterialInstance* loaded = m_matMgr->LoadMaterial(
-                    meshRenderer->materialSlots[si], m_cookCacheDir, *m_resMgr);
+                    meshRenderer->materialSlots[si], *m_resMgr);
                 if (loaded) base = loaded;
             } else if (sub.materialAssetID.IsValid()) {
                 MaterialInstance* loaded = m_matMgr->LoadMaterial(
-                    sub.materialAssetID, m_cookCacheDir, *m_resMgr);
+                    sub.materialAssetID, *m_resMgr);
                 if (loaded) base = loaded;
             }
 
             // materialAsset override replaces the resolved base for all sub-meshes.
             if (matOverride && matOverride->materialAsset.IsValid()) {
                 MaterialInstance* loaded = m_matMgr->LoadMaterial(
-                    matOverride->materialAsset, m_cookCacheDir, *m_resMgr);
+                    matOverride->materialAsset, *m_resMgr);
                 if (loaded) base = loaded;
             }
 

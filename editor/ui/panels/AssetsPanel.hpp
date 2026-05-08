@@ -6,9 +6,11 @@
 #include <filesystem>
 #include <functional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace StellarAlia          { class MaterialManager; }
+namespace StellarAlia          { class InputSystem; }
 namespace StellarAlia::Resource { class AssetRegistry; }
 
 namespace StellarAlia::Editor {
@@ -64,10 +66,18 @@ public:
     // Returns the currently selected asset path (empty = none).
     const std::filesystem::path& GetSelectedPath() const { return m_selectedPath; }
 
+    // Wire InputSystem for keyboard shortcuts (Delete, Ctrl+A).
+    void SetInput(InputSystem* input)               { m_input = input; }
+
     // Optional wiring — enables type-registration guard in CreateMatFromShader
     // and diagnostic reporting for cook/material errors.
     void SetMaterialManager(MaterialManager* mm)    { m_matMgr      = mm; }
     void SetDiagnostics(EditorDiagnostics* diags)   { m_diagnostics = diags; }
+
+    // Switch to a new project at runtime.
+    // assetsRoot should be the new project's assets/ directory.
+    // Triggers a rescan on the next draw frame.
+    void SetProjectDir(const std::filesystem::path& assetsRoot);
 
     // ── Top-bar actions (called from EditorUI menu bar) ───────────────────────
     void RequestImport();      // open the import-file modal on next draw
@@ -116,12 +126,23 @@ private:
     void ReimportDir(const std::filesystem::path& dir);
 
     std::filesystem::path    m_assetsRoot;
-    std::filesystem::path    m_selectedPath;
+    std::filesystem::path    m_selectedPath;   // primary selection (for context ops)
     std::string              m_projectDir;
     std::string              m_cookCacheDir;
     Resource::AssetRegistry* m_registry     = nullptr;
     MaterialManager*         m_matMgr       = nullptr;
     EditorDiagnostics*       m_diagnostics  = nullptr;
+    InputSystem*             m_input        = nullptr;
+
+    // ── Multi-selection ────────────────────────────────────────────────────
+    std::unordered_set<std::string>   m_selectedPaths;   // path strings of all selected files
+    std::string                       m_shiftAnchorPath; // Shift+click range anchor
+    std::vector<std::filesystem::path> m_drawOrderFiles; // visible file order (prev frame)
+    std::vector<std::filesystem::path> m_drawOrderFilesBuild; // accumulated this frame
+
+    // ── Multi-delete batch ─────────────────────────────────────────────────
+    std::vector<std::filesystem::path> m_pendingDeletePaths;
+    bool                               m_batchDeleteConfirmOpen = false;
 
     SceneLoadCallback    m_onSceneLoad;
     ImportCallback       m_onImport;

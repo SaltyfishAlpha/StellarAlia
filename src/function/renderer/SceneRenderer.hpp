@@ -135,6 +135,10 @@ public:
     // Enable or disable the infinite XZ grid overlay.
     void SetInfiniteGrid(bool enabled) { m_infiniteGrid = enabled; }
 
+    // Update the cook cache path used for IBL bake output.
+    // Call this when the active project changes.
+    void SetCookCacheDir(const std::string& path) { m_cookCacheDir = path; }
+
     // ── Render tick ───────────────────────────────────────────────────────────
     //
     // Overload 1 — explicit camera (editor camera, cinematic camera, etc.)
@@ -167,6 +171,7 @@ public:
                                                    uint32_t w, uint32_t h);
 
     [[nodiscard]] bool IsReady() const { return m_ready; }
+    [[nodiscard]] const RenderGraph& GetRenderGraph() const { return m_rg; }
 
 private:
     struct DrawItem {

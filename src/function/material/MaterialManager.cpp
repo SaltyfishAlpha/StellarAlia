@@ -168,17 +168,13 @@ MaterialType* MaterialManager::GetType(const std::string& name) const {
 }
 
 MaterialInstance*
-MaterialManager::LoadMaterial(const AssetID& id,
-                               const std::filesystem::path& cookCacheDir,
-                               Resource::ResourceManager& resMgr) {
+MaterialManager::LoadMaterial(const AssetID& id, Resource::ResourceManager& resMgr) {
     if (!id.IsValid()) return nullptr;
 
     const uint64_t key = HashID(id);
     auto it = m_cachedInstances.find(key);
     if (it != m_cachedInstances.end()) return it->second.get();
 
-    // Resolve .samat path from cook cache.
-    Resource::VFS::SetCookCacheDir(cookCacheDir);
     auto pathOpt = Resource::VFS::ResolveCookedPath(id, ".samatc");
     if (!pathOpt) {
         SA_LOG_ERROR("MaterialManager::LoadMaterial — .samatc not found for {}", id.ToString());
