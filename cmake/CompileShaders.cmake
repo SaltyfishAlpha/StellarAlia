@@ -98,8 +98,7 @@ function(compile_shader shader_file output_dir)
         OUTPUT  "${_spv}"
         COMMAND "${GLSLC_EXECUTABLE}"
                 -fshader-stage=${_stage}
-                -I${CMAKE_SOURCE_DIR}/assets/shaders/common
-                -I${CMAKE_SOURCE_DIR}/assets/shaders/builtin
+                -I${CMAKE_SOURCE_DIR}/assets/shaders
                 -I${CMAKE_BINARY_DIR}/generated/shaders
                 -MD -MF "${_dep}"
                 "${CMAKE_SOURCE_DIR}/${shader_file}"
@@ -143,8 +142,8 @@ endfunction()
 # setup_shader_compilation()  – call once after all targets are defined
 #
 # Compiles all GLSL shaders under assets/shaders/ to SPIR-V.
-# Output mirrors the source tree: assets/shaders/builtin/foo.vert →
-#   <runtime_output>/shaders/builtin/foo.vert.spv
+# Output mirrors the source tree: assets/shaders/foo.vert →
+#   <runtime_output>/shaders/foo.vert.spv
 # ===========================================================================
 function(setup_shader_compilation)
     set(_out "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/shaders")

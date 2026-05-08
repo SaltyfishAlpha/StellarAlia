@@ -31,6 +31,15 @@ entt::entity Scene::CreateEntity(std::string_view name) {
     return e;
 }
 
+void Scene::Clear() {
+    m_registry.clear();
+    m_worldSettings   = WorldSettings{};
+    m_sortedEntities.clear();
+    m_hierarchyDirty  = true;
+    m_materialDirty      = false;
+    m_skinnedMeshDirty   = false;
+}
+
 void Scene::DestroyEntity(entt::entity entity) {
     if (!m_registry.valid(entity)) return;
 

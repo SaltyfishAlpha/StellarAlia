@@ -328,9 +328,9 @@ const CookedSkeleton* ResourceManager::LoadSkeleton(const AssetID& id) {
     auto it = m_skeletons.find(key);
     if (it != m_skeletons.end()) return &it->second;
 
-    auto pathOpt = VFS::ResolveCookedPath(id, ".saskel");
+    auto pathOpt = VFS::ResolveCookedPath(id, ".saskelc");
     if (!pathOpt) {
-        SA_LOG_ERROR("ResourceManager::LoadSkeleton — .saskel not found for {}", id.ToString());
+        SA_LOG_ERROR("ResourceManager::LoadSkeleton — .saskelc not found for {}", id.ToString());
         return nullptr;
     }
 

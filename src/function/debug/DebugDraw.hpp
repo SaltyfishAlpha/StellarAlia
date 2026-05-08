@@ -49,15 +49,23 @@ public:
     void DrawGrid   (float spacing = 1.f, int halfCells = 20,
                      glm::vec4 color = {0.28f, 0.28f, 0.28f, 1.f});
 
+    // ── Overlay variants — drawn without depth test (always on top) ──────────
+    void DrawLineOverlay  (glm::vec3 from, glm::vec3 to, glm::vec4 color);
+    void DrawSphereOverlay(glm::vec3 center, float radius,
+                           glm::vec4 color, int segments = 16);
+
     // ── Frame management ──────────────────────────────────────────────────────
     void Clear();
-    [[nodiscard]] std::span<const Vertex> GetVertices() const;
+    [[nodiscard]] std::span<const Vertex> GetVertices()        const;
+    [[nodiscard]] std::span<const Vertex> GetOverlayVertices() const;
 
 private:
     static uint32_t PackColor(glm::vec4 c) noexcept;
-    void Emit(glm::vec3 p, uint32_t c);
+    void Emit       (glm::vec3 p, uint32_t c);
+    void EmitOverlay(glm::vec3 p, uint32_t c);
 
     std::vector<Vertex> m_verts;
+    std::vector<Vertex> m_overlayVerts;
 };
 
 } // namespace StellarAlia

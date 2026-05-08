@@ -153,30 +153,23 @@ bool SceneSerializer::SaveToFile(const Scene& scene,
             ej["activeCamera"] = true;
 
         // Static mesh
-        if (const auto* m = reg.try_get<StaticMeshComponent>(e)) {
-            json mj;
-            mj["mesh"]          = AssetToStr(m->meshAsset);
-            mj["castShadow"]    = m->castShadow;
-            mj["receiveShadow"] = m->receiveShadow;
-            mj["materials"]     = json::array();
-            for (const auto& slot : m->materialSlots)
-                mj["materials"].push_back(AssetToStr(slot));
-            ej["staticMesh"] = std::move(mj);
-        }
+        if (const auto* m = reg.try_get<StaticMeshComponent>(e))
+            ej["staticMesh"] = { {"mesh", AssetToStr(m->meshAsset)} };
 
         // Skinned mesh
-        if (const auto* m = reg.try_get<SkinnedMeshComponent>(e)) {
-            json mj;
-            mj["mesh"]      = AssetToStr(m->meshAsset);
-            mj["materials"] = json::array();
-            for (const auto& slot : m->materialSlots)
-                mj["materials"].push_back(AssetToStr(slot));
-            ej["skinnedMesh"] = std::move(mj);
-        }
+        if (const auto* m = reg.try_get<SkinnedMeshComponent>(e))
+            ej["skinnedMesh"] = { {"mesh", AssetToStr(m->meshAsset)} };
 
-        // Skeleton
-        if (const auto* s = reg.try_get<SkeletonComponent>(e))
-            ej["skeleton"] = { {"asset", AssetToStr(s->skeletonAsset)} };
+        // Mesh renderer (shared config for static + skinned)
+        if (const auto* mr = reg.try_get<MeshRendererComponent>(e)) {
+            json mrj;
+            mrj["castShadow"]    = mr->castShadow;
+            mrj["receiveShadow"] = mr->receiveShadow;
+            mrj["materials"]     = json::array();
+            for (const auto& slot : mr->materialSlots)
+                mrj["materials"].push_back(AssetToStr(slot));
+            ej["meshRenderer"] = std::move(mrj);
+        }
 
         // Animator
         if (const auto* a = reg.try_get<AnimatorComponent>(e)) {
@@ -206,8 +199,10 @@ bool SceneSerializer::SaveToFile(const Scene& scene,
                                  : (col->shape == ColliderComponent::Shape::Capsule) ? "capsule"
                                                                                      : "box";
             ej["collider"] = {
-                {"shape",   shapeStr},
-                {"extents", Vec3ToJson(col->extents)}
+                {"shape",    shapeStr},
+                {"extents",  Vec3ToJson(col->extents)},
+                {"offset",   Vec3ToJson(col->offset)},
+                {"rotation", QuatToJson(col->rotation)}
             };
         }
 
@@ -395,12 +390,17 @@ bool SceneSerializer::LoadFromFile(Scene& scene,
             StaticMeshComponent m;
             if (mj.contains("mesh"))
                 m.meshAsset = StrToAsset(mj["mesh"].get<std::string>());
-            if (mj.contains("materials"))
-                for (const auto& slot : mj["materials"])
-                    m.materialSlots.push_back(StrToAsset(slot.get<std::string>()));
-            m.castShadow    = mj.value("castShadow",    m.castShadow);
-            m.receiveShadow = mj.value("receiveShadow", m.receiveShadow);
             reg.emplace<StaticMeshComponent>(e, std::move(m));
+            // Backward compat: old scenes stored materials/shadows inside staticMesh.
+            if (mj.contains("materials") || mj.contains("castShadow") || mj.contains("receiveShadow")) {
+                MeshRendererComponent mr;
+                if (mj.contains("materials"))
+                    for (const auto& slot : mj["materials"])
+                        mr.materialSlots.push_back(StrToAsset(slot.get<std::string>()));
+                mr.castShadow    = mj.value("castShadow",    mr.castShadow);
+                mr.receiveShadow = mj.value("receiveShadow", mr.receiveShadow);
+                reg.emplace_or_replace<MeshRendererComponent>(e, std::move(mr));
+            }
         }
 
         // Skinned mesh
@@ -409,17 +409,29 @@ bool SceneSerializer::LoadFromFile(Scene& scene,
             auto& smc = reg.emplace<SkinnedMeshComponent>(e);
             if (mj.contains("mesh"))
                 smc.meshAsset = StrToAsset(mj["mesh"].get<std::string>());
-            if (mj.contains("materials"))
+            // Backward compat: old scenes stored materials inside skinnedMesh.
+            if (mj.contains("materials")) {
+                MeshRendererComponent mr;
                 for (const auto& slot : mj["materials"])
-                    smc.materialSlots.push_back(StrToAsset(slot.get<std::string>()));
+                    mr.materialSlots.push_back(StrToAsset(slot.get<std::string>()));
+                reg.emplace_or_replace<MeshRendererComponent>(e, std::move(mr));
+            }
         }
 
-        // Skeleton
-        if (ej.contains("skeleton")) {
-            SkeletonComponent s;
-            s.skeletonAsset = StrToAsset(ej["skeleton"].value("asset", std::string{}));
-            reg.emplace<SkeletonComponent>(e, s);
+        // Mesh renderer (new canonical location for materials + shadow flags)
+        if (ej.contains("meshRenderer")) {
+            const auto& mrj = ej["meshRenderer"];
+            MeshRendererComponent mr;
+            if (mrj.contains("materials"))
+                for (const auto& slot : mrj["materials"])
+                    mr.materialSlots.push_back(StrToAsset(slot.get<std::string>()));
+            mr.castShadow    = mrj.value("castShadow",    mr.castShadow);
+            mr.receiveShadow = mrj.value("receiveShadow", mr.receiveShadow);
+            reg.emplace_or_replace<MeshRendererComponent>(e, std::move(mr));
         }
+
+        // "skeleton" key silently ignored — SkeletonComponent removed; ID is
+        // now derived from SkinnedMeshComponent::meshAsset at runtime.
 
         // Animator
         if (ej.contains("animator")) {
@@ -454,7 +466,9 @@ bool SceneSerializer::LoadFromFile(Scene& scene,
             if      (shapeStr == "sphere")  col.shape = ColliderComponent::Shape::Sphere;
             else if (shapeStr == "capsule") col.shape = ColliderComponent::Shape::Capsule;
             else                            col.shape = ColliderComponent::Shape::Box;
-            if (cj.contains("extents")) col.extents = JsonToVec3(cj["extents"]);
+            if (cj.contains("extents"))  col.extents  = JsonToVec3(cj["extents"]);
+            if (cj.contains("offset"))   col.offset   = JsonToVec3(cj["offset"]);
+            if (cj.contains("rotation")) col.rotation = JsonToQuat(cj["rotation"]);
             reg.emplace<ColliderComponent>(e, col);
         }
 

@@ -48,8 +48,14 @@ struct WorldTransformComponent {
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
 struct StaticMeshComponent {
-    AssetID              meshAsset;        // → .samesh
-    std::vector<AssetID> materialSlots;    // one per submesh → .samat
+    AssetID meshAsset;  // → .samesh
+};
+
+// Shared rendering configuration for any mesh entity (static or skinned).
+// Material slot overrides + per-object shadow flags live here so both mesh
+// types share the same settings without duplication.
+struct MeshRendererComponent {
+    std::vector<AssetID> materialSlots;    // per-submesh override → .samat; empty = use mesh defaults
     bool                 castShadow    = true;
     bool                 receiveShadow = true;
 };
@@ -157,14 +163,9 @@ struct AnimatedTransformComponent {
     glm::vec3 scale    = { 1.f, 1.f, 1.f };
 };
 
-// Binds a skeleton (bone hierarchy) to an entity for CPU skinning.
-struct SkeletonComponent {
-    AssetID skeletonAsset;  // → .saskel (cooked via DeriveSkinID)
-};
-
 // Drives keyframe playback for a skinned entity.
 struct AnimatorComponent {
-    AssetID clipAsset;      // → .saanim (cooked via DeriveAnimID)
+    AssetID clipAsset;      // → .saanim; set via .sanim asset picker or DeriveAnimID fallback
     float   time     = 0.f; // current playback position in seconds
     float   speed    = 1.f;
     bool    looping  = true;
@@ -185,7 +186,6 @@ struct SkinnedSubMeshInfo {
 //   ready:           Set true by AnimationSystem::PrepareEntity(); BuildDrawList skips if false.
 struct SkinnedMeshComponent {
     AssetID                         meshAsset;
-    std::vector<AssetID>            materialSlots;  // per-submesh override
     RHI::RHIBufferHandle            dynVertexBuffer;
     RHI::RHIBufferHandle            indexBuffer;
     uint32_t                        vertexCount = 0;
@@ -212,10 +212,14 @@ struct RigidBodyComponent {
 //     Box:     half-extents (x, y, z)
 //     Sphere:  radius in x  (y, z ignored)
 //     Capsule: radius in x, half-height in y
+//   offset   — center of the shape in entity local space (applied on body creation).
+//   rotation — orientation of the shape in entity local space.
 struct ColliderComponent {
     enum class Shape { Box, Sphere, Capsule };
-    Shape     shape   = Shape::Box;
-    glm::vec3 extents = { 0.5f, 0.5f, 0.5f };
+    Shape     shape    = Shape::Box;
+    glm::vec3 extents  = { 0.5f, 0.5f, 0.5f };
+    glm::vec3 offset   = { 0.f, 0.f, 0.f };
+    glm::quat rotation = glm::quat{ 1.f, 0.f, 0.f, 0.f };
 };
 
 // ── Marker tags ───────────────────────────────────────────────────────────────

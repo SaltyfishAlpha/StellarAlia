@@ -3,14 +3,18 @@
 #include "engine/AppMode.hpp"
 #include "camera/EditorCamera.hpp"
 #include "ui/EditorUI.hpp"
+
+#include <filesystem>
 #include "EditorOverlaySettings.hpp"
 #include "gizmo/GizmoSystem.hpp"
 
-namespace StellarAlia { class Application; }
+namespace StellarAlia             { class Application; }
+namespace StellarAlia::Resource   { class AssetRegistry; }
 
 namespace StellarAlia::Editor {
 
 class SceneHierarchyPanel;
+class AssetsPanel;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // EditorMode — the engine's authoring mode.
@@ -35,11 +39,14 @@ private:
     EditorUI                   m_ui;
     bool                       m_viewportActive  = false;
 
-    EditorOverlaySettings      m_overlaySettings;
-    const SceneHierarchyPanel* m_hierarchyPanel  = nullptr;
-    GizmoSystem                m_gizmo;
+    EditorOverlaySettings       m_overlaySettings;
+    const SceneHierarchyPanel*  m_hierarchyPanel  = nullptr;
+    AssetsPanel*                m_assetsPanel     = nullptr;
+    Resource::AssetRegistry*    m_assetRegistry   = nullptr;
+    GizmoSystem                 m_gizmo;
 
     void DrawOverlays();
+    void LoadScene(const std::filesystem::path& path);
 };
 
 } // namespace StellarAlia::Editor

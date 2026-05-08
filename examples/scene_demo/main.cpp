@@ -307,11 +307,9 @@ int main() {
         t.rotation   = rot;
         scene.MarkDirty(cubeEnt);
 
-        StaticMeshComponent smc;
-        smc.meshAsset     = DefaultAssets::Cube;
-        smc.castShadow    = true;
-        smc.receiveShadow = true;
-        scene.Registry().emplace<StaticMeshComponent>(cubeEnt, std::move(smc));
+        scene.Registry().emplace<StaticMeshComponent>(cubeEnt,
+            StaticMeshComponent{DefaultAssets::Cube});
+        scene.Registry().emplace<MeshRendererComponent>(cubeEnt);
 
         SA_LOG_INFO("SceneDemo: added RandomCube at ({:.2f}, {:.2f}, {:.2f})",
                     pos.x, pos.y, pos.z);

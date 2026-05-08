@@ -97,7 +97,7 @@ public:
     // The handle is owned by ResourceManager; do not destroy it.
     [[nodiscard]] RHI::RHITextureHandle GetBuiltin(BuiltinTexture which) const;
 
-    // Load a skeleton (bone hierarchy + inverse bind matrices) from a .saskel file.
+    // Load a skeleton (bone hierarchy + inverse bind matrices) from a .saskelc file.
     // CPU-side data only — no GPU upload. Returns nullptr on failure.
     [[nodiscard]] const CookedSkeleton* LoadSkeleton(const AssetID& id);
 

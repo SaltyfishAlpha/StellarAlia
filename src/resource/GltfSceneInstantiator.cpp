@@ -68,8 +68,9 @@ static void SpawnNode(Scene&                           scene,
     {
         StaticMeshComponent smc;
         smc.meshAsset = Resource::DeriveNodeMeshID(fileId, nodeIdx);
-        // materialSlots left empty: renderer uses defaultMaterialID from .samesh
         scene.Registry().emplace<StaticMeshComponent>(e, std::move(smc));
+        // MeshRendererComponent with empty materialSlots = use mesh defaults.
+        scene.Registry().emplace<MeshRendererComponent>(e);
     }
 
     if (parent != entt::null)

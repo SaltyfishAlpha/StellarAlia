@@ -24,6 +24,9 @@ struct EditorOverlaySettings {
     // ── Selection collider ───────────────────────────────────────────────────
     bool drawSelectionCollider = true;  // draw collider wireframe on selected entity
 
+    // ── Skeleton gizmo ───────────────────────────────────────────────────────
+    bool drawSkeletonGizmo = true;  // joints (spheres) + bones (lines) on selected skinned mesh
+
     // ── Selection outline ─────────────────────────────────────────────────────
     bool  drawSelectionAABB = true;   // enables screen-space silhouette outline
     float outlineWidth      = 2.f;    // dilation radius in pixels [1, 8]

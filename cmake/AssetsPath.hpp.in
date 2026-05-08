@@ -9,7 +9,7 @@ inline constexpr const char* ASSETS_SOURCE_DIR =
 
 // Compiled shader output directory (.spv files built by CMake).
 inline constexpr const char* COMPILED_SHADERS_DIR =
-    "@CMAKE_RUNTIME_OUTPUT_DIRECTORY@/assets/shaders/builtin";
+    "@CMAKE_RUNTIME_OUTPUT_DIRECTORY@/assets/shaders";
 
 // Runtime asset root relative to the executable.
 // Used in distribution builds where the source tree is unavailable.

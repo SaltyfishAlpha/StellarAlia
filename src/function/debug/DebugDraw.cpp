@@ -6,6 +6,7 @@
 namespace StellarAlia {
 
 static constexpr float kTwoPi = 6.28318530f;
+static constexpr float kPi    = 3.14159265f;
 
 uint32_t DebugDraw::PackColor(glm::vec4 c) noexcept {
     auto u = [](float f) -> uint32_t {
@@ -19,9 +20,40 @@ void DebugDraw::Emit(glm::vec3 p, uint32_t c) {
     m_verts.push_back({p.x, p.y, p.z, c});
 }
 
-void DebugDraw::Clear() { m_verts.clear(); }
+void DebugDraw::EmitOverlay(glm::vec3 p, uint32_t c) {
+    if (m_overlayVerts.size() >= kMaxVertices) return;
+    m_overlayVerts.push_back({p.x, p.y, p.z, c});
+}
 
-std::span<const DebugDraw::Vertex> DebugDraw::GetVertices() const { return m_verts; }
+void DebugDraw::Clear() { m_verts.clear(); m_overlayVerts.clear(); }
+
+std::span<const DebugDraw::Vertex> DebugDraw::GetVertices()        const { return m_verts; }
+std::span<const DebugDraw::Vertex> DebugDraw::GetOverlayVertices() const { return m_overlayVerts; }
+
+void DebugDraw::DrawLineOverlay(glm::vec3 from, glm::vec3 to, glm::vec4 color) {
+    const uint32_t c = PackColor(color);
+    EmitOverlay(from, c);
+    EmitOverlay(to,   c);
+}
+
+void DebugDraw::DrawSphereOverlay(glm::vec3 center, float radius,
+                                   glm::vec4 color, int segments) {
+    const uint32_t c = PackColor(color);
+    for (int ring = 0; ring < 3; ++ring) {
+        for (int i = 0; i < segments; ++i) {
+            const float a0 = kTwoPi * i       / segments;
+            const float a1 = kTwoPi * (i + 1) / segments;
+            const float s0 = std::sin(a0), c0 = std::cos(a0);
+            const float s1 = std::sin(a1), c1 = std::cos(a1);
+            glm::vec3 p0, p1;
+            if      (ring == 0) { p0 = {radius*c0, radius*s0, 0};  p1 = {radius*c1, radius*s1, 0}; }
+            else if (ring == 1) { p0 = {radius*c0, 0, radius*s0};  p1 = {radius*c1, 0, radius*s1}; }
+            else                { p0 = {0, radius*c0, radius*s0};  p1 = {0, radius*c1, radius*s1}; }
+            EmitOverlay(center + p0, c);
+            EmitOverlay(center + p1, c);
+        }
+    }
+}
 
 void DebugDraw::DrawLine(glm::vec3 from, glm::vec3 to, glm::vec4 color) {
     const uint32_t c = PackColor(color);
@@ -87,6 +119,25 @@ void DebugDraw::DrawCapsule(glm::vec3 base, glm::vec3 top, float radius,
         Emit(base + r0, c); Emit(base + r1, c);  // bottom ring segment
         Emit(top  + r0, c); Emit(top  + r1, c);  // top ring segment
         Emit(base + r0, c); Emit(top  + r0, c);  // lateral strut
+    }
+
+    // Hemisphere end caps — two perpendicular semi-circle arcs per end.
+    const int halfSegs = segments / 2;
+    for (int i = 0; i < halfSegs; ++i) {
+        const float t0 = kPi * i       / halfSegs;
+        const float t1 = kPi * (i + 1) / halfSegs;
+        const float c0 = std::cos(t0), s0 = std::sin(t0);
+        const float c1 = std::cos(t1), s1 = std::sin(t1);
+        // bottom cap: pole at base - axis*radius
+        Emit(base + radius * (right * c0 - axis * s0), c);
+        Emit(base + radius * (right * c1 - axis * s1), c);
+        Emit(base + radius * (fwd   * c0 - axis * s0), c);
+        Emit(base + radius * (fwd   * c1 - axis * s1), c);
+        // top cap: pole at top + axis*radius
+        Emit(top  + radius * (right * c0 + axis * s0), c);
+        Emit(top  + radius * (right * c1 + axis * s1), c);
+        Emit(top  + radius * (fwd   * c0 + axis * s0), c);
+        Emit(top  + radius * (fwd   * c1 + axis * s1), c);
     }
 }
 

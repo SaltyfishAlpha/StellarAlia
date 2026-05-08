@@ -7,7 +7,7 @@
 
 namespace StellarAlia::Resource {
 
-// ─── In-memory representation of a cooked skeleton (.saskel) ─────────────────
+// ─── In-memory representation of a cooked skeleton (.saskelc) ────────────────
 
 struct CookedSkeleton {
     AssetID               id;
@@ -16,7 +16,7 @@ struct CookedSkeleton {
     bool IsValid() const { return !bones.empty(); }
 };
 
-// ─── .saskel binary layout v1 ─────────────────────────────────────────────────
+// ─── .saskelc binary layout v1 ───────────────────────────────────────────────
 //
 //  FileHeader  (32 bytes)
 //  BoneEntry[bone_count]  (136 bytes each)

@@ -1,15 +1,18 @@
-#include "ImportScanner.hpp"
-#include "TextureCook.hpp"
-#include "MeshCook.hpp"
-#include "MaterialCook.hpp"
+#include "importer/ImportScanner.hpp"
+#include "importer/TextureImporter.hpp"
+#include "importer/MeshImporter.hpp"
+#include "importer/MaterialImporter.hpp"
 
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace fs = std::filesystem;
-using namespace StellarAlia::Cook;
+using namespace StellarAlia::Import;
+using StellarAlia::AssetID;
 
 // ─── CLI argument parsing ─────────────────────────────────────────────────────
 
@@ -78,11 +81,20 @@ int main(int argc, char** argv) {
     int cookedFailed = 0;
     int skipped      = 0;
 
+    // UUID (hi^lo key) → absolute source path for every Mesh asset encountered.
+    // Used in the second pass to resolve .sanim source_mesh references.
+    std::unordered_map<uint64_t, fs::path> meshPathByUUID;
+
     for (const auto& inputDir : opts.inputDirs) {
         std::cout << "\n[Scan] " << inputDir << "\n";
 
         std::vector<AssetEntry> assets = ScanAndImport(inputDir);
         totalAssets += static_cast<int>(assets.size());
+
+        // Build UUID→path index for Mesh assets regardless of importOnly.
+        for (const auto& e : assets)
+            if (e.meta.type == "Mesh")
+                meshPathByUUID[e.meta.uuid.hi ^ e.meta.uuid.lo] = e.sourcePath;
 
         if (opts.importOnly) continue;
 
@@ -105,6 +117,64 @@ int main(int argc, char** argv) {
 
             if (ok) ++cookedOk;
             else    ++cookedFailed;
+        }
+    }
+
+    // ── Second pass: cook standalone .sanim sidecars ──────────────────────────
+    // .sanim files are not returned by ScanAndImport (they are sidecars, not
+    // primary assets), so we scan explicitly for *.sanim.sameta files.
+    if (!opts.importOnly) {
+        for (const auto& inputDir : opts.inputDirs) {
+            std::error_code ec;
+            for (const auto& de : fs::recursive_directory_iterator(
+                     inputDir, fs::directory_options::skip_permission_denied, ec))
+            {
+                if (!de.is_regular_file(ec)) continue;
+                const fs::path& p = de.path();
+                // Match files ending in ".sanim.sameta"
+                if (p.extension() != ".sameta") continue;
+                const fs::path sanimPath = p.parent_path() / p.stem(); // strip .sameta
+                if (sanimPath.extension() != ".sanim") continue;
+                if (!fs::exists(sanimPath)) continue;
+
+                // Load the .sanim.sameta to get the UUID.
+                MetaFile meta;
+                if (!MetaFile::Load(p, meta) || meta.type != "Animation") continue;
+
+                // Parse source_mesh UUID from the .sanim file.
+                AssetID sourceMeshUUID;
+                {
+                    std::ifstream f(sanimPath);
+                    std::string line;
+                    while (std::getline(f, line)) {
+                        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+                            line.pop_back();
+                        if (line.empty() || line[0] == '#') continue;
+                        const auto eq = line.find('=');
+                        if (eq == std::string::npos) continue;
+                        if (line.substr(0, eq) == "source_mesh")
+                            sourceMeshUUID = AssetID::FromString(line.substr(eq + 1));
+                    }
+                }
+                if (!sourceMeshUUID.IsValid()) continue;
+
+                const auto it = meshPathByUUID.find(sourceMeshUUID.hi ^ sourceMeshUUID.lo);
+                if (it == meshPathByUUID.end()) {
+                    std::cerr << "[Cook] WARN  " << sanimPath.filename()
+                              << " — source mesh UUID not found in scanned dirs\n";
+                    continue;
+                }
+
+                AssetEntry sanimEntry;
+                sanimEntry.sourcePath = sanimPath;
+                sanimEntry.metaPath   = p;
+                sanimEntry.meta       = meta;
+
+                const bool ok = CookAnimSidecar(sanimEntry, it->second,
+                                                opts.outputDir, opts.force);
+                if (ok) ++cookedOk;
+                else    ++cookedFailed;
+            }
         }
     }
 

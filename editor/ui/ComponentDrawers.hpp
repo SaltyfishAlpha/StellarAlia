@@ -3,6 +3,7 @@
 #include "ui/IComponentDrawer.hpp"
 #include "function/scene/Scene.hpp"
 #include "function/scene/Components.hpp"
+#include "resource/AssetRegistry.hpp"
 
 #include <imgui.h>
 #include <glm/glm.hpp>
@@ -16,6 +17,7 @@ namespace StellarAlia::Editor {
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
+// Read-only fallback: just show the UUID prefix as a label.
 inline void DrawAssetID(const char* label, const AssetID& id) {
     if (id.IsValid()) {
         std::string s = id.ToString();
@@ -23,6 +25,96 @@ inline void DrawAssetID(const char* label, const AssetID& id) {
     } else {
         ImGui::LabelText(label, "(none)");
     }
+}
+
+// Interactive AssetID picker.
+// Shows a button (asset name, or "none") that opens a popup with a filterable
+// list of registered assets.  Returns true if the id was changed.
+// filterType — "Mesh", "Texture", etc.; nullptr or "" = show all.
+// registry   — may be nullptr; falls back to read-only DrawAssetID.
+inline bool DrawAssetIDField(const char* label, AssetID& id,
+                             const char* filterType,
+                             const Resource::AssetRegistry* registry)
+{
+    if (!registry) {
+        DrawAssetID(label, id);
+        return false;
+    }
+
+    ImGui::PushID(label);
+    bool changed = false;
+
+    // ── Button label ──────────────────────────────────────────────────────────
+    const char* btnLabel = "(none)";
+    std::string nameStorage;
+    if (id.IsValid()) {
+        if (const auto* e = registry->FindByID(id)) {
+            nameStorage = e->name;
+            btnLabel    = nameStorage.c_str();
+        } else {
+            nameStorage = id.ToString().substr(0, 8) + "…";
+            btnLabel    = nameStorage.c_str();
+        }
+    }
+
+    // Button opens the picker popup.
+    const float btnWidth = ImGui::GetContentRegionAvail().x - (id.IsValid() ? 26.f : 0.f);
+    ImGui::SetNextItemWidth(btnWidth);
+    if (ImGui::Button(btnLabel, ImVec2(btnWidth, 0)))
+        ImGui::OpenPopup("##asset_pick");
+
+    // Clear button — only shown when an asset is set.
+    if (id.IsValid()) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("×")) {
+            id      = AssetID::Invalid();
+            changed = true;
+        }
+    }
+
+    ImGui::SameLine(0, 4);
+    ImGui::TextUnformatted(label);
+
+    // ── Picker popup ─────────────────────────────────────────────────────────
+    if (ImGui::BeginPopup("##asset_pick")) {
+        static char filter[128] = {};
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputTextWithHint("##flt", "Filter…", filter, sizeof(filter));
+
+        ImGui::Separator();
+        ImGui::BeginChild("##list", ImVec2(280, 200), false);
+
+        const std::string_view ft = filterType ? filterType : "";
+        for (const auto* e : registry->EntriesByType(ft)) {
+            // Apply the filter string.
+            if (filter[0] != '\0') {
+                // Simple case-insensitive substring search.
+                std::string haystack = e->name;
+                std::string needle   = filter;
+                auto tolowerChar = [](unsigned char c){ return static_cast<char>(::tolower(c)); };
+                std::transform(haystack.begin(), haystack.end(), haystack.begin(), tolowerChar);
+                std::transform(needle.begin(),   needle.end(),   needle.begin(),   tolowerChar);
+                if (haystack.find(needle) == std::string::npos)
+                    continue;
+            }
+
+            const bool selected = (e->id == id);
+            if (ImGui::Selectable(e->name.c_str(), selected)) {
+                id      = e->id;
+                changed = true;
+                filter[0] = '\0';
+                ImGui::CloseCurrentPopup();
+            }
+            if (selected)
+                ImGui::SetItemDefaultFocus();
+        }
+
+        ImGui::EndChild();
+        ImGui::EndPopup();
+    }
+
+    ImGui::PopID();
+    return changed;
 }
 
 // Places a small "×" button at the right edge of the window.
@@ -182,6 +274,9 @@ public:
 // ── StaticMeshDrawer ───────────────────────────────────────────────────────────
 class StaticMeshDrawer : public IComponentDrawer {
 public:
+    explicit StaticMeshDrawer(const Resource::AssetRegistry* reg = nullptr)
+        : m_registry(reg) {}
+
     bool TryDraw(entt::registry& reg, entt::entity entity, Scene& scene) override {
         auto* sm = reg.try_get<StaticMeshComponent>(entity);
         if (!sm) return false;
@@ -192,52 +287,32 @@ public:
             return true;
         }
         if (!open) return true;
-        DrawAssetID("Mesh Asset", sm->meshAsset);
 
-        // materialSlots overrides per-submesh materials.  Empty = renderer uses
-        // the mesh's embedded defaultMaterialID from the cook cache.
-        char slotLabel[64];
-        if (sm->materialSlots.empty())
-            std::snprintf(slotLabel, sizeof(slotLabel), "Material Slots (0, using mesh defaults)");
-        else
-            std::snprintf(slotLabel, sizeof(slotLabel), "Material Slots (%zu)", sm->materialSlots.size());
-
-        if (ImGui::TreeNode("matslots", "%s", slotLabel)) {
-            for (size_t i = 0; i < sm->materialSlots.size(); ++i) {
-                char lbl[16];
-                std::snprintf(lbl, sizeof(lbl), "[%zu]", i);
-                DrawAssetID(lbl, sm->materialSlots[i]);
-            }
-            ImGui::TreePop();
-        }
-        ImGui::Checkbox("Cast Shadow",    &sm->castShadow);
-        ImGui::Checkbox("Receive Shadow", &sm->receiveShadow);
+        ImGui::PushID("StaticMesh");
+        bool changed = DrawAssetIDField("Mesh Asset", sm->meshAsset, "Mesh", m_registry);
+        ImGui::PopID();
+        if (changed) scene.MarkMaterialDirty();
         return true;
     }
+
+private:
+    const Resource::AssetRegistry* m_registry = nullptr;
 };
 
-// ── SkeletonDrawer ─────────────────────────────────────────────────────────────
-class SkeletonDrawer : public IComponentDrawer {
-public:
-    bool TryDraw(entt::registry& reg, entt::entity entity, Scene& /*scene*/) override {
-        auto* sk = reg.try_get<SkeletonComponent>(entity);
-        if (!sk) return false;
-        if (!ImGui::CollapsingHeader("Skeleton")) return true;
-        DrawAssetID("Skeleton Asset", sk->skeletonAsset);
-        return true;
-    }
-};
 
 // ── AnimatorDrawer ─────────────────────────────────────────────────────────────
 class AnimatorDrawer : public IComponentDrawer {
 public:
+    explicit AnimatorDrawer(const Resource::AssetRegistry* reg = nullptr)
+        : m_registry(reg) {}
+
     bool TryDraw(entt::registry& reg, entt::entity entity, Scene& /*scene*/) override {
         auto* anim = reg.try_get<AnimatorComponent>(entity);
         if (!anim) return false;
         bool open = ImGui::CollapsingHeader("Animator", HeaderFlags(ImGuiTreeNodeFlags_DefaultOpen));
         if (RemoveButton("x##rem_anim")) { reg.remove<AnimatorComponent>(entity); return true; }
         if (!open) return true;
-        DrawAssetID("Clip Asset", anim->clipAsset);
+        DrawAssetIDField("Clip Asset", anim->clipAsset, "Animation", m_registry);
         ImGui::DragFloat("Time (s)", &anim->time,  0.01f, 0.f, 3600.f);
         ImGui::DragFloat("Speed",    &anim->speed, 0.01f, 0.f,   10.f);
         ImGui::Checkbox("Looping",  &anim->looping);
@@ -245,26 +320,104 @@ public:
         ImGui::Checkbox("Playing",  &anim->playing);
         return true;
     }
+
+private:
+    const Resource::AssetRegistry* m_registry = nullptr;
 };
 
 // ── SkinnedMeshDrawer ──────────────────────────────────────────────────────────
 class SkinnedMeshDrawer : public IComponentDrawer {
 public:
-    bool TryDraw(entt::registry& reg, entt::entity entity, Scene& /*scene*/) override {
+    explicit SkinnedMeshDrawer(const Resource::AssetRegistry* reg = nullptr)
+        : m_registry(reg) {}
+
+    bool TryDraw(entt::registry& reg, entt::entity entity, Scene& scene) override {
         auto* sm = reg.try_get<SkinnedMeshComponent>(entity);
         if (!sm) return false;
-        if (!ImGui::CollapsingHeader("Skinned Mesh")) return true;
-        DrawAssetID("Mesh Asset",      sm->meshAsset);
+        bool open = ImGui::CollapsingHeader("Skinned Mesh", HeaderFlags());
+        if (RemoveButton("x##rem_sk")) { reg.remove<SkinnedMeshComponent>(entity); return true; }
+        if (!open) return true;
+
+        ImGui::PushID("SkinnedMesh");
+        // When mesh changes, clear runtime state and signal Application to re-prepare.
+        if (DrawAssetIDField("Mesh Asset", sm->meshAsset, "Mesh", m_registry)) {
+            sm->ready       = false;
+            sm->vertexCount = 0;
+            sm->subMeshes.clear();
+            scene.MarkSkinnedMeshDirty();
+        }
         ImGui::LabelText("Vertices",   "%u",  sm->vertexCount);
         ImGui::LabelText("Sub Meshes", "%zu", sm->subMeshes.size());
         ImGui::LabelText("Status",     "%s",  sm->ready ? "Ready" : "Pending");
+        ImGui::PopID();
         return true;
     }
+
+private:
+    const Resource::AssetRegistry* m_registry = nullptr;
+};
+
+// ── MeshRendererDrawer ─────────────────────────────────────────────────────────
+class MeshRendererDrawer : public IComponentDrawer {
+public:
+    explicit MeshRendererDrawer(const Resource::AssetRegistry* reg = nullptr)
+        : m_registry(reg) {}
+
+    bool TryDraw(entt::registry& reg, entt::entity entity, Scene& scene) override {
+        auto* mr = reg.try_get<MeshRendererComponent>(entity);
+        if (!mr) return false;
+        bool open = ImGui::CollapsingHeader("Mesh Renderer", HeaderFlags(ImGuiTreeNodeFlags_DefaultOpen));
+        if (RemoveButton("x##rem_mr")) {
+            reg.remove<MeshRendererComponent>(entity);
+            scene.MarkMaterialDirty();
+            return true;
+        }
+        if (!open) return true;
+
+        ImGui::PushID("MeshRenderer");
+        bool changed = false;
+
+        ImGui::Checkbox("Cast Shadow",    &mr->castShadow);
+        ImGui::SameLine();
+        ImGui::Checkbox("Receive Shadow", &mr->receiveShadow);
+
+        char slotLabel[64];
+        if (mr->materialSlots.empty())
+            std::snprintf(slotLabel, sizeof(slotLabel), "Material Slots (0, using mesh defaults)");
+        else
+            std::snprintf(slotLabel, sizeof(slotLabel), "Material Slots (%zu)", mr->materialSlots.size());
+
+        if (ImGui::TreeNode("matslots_mr", "%s", slotLabel)) {
+            for (size_t i = 0; i < mr->materialSlots.size(); ++i) {
+                char lbl[16];
+                std::snprintf(lbl, sizeof(lbl), "[%zu]", i);
+                changed |= DrawAssetIDField(lbl, mr->materialSlots[i], "Material", m_registry);
+            }
+            if (ImGui::SmallButton("+ Add Slot"))
+                mr->materialSlots.emplace_back();
+            if (!mr->materialSlots.empty()) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("- Remove Last"))
+                    mr->materialSlots.pop_back();
+            }
+            ImGui::TreePop();
+        }
+
+        ImGui::PopID();
+        if (changed) scene.MarkMaterialDirty();
+        return true;
+    }
+
+private:
+    const Resource::AssetRegistry* m_registry = nullptr;
 };
 
 // ── PBRSurfaceDrawer ───────────────────────────────────────────────────────────
 class PBRSurfaceDrawer : public IComponentDrawer {
 public:
+    explicit PBRSurfaceDrawer(const Resource::AssetRegistry* reg = nullptr)
+        : m_registry(reg) {}
+
     bool TryDraw(entt::registry& reg, entt::entity entity, Scene& scene) override {
         auto* pbr = reg.try_get<PBRSurfaceComponent>(entity);
         if (!pbr) return false;
@@ -279,16 +432,22 @@ public:
         changed |= ImGui::ColorEdit4("Base Color", glm::value_ptr(pbr->baseColor), ImGuiColorEditFlags_Float);
         changed |= ImGui::DragFloat("Roughness",   &pbr->roughness, 0.01f, 0.f, 1.f);
         changed |= ImGui::DragFloat("Metallic",    &pbr->metallic,  0.01f, 0.f, 1.f);
-        DrawAssetID("Albedo Map", pbr->albedoMap);
-        DrawAssetID("Normal Map", pbr->normalMap);
+        changed |= DrawAssetIDField("Albedo Map", pbr->albedoMap, "Texture", m_registry);
+        changed |= DrawAssetIDField("Normal Map", pbr->normalMap, "Texture", m_registry);
         if (changed) scene.MarkMaterialDirty();
         return true;
     }
+
+private:
+    const Resource::AssetRegistry* m_registry = nullptr;
 };
 
 // ── MaterialParamDrawer ────────────────────────────────────────────────────────
 class MaterialParamDrawer : public IComponentDrawer {
 public:
+    explicit MaterialParamDrawer(const Resource::AssetRegistry* reg = nullptr)
+        : m_registry(reg) {}
+
     bool TryDraw(entt::registry& reg, entt::entity entity, Scene& scene) override {
         auto* mp = reg.try_get<MaterialParamComponent>(entity);
         if (!mp) return false;
@@ -313,10 +472,13 @@ public:
             ImGui::PopID();
         }
         for (auto& [name, tex] : mp->textures)
-            DrawAssetID(name.c_str(), tex);
+            changed |= DrawAssetIDField(name.c_str(), tex, "Texture", m_registry);
         if (changed) scene.MarkMaterialDirty();
         return true;
     }
+
+private:
+    const Resource::AssetRegistry* m_registry = nullptr;
 };
 
 // ── RigidBodyDrawer ────────────────────────────────────────────────────────────
@@ -376,6 +538,15 @@ public:
                 ImGui::DragFloat("Half Height", &col->extents.y, 0.01f, 0.001f, 100.f);
                 break;
         }
+
+        ImGui::Separator();
+        ImGui::DragFloat3("Center Offset", glm::value_ptr(col->offset), 0.01f);
+
+        // Euler edit for shape orientation (applied on body creation / restart).
+        glm::vec3 euler = glm::degrees(glm::eulerAngles(col->rotation));
+        if (ImGui::DragFloat3("Orientation (deg)", glm::value_ptr(euler), 0.5f))
+            col->rotation = glm::quat(glm::radians(euler));
+
         return true;
     }
 };

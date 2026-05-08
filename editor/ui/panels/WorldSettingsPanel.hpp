@@ -4,6 +4,8 @@
 #include "function/renderer/SceneRenderer.hpp"
 #include "function/scene/Scene.hpp"
 
+namespace StellarAlia::Resource { class AssetRegistry; }
+
 namespace StellarAlia::Editor {
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -14,15 +16,17 @@ namespace StellarAlia::Editor {
 // ─────────────────────────────────────────────────────────────────────────────
 class WorldSettingsPanel : public IEditorWindow {
 public:
-    WorldSettingsPanel(Scene& scene, SceneRenderer& renderer)
-        : m_scene(&scene), m_renderer(&renderer) {}
+    WorldSettingsPanel(Scene& scene, SceneRenderer& renderer,
+                       const Resource::AssetRegistry* registry = nullptr)
+        : m_scene(&scene), m_renderer(&renderer), m_registry(registry) {}
 
     std::string_view GetName() const override { return "World Settings"; }
     void OnDraw() override;
 
 private:
-    Scene*         m_scene    = nullptr;
-    SceneRenderer* m_renderer = nullptr;
+    Scene*                         m_scene    = nullptr;
+    SceneRenderer*                 m_renderer = nullptr;
+    const Resource::AssetRegistry* m_registry = nullptr;
 };
 
 } // namespace StellarAlia::Editor

@@ -10,6 +10,7 @@
 #include "function/renderer/SceneRenderer.hpp"
 #include "function/scene/Scene.hpp"
 #include "resource/ResourceManager.hpp"
+#include "resource/AssetRegistry.hpp"
 
 #include <memory>
 #include <string>
@@ -36,14 +37,19 @@ namespace StellarAlia {
 class Application {
 public:
     struct Desc {
-        uint32_t    width        = 1280;
-        uint32_t    height       = 720;
-        const char* title        = "StellarAlia";
-        bool        vsync        = true;
-        bool        validation   = false;   // Vulkan validation layers
-        std::string assetsDir;       // path to assets/ (scenes, textures, models…)
-        std::string cookCacheDir;
-        std::string shaderDir;
+        uint32_t    width           = 1280;
+        uint32_t    height          = 720;
+        const char* title           = "StellarAlia";
+        bool        vsync           = true;
+        bool        validation      = false;  // Vulkan validation layers
+
+        std::string engineAssetsDir; // engine builtin assets root (shaders, default materials…)
+        std::string projectDir;      // project root — .saproject lives here
+        std::string shaderDir;       // compiled .spv / .refl files
+
+        // Legacy / examples: path to assets/ used when projectDir is not set.
+        std::string assetsDir;
+        std::string cookCacheDir;    // cook cache; merged engine+project in dev builds
     };
 
     explicit Application(std::unique_ptr<AppMode> mode);
@@ -68,6 +74,7 @@ public:
     InputSystem&                 GetInputSystem()      { return m_input; }
     Platform::GLFWInputProvider& GetInputProvider();
     Resource::ResourceManager&   GetResourceManager()  { return m_resMgr; }
+    Resource::AssetRegistry&     GetAssetRegistry()    { return m_assetRegistry; }
     // Returns the concrete Vulkan device. Use only in the editor layer.
     RHI::VulkanDevice&           GetVulkanDevice();
     // Returns the native GLFWwindow* (as void* to avoid leaking GLFW headers).
@@ -77,6 +84,8 @@ public:
 
     // Returns the per-frame debug line accumulator.
     DebugDraw& GetDebugDraw() { return m_debugDraw; }
+
+    AnimationSystem&      GetAnimationSystem()     { return m_animSystem; }
 
     // Returns the physics system. Use PhysicsDebugSettings to toggle overlay drawing.
     PhysicsSystem&        GetPhysicsSystem()       { return m_physics; }
@@ -107,6 +116,7 @@ private:
     std::unique_ptr<Scene>                         m_scene;
 
     Resource::ResourceManager  m_resMgr;
+    Resource::AssetRegistry    m_assetRegistry;
     MaterialManager            m_matMgr;
     SceneRenderer              m_renderer;
     InputSystem                m_input;

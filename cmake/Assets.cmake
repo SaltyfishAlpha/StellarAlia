@@ -2,7 +2,7 @@
 # Assets.cmake
 #
 # Handles all built-in engine assets:
-#   1. Compiles GLSL shaders  → <bin>/assets/shaders/builtin/*.spv
+#   1. Compiles GLSL shaders  → <bin>/assets/shaders/*.spv
 #   2. Copies non-shader assets → <bin>/assets/{textures,models,hdri}/
 #   3. Generates AssetsPath.hpp so C++ code can locate assets at runtime
 #
@@ -11,8 +11,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── 1. Compile built-in shaders ──────────────────────────────────────────────
-set(SA_BUILTIN_SHADER_SRC "${CMAKE_SOURCE_DIR}/assets/shaders/builtin")
-set(SA_BUILTIN_SHADER_OUT "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/assets/shaders/builtin")
+set(SA_BUILTIN_SHADER_SRC "${CMAKE_SOURCE_DIR}/assets/shaders")
+set(SA_BUILTIN_SHADER_OUT "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/assets/shaders")
 
 function(sa_compile_builtin_shaders)
     if(NOT GLSLC_EXECUTABLE)
@@ -67,14 +67,13 @@ function(sa_compile_builtin_shaders)
             OUTPUT  "${_spv}"
             COMMAND "${GLSLC_EXECUTABLE}"
                     -fshader-stage=${_stage}
-                    -I${CMAKE_SOURCE_DIR}/assets/shaders/common
-                    -I${CMAKE_SOURCE_DIR}/assets/shaders/builtin
+                    -I${CMAKE_SOURCE_DIR}/assets/shaders
                     -I${CMAKE_BINARY_DIR}/generated/shaders
                     "${_src}"
                     -o "${_spv}"
             DEPENDS "${_src}"
-                    "${CMAKE_SOURCE_DIR}/assets/shaders/common/frame_uniforms.glsl"
-                    "${CMAKE_SOURCE_DIR}/assets/shaders/common/pbr.glsl"
+                    "${CMAKE_SOURCE_DIR}/assets/shaders/frame_uniforms.glsl"
+                    "${CMAKE_SOURCE_DIR}/assets/shaders/pbr.glsl"
                     ${_gen_glsl}
                     ${_eval_copies}
             COMMENT "Compiling builtin shader: ${_fname}"
@@ -109,7 +108,7 @@ endfunction()
 
 # ── 2. Copy non-shader assets to runtime output ───────────────────────────────
 function(sa_copy_assets)
-    set(_asset_dirs textures models hdri)
+    set(_asset_dirs textures models hdri materials)
     foreach(_dir ${_asset_dirs})
         set(_src "${CMAKE_SOURCE_DIR}/assets/${_dir}")
         set(_dst "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/assets/${_dir}")

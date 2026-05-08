@@ -13,9 +13,10 @@ int main() {
     desc.title        = "StellarAlia Editor";
     desc.vsync        = true;
     desc.validation   = false;
-    desc.assetsDir    = StellarAliaApp::ASSETS_DIR;
-    desc.cookCacheDir = StellarAliaApp::COOK_CACHE_DIR;
-    desc.shaderDir    = StellarAliaApp::BUILTIN_SHADER_DIR;
+    desc.engineAssetsDir = StellarAliaApp::ASSETS_DIR;
+    desc.projectDir      = StellarAliaApp::PROJECT_DIR;
+    desc.cookCacheDir    = StellarAliaApp::COOK_CACHE_DIR;
+    desc.shaderDir       = StellarAliaApp::BUILTIN_SHADER_DIR;
 
     if (!app.Init(desc))
         return 1;

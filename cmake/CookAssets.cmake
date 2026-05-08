@@ -19,12 +19,12 @@ function(setup_cook)
                     --input  "${COOK_INPUT_DIR}"
                     --output "${COOK_OUTPUT_DIR}"
         DEPENDS StellarAliaCook
-        COMMENT "Cooking project assets..."
+        COMMENT "Cooking engine assets..."
         VERBATIM
     )
 
     set(SA_COOK_CACHE_DIR "${COOK_OUTPUT_DIR}" CACHE INTERNAL "Cook cache directory")
-    set(SA_ASSETS_DIR     "${COOK_INPUT_DIR}"  CACHE INTERNAL "Source assets directory")
+    set(SA_ASSETS_DIR     "${COOK_INPUT_DIR}"  CACHE INTERNAL "Engine assets source directory")
 endfunction()
 
 

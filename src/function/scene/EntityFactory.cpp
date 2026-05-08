@@ -65,9 +65,12 @@ entt::entity EntityFactory::CreateStaticMesh(
     glm::vec3 position, glm::quat rotation, glm::vec3 scale,
     std::vector<AssetID> materialSlots)
 {
-    auto e = MakeBase(scene, name, position, rotation, scale);
-    scene.Registry().emplace<StaticMeshComponent>(e,
-        StaticMeshComponent{meshAsset, std::move(materialSlots)});
+    auto e   = MakeBase(scene, name, position, rotation, scale);
+    auto& reg = scene.Registry();
+    reg.emplace<StaticMeshComponent>(e, StaticMeshComponent{meshAsset});
+    MeshRendererComponent mr;
+    mr.materialSlots = std::move(materialSlots);
+    reg.emplace<MeshRendererComponent>(e, std::move(mr));
     return e;
 }
 
@@ -94,10 +97,9 @@ entt::entity EntityFactory::CreateAreaLight(
 
     if (withMesh) {
         reg.emplace<StaticMeshComponent>(e, StaticMeshComponent{
-            AssetID::FromString(kBuiltinPlaneMeshUUID),
-            /*materialSlots=*/{},
-            /*castShadow=*/false,
-            /*receiveShadow=*/false});
+            AssetID::FromString(kBuiltinPlaneMeshUUID)});
+        reg.emplace<MeshRendererComponent>(e, MeshRendererComponent{
+            {}, /*castShadow=*/false, /*receiveShadow=*/false});
 
         reg.emplace<PBRSurfaceComponent>(e, PBRSurfaceComponent{
             /*baseColor=*/{0.f, 0.f, 0.f, 1.f},

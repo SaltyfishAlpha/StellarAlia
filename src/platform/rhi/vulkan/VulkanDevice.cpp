@@ -737,11 +737,15 @@ void VulkanDevice::InitDefaultSamplers() {
 }
 
 void VulkanDevice::ImmediateCompute(std::function<void(IRHICommandList*)> fn) {
+    // Save the current binding — ImmediateCompute may be called from uiPass
+    // while m_cmdList is already bound to the frame command buffer.
+    // Restore it afterward so subsequent recording (e.g. ImGui) still works.
+    const VkCommandBuffer savedCmd = m_cmdList.GetVkCommandBuffer();
     ImmediateSubmit([&](VkCommandBuffer cmd) {
         m_cmdList.Bind(cmd, this);
         fn(&m_cmdList);
-        m_cmdList.Bind(VK_NULL_HANDLE, nullptr);
     });
+    m_cmdList.Bind(savedCmd, savedCmd != VK_NULL_HANDLE ? this : nullptr);
 }
 
 void VulkanDevice::ImmediateSubmit(std::function<void(VkCommandBuffer)>&& fn) {

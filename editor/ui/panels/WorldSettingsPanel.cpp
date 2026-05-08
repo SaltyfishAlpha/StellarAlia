@@ -1,16 +1,14 @@
 #include "ui/panels/WorldSettingsPanel.hpp"
+#include "ui/ComponentDrawers.hpp"
+#include "resource/AssetRegistry.hpp"
 
 #include <imgui.h>
 
 namespace StellarAlia::Editor {
 
-// UUID of assets/textures/builtin/color_grading_lut_blue.png — used as the
-// default test LUT when the user first enables LUT tonemap mode from the UI.
-static constexpr const char* kDefaultLutUUID = "911aa46e-4510-4bab-bc15-0013ab7ac82f";
-
 void WorldSettingsPanel::OnDraw() {
     WorldSettings& ws = m_scene->GetWorldSettings();
-    bool liveUpdate = false;  // true when a cheap change should preview immediately
+    bool liveUpdate = false;
 
     // ── Background ────────────────────────────────────────────────────────────
     if (ImGui::CollapsingHeader("Background", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -29,14 +27,19 @@ void WorldSettingsPanel::OnDraw() {
                 liveUpdate = true;
             }
         } else {
-            ImGui::LabelText("HDR Asset",
-                ws.skyboxHdr.IsValid() ? ws.skyboxHdr.ToString().c_str() : "(none)");
+            // HDR asset picker — changing it clears stale baked products.
+            AssetID prevHdr = ws.skyboxHdr;
+            if (DrawAssetIDField("HDR Asset", ws.skyboxHdr, "Texture", m_registry)) {
+                if (ws.skyboxHdr != prevHdr) {
+                    ws.sh9 = ws.prefilteredEnv = ws.brdfLut = ws.skyboxCubemap = AssetID::Invalid();
+                }
+            }
 
             const bool hasBaked = ws.sh9.IsValid() && ws.prefilteredEnv.IsValid()
                                   && ws.brdfLut.IsValid() && ws.skyboxCubemap.IsValid();
             ImGui::LabelText("IBL Status", hasBaked ? "Baked" : "Not baked");
 
-            // Button enabled only when there is a source HDR but no baked products yet.
+            // Bake IBL — enabled only when an HDR is set and not yet baked.
             const bool canBake = ws.skyboxHdr.IsValid() && !hasBaked;
             if (!canBake) ImGui::BeginDisabled();
             if (ImGui::Button("Bake IBL"))
@@ -44,8 +47,17 @@ void WorldSettingsPanel::OnDraw() {
             if (!canBake) {
                 ImGui::EndDisabled();
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip(hasBaked ? "IBL already baked"
+                    ImGui::SetTooltip(hasBaked ? "IBL already baked — use Re-bake to redo"
                                               : "Set a skybox HDR asset first");
+            }
+
+            // Re-bake — deletes cached files and forces a fresh GPU bake.
+            if (hasBaked) {
+                ImGui::SameLine();
+                if (ImGui::Button("Re-bake"))
+                    m_renderer->RebakeIBL(ws);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Delete cached IBL textures and bake again from the source HDR");
             }
 
             if (hasBaked && ImGui::TreeNode("Baked Assets (read-only)")) {
@@ -66,13 +78,8 @@ void WorldSettingsPanel::OnDraw() {
         if (ImGui::RadioButton("ACES (Builtin)", &tmMode, 0))
             ws.tonemapMode = WorldSettings::TonemapMode::Builtin;
         ImGui::SameLine();
-        if (ImGui::RadioButton("LUT", &tmMode, 1)) {
+        if (ImGui::RadioButton("LUT", &tmMode, 1))
             ws.tonemapMode = WorldSettings::TonemapMode::LUT;
-            // Pre-populate with the builtin test LUT so the renderer has a valid
-            // texture on the first Apply — user can replace it later.
-            if (!ws.tonemapLut.IsValid())
-                ws.tonemapLut = AssetID::FromString(kDefaultLutUUID);
-        }
 
         if (ImGui::SliderFloat("Exposure", &ws.exposure, 0.1f, 10.f, "%.2f",
                 ImGuiSliderFlags_Logarithmic))
@@ -82,8 +89,8 @@ void WorldSettingsPanel::OnDraw() {
             if (ImGui::SliderFloat("Gamma", &ws.gamma, 1.f, 3.f, "%.2f"))
                 liveUpdate = true;
         } else {
-            ImGui::LabelText("LUT Asset",
-                ws.tonemapLut.IsValid() ? ws.tonemapLut.ToString().c_str() : "(none)");
+            if (DrawAssetIDField("LUT Asset", ws.tonemapLut, "Texture", m_registry))
+                liveUpdate = true;
             if (ImGui::SliderFloat("LUT Strength", &ws.lutStrength, 0.f, 1.f, "%.2f"))
                 liveUpdate = true;
         }

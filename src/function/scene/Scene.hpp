@@ -69,6 +69,10 @@ public:
     // Destroys entity: detaches from parent, orphans children, then removes.
     void DestroyEntity(entt::entity entity);
 
+    // Destroys all entities and resets world settings to defaults.
+    // Call before loading a new scene file.
+    void Clear();
+
     // Sets 'child' as a child of 'parent' (entt::null = detach from parent).
     // Maintains HierarchyComponent on both entities.
     void SetParent(entt::entity child, entt::entity parent);
@@ -107,8 +111,13 @@ public:
 
     // Signal that a material-override component was edited and the renderer's
     // draw-list needs to be rebuilt before the next frame.
-    void MarkMaterialDirty()       { m_materialDirty = true; }
-    bool IsAndClearMaterialDirty() { bool v = m_materialDirty; m_materialDirty = false; return v; }
+    void MarkMaterialDirty()           { m_materialDirty      = true; }
+    bool IsAndClearMaterialDirty()     { bool v = m_materialDirty;      m_materialDirty      = false; return v; }
+
+    // Signal that a SkinnedMeshComponent's meshAsset was changed in the editor
+    // and AnimationSystem needs to re-prepare the entity before the next frame.
+    void MarkSkinnedMeshDirty()        { m_skinnedMeshDirty   = true; }
+    bool IsAndClearSkinnedMeshDirty()  { bool v = m_skinnedMeshDirty;  m_skinnedMeshDirty   = false; return v; }
 
 private:
     std::string    m_name;
@@ -119,7 +128,8 @@ private:
     // Rebuilt lazily whenever m_hierarchyDirty is set.
     std::vector<entt::entity> m_sortedEntities;
     bool                      m_hierarchyDirty = true;
-    bool                      m_materialDirty  = false;
+    bool                      m_materialDirty      = false;
+    bool                      m_skinnedMeshDirty   = false;
 
     void RebuildSortedOrder();
     void MarkDirtyRecursive(entt::entity entity);

@@ -34,6 +34,7 @@ void SettingsPanel::OnDraw() {
             ImGui::Checkbox("Entity Axes",    &m_overlaySettings->drawEntityAxes);
             ImGui::Checkbox("Camera Frustum", &m_overlaySettings->drawCameraFrustum);
             ImGui::Checkbox("Selection Collider", &m_overlaySettings->drawSelectionCollider);
+            ImGui::Checkbox("Skeleton Gizmo",     &m_overlaySettings->drawSkeletonGizmo);
             ImGui::Checkbox("Selection Outline",   &m_overlaySettings->drawSelectionAABB);
             ImGui::BeginDisabled(!m_overlaySettings->drawSelectionAABB);
             ImGui::SliderFloat("Outline Width", &m_overlaySettings->outlineWidth, 1.f, 8.f, "%.0f px");

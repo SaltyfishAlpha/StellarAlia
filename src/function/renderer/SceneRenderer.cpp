@@ -193,7 +193,7 @@ void SceneRenderer::Shutdown() {
 
 // ── SetIBL ────────────────────────────────────────────────────────────────────
 
-bool SceneRenderer::SetIBL(const WorldSettings& ws)
+bool SceneRenderer::SetIBL(WorldSettings& ws)
 {
     // Reset IBL state unconditionally — cleared first, overwritten on success.
     // This ensures stale baked textures don't persist when switching to SolidColor.
@@ -248,6 +248,13 @@ bool SceneRenderer::SetIBL(const WorldSettings& ws)
 
     m_frameUniforms.SetIBLTextures(r.brdfLut, r.prefilteredEnv, r.skyboxCubemap);
     m_cachedBrdfLut = r.brdfLut;
+
+    // Assign stable asset IDs so the baked textures can be cached on disk and
+    // the WorldSettings reflects "baked" status (hasBaked check in the panel).
+    if (!ws.brdfLut.IsValid())        ws.brdfLut        = AssetID::Generate();
+    if (!ws.prefilteredEnv.IsValid()) ws.prefilteredEnv = AssetID::Generate();
+    if (!ws.skyboxCubemap.IsValid())  ws.skyboxCubemap  = AssetID::Generate();
+    if (!ws.sh9.IsValid())            ws.sh9            = AssetID::Generate();
 
     auto saveGpuTex = [&](RHI::RHITextureHandle tex,
                            const AssetID&        id,
@@ -310,7 +317,7 @@ bool SceneRenderer::SetIBL(const WorldSettings& ws)
 
 // ── ApplyWorldSettings ────────────────────────────────────────────────────────
 
-void SceneRenderer::ApplyWorldSettings(const WorldSettings& ws, bool updateIBL)
+void SceneRenderer::ApplyWorldSettings(WorldSettings& ws, bool updateIBL)
 {
     // Update skybox background mode + color immediately (no GPU work needed).
     if (m_skyboxFeature) {
@@ -394,6 +401,25 @@ void SceneRenderer::ApplyWorldSettings(const WorldSettings& ws, bool updateIBL)
     }
 }
 
+// ── RebakeIBL ─────────────────────────────────────────────────────────────────
+
+void SceneRenderer::RebakeIBL(WorldSettings& ws)
+{
+    // Delete stale cached files so the cook cache doesn't accumulate orphans.
+    auto tryDelete = [&](const AssetID& id, const char* ext) {
+        if (!id.IsValid() || m_cookCacheDir.empty()) return;
+        std::error_code ec;
+        std::filesystem::remove(m_cookCacheDir + "/" + id.ToString() + ext, ec);
+    };
+    tryDelete(ws.brdfLut,        ".satex");
+    tryDelete(ws.prefilteredEnv, ".satex");
+    tryDelete(ws.skyboxCubemap,  ".satex");
+    tryDelete(ws.sh9,            ".sash9");
+
+    ws.sh9 = ws.prefilteredEnv = ws.brdfLut = ws.skyboxCubemap = AssetID{};
+    ApplyWorldSettings(ws);
+}
+
 // Creates (or recreates) a 1×1 RGBA32F cubemap filled with `color`.
 // Called by ApplyWorldSettings in SolidColor mode for the specular ambient fallback.
 void SceneRenderer::UpdateSolidAmbientCube(glm::vec3 color)
@@ -474,17 +500,19 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
             return;
         }
 
-        const auto* pbrComp   = reg.try_get<PBRSurfaceComponent>(e);
-        const auto* paramComp = reg.try_get<MaterialParamComponent>(e);
+        const auto* pbrComp      = reg.try_get<PBRSurfaceComponent>(e);
+        const auto* paramComp    = reg.try_get<MaterialParamComponent>(e);
+        const auto* meshRenderer = reg.try_get<MeshRendererComponent>(e);
 
         for (size_t si = 0; si < gpuMesh->subMeshes.size(); ++si) {
             const auto& sub = gpuMesh->subMeshes[si];
 
             MaterialInstance* base = m_defaultMaterial.get();
 
-            if (si < meshComp.materialSlots.size() && meshComp.materialSlots[si].IsValid()) {
+            if (meshRenderer && si < meshRenderer->materialSlots.size() &&
+                meshRenderer->materialSlots[si].IsValid()) {
                 MaterialInstance* loaded = m_matMgr->LoadMaterial(
-                    meshComp.materialSlots[si], m_cookCacheDir, *m_resMgr);
+                    meshRenderer->materialSlots[si], m_cookCacheDir, *m_resMgr);
                 if (loaded) base = loaded;
             } else if (sub.defaultMaterialID.IsValid()) {
                 MaterialInstance* loaded = m_matMgr->LoadMaterial(
@@ -550,17 +578,19 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
     {
         if (!meshComp.ready || !meshComp.dynVertexBuffer.IsValid()) return;
 
-        const auto* pbrComp   = reg.try_get<PBRSurfaceComponent>(e);
-        const auto* paramComp = reg.try_get<MaterialParamComponent>(e);
+        const auto* pbrComp      = reg.try_get<PBRSurfaceComponent>(e);
+        const auto* paramComp    = reg.try_get<MaterialParamComponent>(e);
+        const auto* meshRenderer = reg.try_get<MeshRendererComponent>(e);
 
         for (size_t si = 0; si < meshComp.subMeshes.size(); ++si) {
             const auto& sub = meshComp.subMeshes[si];
 
             MaterialInstance* base = m_defaultMaterial.get();
 
-            if (si < meshComp.materialSlots.size() && meshComp.materialSlots[si].IsValid()) {
+            if (meshRenderer && si < meshRenderer->materialSlots.size() &&
+                meshRenderer->materialSlots[si].IsValid()) {
                 MaterialInstance* loaded = m_matMgr->LoadMaterial(
-                    meshComp.materialSlots[si], m_cookCacheDir, *m_resMgr);
+                    meshRenderer->materialSlots[si], m_cookCacheDir, *m_resMgr);
                 if (loaded) base = loaded;
             } else if (sub.materialAssetID.IsValid()) {
                 MaterialInstance* loaded = m_matMgr->LoadMaterial(
@@ -1637,27 +1667,43 @@ void SceneRenderer::DebugOverlayFeature::OnInit(const FeatureInitContext& ctx)
         SA_LOG_WARN("DebugOverlayFeature: shader load failed");
         return;
     }
-    m_type = ctx.matMgr->GetType("DebugLine");
-    if (!m_type) return;
+    ctx.matMgr->RegisterTypeFromShaders(
+        {"DebugLineXray", "debug_line", "debug_line",
+         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque,
+         RHI::RHITopology::LineList, false, false, true}, ctx);
 
-    m_descSet = ctx.device->AllocateDescriptorSet(m_type->shader.GetMaterialLayout());
+    m_type     = ctx.matMgr->GetType("DebugLine");
+    m_xrayType = ctx.matMgr->GetType("DebugLineXray");
+    if (!m_type) return;
 
     RHI::RHIBufferDesc bd{};
     bd.size       = DebugDraw::kMaxVertices * sizeof(DebugDraw::Vertex);
     bd.usage      = RHI::RHIBufferUsage::Storage;
     bd.cpuVisible = true;
-    bd.debugName  = "DebugLineSSBO";
-    m_ssbo = ctx.device->CreateBuffer(bd);
 
+    bd.debugName = "DebugLineSSBO";
+    m_ssbo    = ctx.device->CreateBuffer(bd);
+    m_descSet = ctx.device->AllocateDescriptorSet(m_type->shader.GetMaterialLayout());
     ctx.device->WriteDescriptorBuffer(m_descSet, 0, m_ssbo, 0, bd.size);
+
+    if (m_xrayType) {
+        bd.debugName  = "DebugLineXraySSBO";
+        m_xraySsbo    = ctx.device->CreateBuffer(bd);
+        m_xrayDescSet = ctx.device->AllocateDescriptorSet(m_xrayType->shader.GetMaterialLayout());
+        ctx.device->WriteDescriptorBuffer(m_xrayDescSet, 0, m_xraySsbo, 0, bd.size);
+    }
 }
 
 void SceneRenderer::DebugOverlayFeature::OnShutdown(RHI::IRHIDevice* device)
 {
-    if (m_ssbo.IsValid()) device->DestroyBuffer(m_ssbo);
-    m_ssbo    = {};
-    m_descSet = {};
-    m_type    = nullptr;
+    if (m_ssbo.IsValid())     device->DestroyBuffer(m_ssbo);
+    if (m_xraySsbo.IsValid()) device->DestroyBuffer(m_xraySsbo);
+    m_ssbo        = {};
+    m_xraySsbo    = {};
+    m_descSet     = {};
+    m_xrayDescSet = {};
+    m_type        = nullptr;
+    m_xrayType    = nullptr;
 }
 
 void SceneRenderer::DebugOverlayFeature::AddPasses(
@@ -1670,56 +1716,100 @@ void SceneRenderer::DebugOverlayFeature::AddPasses(
     DebugDraw* dd = renderer.m_debugDraw;
     if (!dd) return;
 
-    const auto     verts     = dd->GetVertices();
-    const uint32_t vertCount = static_cast<uint32_t>(verts.size());
-    if (vertCount == 0) return;
-
-    ctx.device->UploadBufferData(m_ssbo, verts.data(),
-                                 vertCount * sizeof(DebugDraw::Vertex));
-
+    // Key for depth-tested pass (depth attachment present).
     AttachmentKey key{};
     key.colorCount      = 1;
     key.colorFormats[0] = ctx.device->GetSwapchainFormat();
     key.depthFormat     = RHI::RHIFormat::D32F;
 
-    const RHI::RHIPipelineHandle pipeline = m_type->GetOrCreatePipeline(ctx.device, key);
-    if (!pipeline.IsValid()) return;
+    // Key for xray pass (no depth attachment).
+    AttachmentKey xrayKey{};
+    xrayKey.colorCount      = 1;
+    xrayKey.colorFormats[0] = ctx.device->GetSwapchainFormat();
+    xrayKey.depthFormat     = RHI::RHIFormat::Undefined;
 
-    const RHI::RHIDescSetHandle frameSet  = ctx.frameSet;
-    const RHI::RHIDescSetHandle descSet   = m_descSet;
-    const RGTextureHandle       rgSwap    = handles.swapchain;
-    const RGTextureHandle       rgDepth   = handles.depth;
-    const glm::mat4             viewProj  = renderer.m_currentViewProj;
+    const RGTextureHandle rgSwap   = handles.swapchain;
+    const RGTextureHandle rgDepth  = handles.depth;
+    const glm::mat4       viewProj = renderer.m_currentViewProj;
 
-    ctx.rg->AddPass("DebugOverlay",
-        [rgSwap, rgDepth](RGPassBuilder& b) {
-            b.Read(rgSwap);
-            b.Write(rgSwap);
-            b.WriteDepth(rgDepth);
-        },
-        [pipeline, frameSet, descSet, viewProj, vertCount, rgSwap, rgDepth, w, h]
-        (RHI::IRHICommandList& cmd, const RGResources& res)
-        {
-            RHI::RHIRenderPassDesc rpDesc{};
-            rpDesc.colorAttachmentCount            = 1;
-            rpDesc.colorAttachments[0].texture     = res.Get(rgSwap);
-            rpDesc.colorAttachments[0].clearOnLoad = false;
-            rpDesc.depthAttachment.texture         = res.Get(rgDepth);
-            rpDesc.depthAttachment.clearOnLoad     = false;
-            rpDesc.hasDepth = true;
-            rpDesc.width    = w;
-            rpDesc.height   = h;
+    // ── Depth-tested lines ────────────────────────────────────────────────────
+    const auto     verts     = dd->GetVertices();
+    const uint32_t vertCount = static_cast<uint32_t>(verts.size());
+    if (vertCount > 0) {
+        ctx.device->UploadBufferData(m_ssbo, verts.data(),
+                                     vertCount * sizeof(DebugDraw::Vertex));
 
-            cmd.BeginRenderPass(rpDesc);
-            cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
-            cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
-            cmd.SetPipeline(pipeline);
-            cmd.SetDescriptorSet(0, frameSet);
-            cmd.SetDescriptorSet(1, descSet);
-            cmd.SetPushConstants(&viewProj, sizeof(glm::mat4), RHI::RHIShaderStage::Vertex);
-            cmd.Draw(vertCount, 1, 0, 0);
-            cmd.EndRenderPass();
-        });
+        const RHI::RHIPipelineHandle pipeline = m_type->GetOrCreatePipeline(ctx.device, key);
+        if (pipeline.IsValid()) {
+            const RHI::RHIDescSetHandle frameSet = ctx.frameSet;
+            const RHI::RHIDescSetHandle descSet  = m_descSet;
+            ctx.rg->AddPass("DebugOverlay",
+                [rgSwap, rgDepth](RGPassBuilder& b) {
+                    b.Read(rgSwap); b.Write(rgSwap); b.WriteDepth(rgDepth);
+                },
+                [pipeline, frameSet, descSet, viewProj, vertCount, rgSwap, rgDepth, w, h]
+                (RHI::IRHICommandList& cmd, const RGResources& res)
+                {
+                    RHI::RHIRenderPassDesc rpDesc{};
+                    rpDesc.colorAttachmentCount            = 1;
+                    rpDesc.colorAttachments[0].texture     = res.Get(rgSwap);
+                    rpDesc.colorAttachments[0].clearOnLoad = false;
+                    rpDesc.depthAttachment.texture         = res.Get(rgDepth);
+                    rpDesc.depthAttachment.clearOnLoad     = false;
+                    rpDesc.hasDepth = true;
+                    rpDesc.width    = w;
+                    rpDesc.height   = h;
+                    cmd.BeginRenderPass(rpDesc);
+                    cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
+                    cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
+                    cmd.SetPipeline(pipeline);
+                    cmd.SetDescriptorSet(0, frameSet);
+                    cmd.SetDescriptorSet(1, descSet);
+                    cmd.SetPushConstants(&viewProj, sizeof(glm::mat4), RHI::RHIShaderStage::Vertex);
+                    cmd.Draw(vertCount, 1, 0, 0);
+                    cmd.EndRenderPass();
+                });
+        }
+    }
+
+    // ── Always-on-top (xray) lines — no depth test ────────────────────────────
+    const auto     xrayVerts      = dd->GetOverlayVertices();
+    const uint32_t xrayVertCount  = static_cast<uint32_t>(xrayVerts.size());
+    if (xrayVertCount > 0 && m_xrayType && m_xraySsbo.IsValid()) {
+        ctx.device->UploadBufferData(m_xraySsbo, xrayVerts.data(),
+                                     xrayVertCount * sizeof(DebugDraw::Vertex));
+
+        const RHI::RHIPipelineHandle xrayPipeline = m_xrayType->GetOrCreatePipeline(ctx.device, xrayKey);
+        if (xrayPipeline.IsValid()) {
+            const RHI::RHIDescSetHandle frameSet    = ctx.frameSet;
+            const RHI::RHIDescSetHandle xrayDescSet = m_xrayDescSet;
+            // No depth attachment: depthTest=false, depthWrite=false in the pipeline.
+            ctx.rg->AddPass("DebugOverlayXray",
+                [rgSwap](RGPassBuilder& b) {
+                    b.Read(rgSwap); b.Write(rgSwap);
+                },
+                [xrayPipeline, frameSet, xrayDescSet, viewProj, xrayVertCount, rgSwap, w, h]
+                (RHI::IRHICommandList& cmd, const RGResources& res)
+                {
+                    RHI::RHIRenderPassDesc rpDesc{};
+                    rpDesc.colorAttachmentCount            = 1;
+                    rpDesc.colorAttachments[0].texture     = res.Get(rgSwap);
+                    rpDesc.colorAttachments[0].clearOnLoad = false;
+                    rpDesc.hasDepth = false;
+                    rpDesc.width    = w;
+                    rpDesc.height   = h;
+                    cmd.BeginRenderPass(rpDesc);
+                    cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
+                    cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
+                    cmd.SetPipeline(xrayPipeline);
+                    cmd.SetDescriptorSet(0, frameSet);
+                    cmd.SetDescriptorSet(1, xrayDescSet);
+                    cmd.SetPushConstants(&viewProj, sizeof(glm::mat4), RHI::RHIShaderStage::Vertex);
+                    cmd.Draw(xrayVertCount, 1, 0, 0);
+                    cmd.EndRenderPass();
+                });
+        }
+    }
 }
 
 // ── SelectionMaskFeature ──────────────────────────────────────────────────────

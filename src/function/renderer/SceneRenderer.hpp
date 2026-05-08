@@ -91,15 +91,21 @@ public:
 
     // Offline-first IBL: load cooked assets if present, GPU-bake + cache otherwise.
     // SH9 coefficients are stored internally for use in RenderFrame.
-    // Returns false only when the scene has no HDR source at all.
-    bool SetIBL(const WorldSettings& ws);
+    // On a fresh GPU bake, assigns new AssetIDs to ws.brdfLut / prefilteredEnv /
+    // skyboxCubemap / sh9 and caches them to cookCacheDir so the next call can
+    // skip the bake.  Returns false only when the scene has no HDR source at all.
+    bool SetIBL(WorldSettings& ws);
 
     // Apply WorldSettings to the live renderer: updates background color/mode,
     // calls SetIBL for IBL assets, and replaces the tonemap feature if the mode
     // changes (Builtin ↔ LUT).  Calls WaitIdle before replacing GPU resources.
     // Pass updateIBL=false to skip the IBL load/bake step (e.g. for live param
     // updates where IBL assets have not changed).
-    void ApplyWorldSettings(const WorldSettings& ws, bool updateIBL = true);
+    void ApplyWorldSettings(WorldSettings& ws, bool updateIBL = true);
+
+    // Delete cached IBL files (.satex / .sash9) for the current baked products,
+    // clear their AssetIDs from ws, then immediately re-bake from ws.skyboxHdr.
+    void RebakeIBL(WorldSettings& ws);
 
     // Build (or rebuild) the per-entity draw list. Loads GPU meshes, resolves
     // materials via 3-tier fallback, pre-bakes pipelines.
@@ -283,9 +289,12 @@ private:
                         const RendererHandles& handles, const entt::registry& reg,
                         uint32_t w, uint32_t h)                override;
     private:
-        MaterialType*         m_type    = nullptr;
-        RHI::RHIBufferHandle  m_ssbo;       // CPU-visible SSBO, kMaxVertices × 16 B
-        RHI::RHIDescSetHandle m_descSet;    // set=1: SSBO binding
+        MaterialType*         m_type        = nullptr;
+        MaterialType*         m_xrayType    = nullptr;   // depth-test-disabled variant
+        RHI::RHIBufferHandle  m_ssbo;                    // depth-tested lines SSBO
+        RHI::RHIBufferHandle  m_xraySsbo;                // always-on-top lines SSBO
+        RHI::RHIDescSetHandle m_descSet;
+        RHI::RHIDescSetHandle m_xrayDescSet;
     };
 
     // Renders the selected entity's geometry into a 1-channel R8 mask texture for

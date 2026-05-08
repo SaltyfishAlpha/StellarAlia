@@ -134,7 +134,15 @@ void Application::Run() {
 
         // ── Animation (only while simulation is running) ──────────────────────
         if (m_playState == EnginePlayState::Playing)
-            m_animSystem.Update(dt, m_scene->Registry(), m_device.get());
+            m_animSystem.Update(dt, m_scene->Registry(), m_resMgr, m_device.get());
+
+        // ── Editor skinned-mesh refresh: inspector changed meshAsset → re-prepare
+        //    (SceneRenderer handles static-mesh rebuild; skinned meshes also need
+        //    AnimationSystem::PrepareEntity which only Application can call) ───────
+        if (m_playState == EnginePlayState::Editing && m_scene->IsAndClearSkinnedMeshDirty()) {
+            PrepareAnimatedEntities();
+            RebuildDrawList();
+        }
 
         // ── Render ────────────────────────────────────────────────────────────
         const auto w = m_device->GetSwapchainWidth();
@@ -192,6 +200,8 @@ void Application::PrepareAnimatedEntities() {
     auto& reg = m_scene->Registry();
     for (auto entity : reg.view<SkinnedMeshComponent>())
         m_animSystem.PrepareEntity(entity, reg, m_resMgr, m_device.get());
+    // Populate lastGlobalPose at t=0 so the skeleton gizmo is visible in editor mode.
+    m_animSystem.EvaluateAll(0.f, reg, m_resMgr, m_device.get());
 }
 
 void Application::SetPlayState(EnginePlayState newState) {
@@ -223,7 +233,7 @@ void Application::SetPlayState(EnginePlayState newState) {
         // Reset animation to frame 0.
         m_scene->Registry().view<AnimatorComponent>().each(
             [](AnimatorComponent& a) { a.time = 0.f; });
-        m_animSystem.EvaluateAll(0.f, m_scene->Registry(), m_device.get());
+        m_animSystem.EvaluateAll(0.f, m_scene->Registry(), m_resMgr, m_device.get());
 
         // Recompute world transforms and rebuild the draw list with restored poses.
         RebuildDrawList();

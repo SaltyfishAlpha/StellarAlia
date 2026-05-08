@@ -4,7 +4,9 @@
 #include "function/scene/Components.hpp"
 #include "function/scene/EntityFactory.hpp"
 #include "function/input/InputSystem.hpp"
+#include "resource/AssetRegistry.hpp"
 #include "core/asset/AssetID.hpp"
+#include "core/logs/Log.hpp"
 
 #include <imgui.h>
 #include <entt/entt.hpp>
@@ -12,10 +14,20 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+
+namespace fs = std::filesystem;
 
 namespace StellarAlia::Editor {
 
-// UUIDs from assets/models/builtin/*.sameta — file-level mesh IDs used by
+void SceneHierarchyPanel::SetRegistry(const Resource::AssetRegistry* registry) {
+    m_registry = registry;
+}
+void SceneHierarchyPanel::SetSceneLoadCallback(SceneLoadCallback cb) {
+    m_onSceneLoad = std::move(cb);
+}
+
+// UUIDs from assets/models/*.sameta — file-level mesh IDs used by
 // EntityFactory (single-node GLTF files are cooked with the file UUID).
 static constexpr std::string_view kBuiltinCubeUUID  = "c0be0000-0000-4000-0000-000000000001";
 static constexpr std::string_view kBuiltinPlaneUUID = "c0be0000-0000-4000-0000-000000000002";
@@ -83,7 +95,6 @@ entt::entity SceneHierarchyPanel::DuplicateEntity(entt::entity src) {
     if (auto* sm = reg.try_get<StaticMeshComponent>(src))       reg.emplace_or_replace<StaticMeshComponent>(dst, *sm);
     if (auto* pbr= reg.try_get<PBRSurfaceComponent>(src))       reg.emplace_or_replace<PBRSurfaceComponent>(dst, *pbr);
     if (auto* mp = reg.try_get<MaterialParamComponent>(src))    reg.emplace_or_replace<MaterialParamComponent>(dst, *mp);
-    if (auto* sk = reg.try_get<SkeletonComponent>(src))         reg.emplace_or_replace<SkeletonComponent>(dst, *sk);
     if (auto* an = reg.try_get<AnimatorComponent>(src))         reg.emplace_or_replace<AnimatorComponent>(dst, *an);
     if (auto* rb = reg.try_get<RigidBodyComponent>(src)) {
         RigidBodyComponent rbCopy = *rb;
@@ -108,105 +119,136 @@ entt::entity SceneHierarchyPanel::DuplicateEntity(entt::entity src) {
 
 // ── DrawNode ───────────────────────────────────────────────────────────────────
 void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
-    const auto& tag  = reg.get<TagComponent>(entity);
-    const char* name = tag.name.empty() ? "(unnamed)" : tag.name.c_str();
+    const auto& tag       = reg.get<TagComponent>(entity);
+    const char* name      = tag.name.empty() ? "(unnamed)" : tag.name.c_str();
+    const uint32_t ebits  = static_cast<uint32_t>(entity);
+    const bool renaming   = (m_renamingEntity == ebits);
 
     const auto* hc          = reg.try_get<HierarchyComponent>(entity);
     const bool  hasChildren = hc && !hc->children.empty();
 
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth
                              | ImGuiTreeNodeFlags_OpenOnArrow;
-    if (!hasChildren)                                    flags |= ImGuiTreeNodeFlags_Leaf;
-    if (static_cast<uint32_t>(entity) == m_selected)    flags |= ImGuiTreeNodeFlags_Selected;
+    if (!hasChildren)          flags |= ImGuiTreeNodeFlags_Leaf;
+    if (ebits == m_selected)   flags |= ImGuiTreeNodeFlags_Selected;
 
+    // Render tree node; when renaming use an empty label so SameLine() lands at
+    // the text start and we can overlay an InputText there.
     const bool open = ImGui::TreeNodeEx(
         reinterpret_cast<void*>(static_cast<uint64_t>(entity)),
-        flags, "%s", name);
+        flags, "%s", renaming ? "" : name);
 
-    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
-        m_selected = static_cast<uint32_t>(entity);
+    if (renaming) {
+        // ── Inline rename ──────────────────────────────────────────────────────
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+        if (m_renameFocusNext) {
+            ImGui::SetKeyboardFocusHere();
+            m_renameFocusNext = false;
+        }
+        const bool commit = ImGui::InputText("##ri", m_renameBuffer,
+                                             sizeof(m_renameBuffer),
+                                             ImGuiInputTextFlags_EnterReturnsTrue
+                                             | ImGuiInputTextFlags_AutoSelectAll);
+        const bool lost = ImGui::IsItemDeactivated();
+        if (commit) {
+            reg.get<TagComponent>(entity).name = m_renameBuffer;
+            m_renamingEntity = ~0u;
+        } else if (lost) {
+            // Click-away → commit; Escape → discard
+            if (!ImGui::IsKeyDown(ImGuiKey_Escape))
+                reg.get<TagComponent>(entity).name = m_renameBuffer;
+            m_renamingEntity = ~0u;
+        }
+    } else {
+        // ── Normal interaction ─────────────────────────────────────────────────
+        if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
+            m_selected = ebits;
 
-    // Double-click → rename
-    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)
-        && m_renamingEntity == ~0u) {
-        m_renamingEntity  = static_cast<uint32_t>(entity);
-        m_renameOpenPopup = true;
-        std::snprintf(m_renameBuffer, sizeof(m_renameBuffer), "%s", name);
-    }
-
-    // Right-click context menu
-    ImGui::PushID(static_cast<int>(static_cast<uint32_t>(entity)));
-    if (ImGui::BeginPopupContextItem()) {
-        m_selected = static_cast<uint32_t>(entity);
-
-        if (ImGui::MenuItem("Rename")) {
-            m_renamingEntity  = static_cast<uint32_t>(entity);
-            m_renameOpenPopup = true;
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+            m_renamingEntity  = ebits;
+            m_selected        = ebits;
+            m_renameFocusNext = true;
             std::snprintf(m_renameBuffer, sizeof(m_renameBuffer), "%s", name);
         }
 
-        if (ImGui::BeginMenu("Create Child")) {
-            if (ImGui::MenuItem("Empty Entity")) {
-                m_pendingCreateChild = entity; m_createKind = CreateKind::Empty;
+        // ── Right-click context menu ───────────────────────────────────────────
+        ImGui::PushID(static_cast<int>(ebits));
+        if (ImGui::BeginPopupContextItem()) {
+            m_selected = ebits;
+
+            if (ImGui::MenuItem("Rename\tF2")) {
+                m_renamingEntity  = ebits;
+                m_selected        = ebits;
+                m_renameFocusNext = true;
+                std::snprintf(m_renameBuffer, sizeof(m_renameBuffer), "%s", name);
             }
-            ImGui::SeparatorText("Builtin Models");
-            if (ImGui::MenuItem("Cube")) {
-                m_pendingCreateChild = entity; m_createKind = CreateKind::Cube;
+            if (ImGui::BeginMenu("Create Child")) {
+                if (ImGui::MenuItem("Empty Entity")) {
+                    m_pendingCreateChild = entity; m_createKind = CreateKind::Empty;
+                }
+                ImGui::SeparatorText("Builtin Models");
+                if (ImGui::MenuItem("Cube")) {
+                    m_pendingCreateChild = entity; m_createKind = CreateKind::Cube;
+                }
+                if (ImGui::MenuItem("Plane")) {
+                    m_pendingCreateChild = entity; m_createKind = CreateKind::Plane;
+                }
+                ImGui::EndMenu();
             }
-            if (ImGui::MenuItem("Plane")) {
-                m_pendingCreateChild = entity; m_createKind = CreateKind::Plane;
-            }
-            ImGui::EndMenu();
+            ImGui::Separator();
+            if (ImGui::MenuItem("Duplicate\tCtrl+D"))
+                m_pendingDuplicate = entity;
+            ImGui::Separator();
+            if (ImGui::MenuItem("Delete\tDel"))
+                m_pendingDelete = entity;
+
+            ImGui::EndPopup();
+        }
+        ImGui::PopID();
+
+        // ── Drag source ────────────────────────────────────────────────────────
+        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
+            uint32_t bits = ebits;
+            ImGui::SetDragDropPayload("SAENTITY", &bits, sizeof(bits));
+            ImGui::TextUnformatted(name);
+            ImGui::EndDragDropSource();
         }
 
-        ImGui::Separator();
-        if (ImGui::MenuItem("Duplicate\tCtrl+D"))
-            m_pendingDuplicate = entity;
-        ImGui::Separator();
-        if (ImGui::MenuItem("Delete\tDel"))
-            m_pendingDelete = entity;
+        // ── Drop target with three zones ───────────────────────────────────────
+        if (ImGui::BeginDragDropTarget()) {
+            const float itemTop = ImGui::GetItemRectMin().y;
+            const float itemBot = ImGui::GetItemRectMax().y;
+            const float h       = itemBot - itemTop;
+            const float mouseY  = ImGui::GetMousePos().y;
 
-        ImGui::EndPopup();
-    }
-    ImGui::PopID();
+            DnDOp::Mode zone =
+                (mouseY < itemTop + h * 0.3f) ? DnDOp::BeforeSibling :
+                (mouseY > itemBot - h * 0.3f) ? DnDOp::AfterSibling  :
+                                                 DnDOp::AsChild;
 
-    // ── Drag source ────────────────────────────────────────────────────────────
-    if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
-        uint32_t bits = static_cast<uint32_t>(entity);
-        ImGui::SetDragDropPayload("SAENTITY", &bits, sizeof(bits));
-        ImGui::TextUnformatted(name);
-        ImGui::EndDragDropSource();
-    }
+            auto*       dl      = ImGui::GetWindowDrawList();
+            const ImU32 lineCol = IM_COL32(80, 160, 255, 220);
+            const float x0      = ImGui::GetItemRectMin().x;
+            const float x1      = ImGui::GetItemRectMax().x;
+            if (zone == DnDOp::BeforeSibling)
+                dl->AddLine({x0, itemTop}, {x1, itemTop}, lineCol, 2.f);
+            else if (zone == DnDOp::AfterSibling)
+                dl->AddLine({x0, itemBot}, {x1, itemBot}, lineCol, 2.f);
 
-    // ── Drop target with three zones ───────────────────────────────────────────
-    if (ImGui::BeginDragDropTarget()) {
-        const float itemTop = ImGui::GetItemRectMin().y;
-        const float itemBot = ImGui::GetItemRectMax().y;
-        const float h       = itemBot - itemTop;
-        const float mouseY  = ImGui::GetMousePos().y;
-
-        DnDOp::Mode zone =
-            (mouseY < itemTop + h * 0.3f) ? DnDOp::BeforeSibling :
-            (mouseY > itemBot - h * 0.3f) ? DnDOp::AfterSibling  :
-                                             DnDOp::AsChild;
-
-        // Blue line at the insertion edge for sibling placement
-        auto*       dl     = ImGui::GetWindowDrawList();
-        const ImU32 lineCol = IM_COL32(80, 160, 255, 220);
-        const float x0     = ImGui::GetItemRectMin().x;
-        const float x1     = ImGui::GetItemRectMax().x;
-        if (zone == DnDOp::BeforeSibling)
-            dl->AddLine({x0, itemTop}, {x1, itemTop}, lineCol, 2.f);
-        else if (zone == DnDOp::AfterSibling)
-            dl->AddLine({x0, itemBot}, {x1, itemBot}, lineCol, 2.f);
-
-        if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAENTITY")) {
-            entt::entity dragged = static_cast<entt::entity>(
-                *static_cast<const uint32_t*>(p->Data));
-            if (dragged != entity)
-                m_pendingDnD = { dragged, entity, zone, true };
+            if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAENTITY")) {
+                entt::entity dragged = static_cast<entt::entity>(
+                    *static_cast<const uint32_t*>(p->Data));
+                if (dragged != entity)
+                    m_pendingDnD = { dragged, entity, zone, true };
+            }
+            if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAASSET")) {
+                m_pendingAssetDrop = {
+                    fs::path(static_cast<const char*>(p->Data)), entity, true
+                };
+            }
+            ImGui::EndDragDropTarget();
         }
-        ImGui::EndDragDropTarget();
     }
 
     if (open) {
@@ -265,6 +307,11 @@ void SceneHierarchyPanel::OnDraw() {
                     *static_cast<const uint32_t*>(p->Data));
                 m_pendingDnD = { dragged, entt::null, DnDOp::AsChild, true };
             }
+            if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAASSET")) {
+                m_pendingAssetDrop = {
+                    fs::path(static_cast<const char*>(p->Data)), entt::null, true
+                };
+            }
             ImGui::EndDragDropTarget();
         }
     }
@@ -286,43 +333,11 @@ void SceneHierarchyPanel::OnDraw() {
 
             if (m_input->WasActivated("EntityRename")) {
                 m_renamingEntity  = m_selected;
-                m_renameOpenPopup = true;
+                m_renameFocusNext = true;
                 auto& t = reg.get<TagComponent>(sel);
                 std::snprintf(m_renameBuffer, sizeof(m_renameBuffer), "%s", t.name.c_str());
             }
         }
-    }
-
-    // ── Rename popup ───────────────────────────────────────────────────────────
-    if (m_renameOpenPopup) {
-        ImGui::OpenPopup("##rename_modal");
-        m_renameOpenPopup = false;
-    }
-    ImGui::SetNextWindowSize(ImVec2(300, 0), ImGuiCond_Always);
-    if (ImGui::BeginPopupModal("##rename_modal", nullptr,
-                               ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("Rename Entity");
-        ImGui::SetNextItemWidth(-1.f);
-        ImGui::SetKeyboardFocusHere();
-        bool commit = ImGui::InputText("##rename_input", m_renameBuffer,
-                                       sizeof(m_renameBuffer),
-                                       ImGuiInputTextFlags_EnterReturnsTrue
-                                       | ImGuiInputTextFlags_AutoSelectAll);
-        if (commit || ImGui::Button("OK", ImVec2(120, 0))) {
-            if (m_renamingEntity != ~0u) {
-                auto e = static_cast<entt::entity>(m_renamingEntity);
-                if (reg.valid(e))
-                    reg.get<TagComponent>(e).name = m_renameBuffer;
-                m_renamingEntity = ~0u;
-            }
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-            m_renamingEntity = ~0u;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
     }
 
     // ── Execute deferred operations ────────────────────────────────────────────
@@ -372,6 +387,39 @@ void SceneHierarchyPanel::OnDraw() {
                 m_selected = ~0u;
             m_scene->DestroyEntity(e);
         }
+    }
+
+    // ── Asset drop execution ───────────────────────────────────────────────────
+    if (m_pendingAssetDrop.valid) {
+        const fs::path   assetPath = std::move(m_pendingAssetDrop.assetPath);
+        const entt::entity parent  = m_pendingAssetDrop.parent;
+        m_pendingAssetDrop = {};
+
+        std::string ext = assetPath.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                       [](unsigned char c){ return static_cast<char>(::tolower(c)); });
+
+        if (ext == ".sascene") {
+            if (m_onSceneLoad) m_onSceneLoad(assetPath);
+        } else if (ext == ".glb" || ext == ".gltf") {
+            if (!m_registry) {
+                SA_LOG_WARN("SceneHierarchyPanel: no registry — cannot instantiate mesh");
+            } else {
+                const Resource::AssetEntry* entry = m_registry->FindBySourcePath(assetPath);
+                if (!entry || !entry->id.IsValid()) {
+                    SA_LOG_WARN("SceneHierarchyPanel: '{}' not in registry — import it first",
+                                assetPath.filename().string());
+                } else {
+                    entt::entity e = EntityFactory::CreateStaticMesh(
+                        *m_scene, assetPath.stem().string(), entry->id);
+                    if (reg.valid(parent))
+                        m_scene->SetParent(e, parent);
+                    m_selected = static_cast<uint32_t>(e);
+                    m_scene->MarkMaterialDirty();
+                }
+            }
+        }
+        // Textures, materials, animations, skeletons → no independent scene object.
     }
 
     // ── Drag-and-drop execution ────────────────────────────────────────────────

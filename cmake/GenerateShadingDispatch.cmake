@@ -4,7 +4,7 @@
 #
 #   register_lighting_evaluator(<absolute_path_to_foo.lighting.glsl>)
 #     Call from any CMakeLists.txt that defines a custom shading model.
-#     Builtin evaluators under assets/shaders/builtin/ are auto-registered
+#     Builtin evaluators under assets/shaders/ are auto-registered
 #     by the top-level CMakeLists.txt.
 #
 #   generate_shading_dispatch(<out_dir>)

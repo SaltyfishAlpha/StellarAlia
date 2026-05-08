@@ -21,28 +21,29 @@ void AnimationSystem::PrepareEntity(entt::entity entity,
                                      entt::registry& registry,
                                      Resource::ResourceManager& resMgr,
                                      RHI::IRHIDevice* device) {
-    auto* skelComp = registry.try_get<SkeletonComponent>(entity);
-    auto* animComp = registry.try_get<AnimatorComponent>(entity);
     auto* meshComp = registry.try_get<SkinnedMeshComponent>(entity);
-    if (!skelComp || !animComp || !meshComp) return;
+    if (!meshComp || !meshComp->meshAsset.IsValid()) return;
     if (meshComp->ready) return;
 
-    // ── Load skeleton ─────────────────────────────────────────────────────────
-    const Resource::CookedSkeleton* skel =
-        resMgr.LoadSkeleton(skelComp->skeletonAsset);
+    // Skeleton UUID is always derived from the mesh asset (skin index 0).
+    const AssetID skelID = Resource::DeriveSkinID(meshComp->meshAsset, 0);
+
+    // ── Load skeleton (required) ──────────────────────────────────────────────
+    const Resource::CookedSkeleton* skel = resMgr.LoadSkeleton(skelID);
     if (!skel) {
-        SA_LOG_ERROR("AnimationSystem: skeleton {} not found",
-                     skelComp->skeletonAsset.ToString());
+        SA_LOG_ERROR("AnimationSystem: skeleton {} not found (derived from mesh {})",
+                     skelID.ToString(), meshComp->meshAsset.ToString());
         return;
     }
 
-    // ── Load animation clip ───────────────────────────────────────────────────
-    const Resource::CookedAnim* cookedAnim =
-        resMgr.LoadAnimClip(animComp->clipAsset);
-    if (!cookedAnim) {
-        SA_LOG_ERROR("AnimationSystem: anim clip {} not found",
-                     animComp->clipAsset.ToString());
-        return;
+    // ── Load animation clip (optional — bind pose used when absent) ───────────
+    const auto* animComp = registry.try_get<AnimatorComponent>(entity);
+    const Resource::CookedAnim* cookedAnim = nullptr;
+    if (animComp && animComp->clipAsset.IsValid()) {
+        cookedAnim = resMgr.LoadAnimClip(animComp->clipAsset);
+        if (!cookedAnim)
+            SA_LOG_WARN("AnimationSystem: anim clip {} not found — using bind pose",
+                        animComp->clipAsset.ToString());
     }
 
     // ── Load mesh data (CPU side) for rest-pose vertices + skin data ──────────
@@ -59,7 +60,7 @@ void AnimationSystem::PrepareEntity(entt::entity entity,
     SkinEntry entry;
     entry.entity     = entity;
     entry.skeleton   = skel->bones;
-    entry.cachedClip = &cookedAnim->clip;
+    entry.cachedClip = cookedAnim ? &cookedAnim->clip : nullptr;
     entry.restPos.resize(vertCount);
     entry.restNorm.resize(vertCount);
     entry.restTang.resize(vertCount);
@@ -119,13 +120,15 @@ void AnimationSystem::PrepareEntity(entt::entity entity,
                              entry.deformedVerts.data(),
                              entry.deformedVerts.size(), 0);
 
+    if (animComp) entry.currentClipAsset = animComp->clipAsset;
     meshComp->ready = true;
 
     const uint32_t entId = static_cast<uint32_t>(entt::to_integral(entity));
     m_entries[entId] = std::move(entry);
 
     SA_LOG_INFO("AnimationSystem: prepared entity {} ({} verts, {} bones, clip='{}')",
-                entId, vertCount, boneCount, cookedAnim->clip.name);
+                entId, vertCount, boneCount,
+                cookedAnim ? cookedAnim->clip.name : "(bind pose)");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -133,10 +136,27 @@ void AnimationSystem::PrepareEntity(entt::entity entity,
 // ─────────────────────────────────────────────────────────────────────────────
 void AnimationSystem::EvaluateAll(float t,
                                    entt::registry& registry,
+                                   Resource::ResourceManager& resMgr,
                                    RHI::IRHIDevice* device) {
     for (auto& [entId, entry] : m_entries) {
         const auto* meshComp = registry.try_get<SkinnedMeshComponent>(entry.entity);
-        if (!meshComp || !meshComp->ready || !entry.cachedClip || entry.skeleton.empty()) continue;
+        if (!meshComp || !meshComp->ready || entry.skeleton.empty()) continue;
+
+        // Hot-swap clip if changed in inspector while in editor mode.
+        const auto* animComp = registry.try_get<AnimatorComponent>(entry.entity);
+        if (animComp && animComp->clipAsset.IsValid() &&
+            !(animComp->clipAsset == entry.currentClipAsset))
+        {
+            const Resource::CookedAnim* newAnim = resMgr.LoadAnimClip(animComp->clipAsset);
+            if (newAnim) {
+                entry.cachedClip       = &newAnim->clip;
+                entry.currentClipAsset = animComp->clipAsset;
+            } else {
+                entry.currentClipAsset = animComp->clipAsset; // don't retry every call
+            }
+        }
+
+        if (!entry.cachedClip) continue;
 
         const Resource::AnimClip& clip    = *entry.cachedClip;
         const uint32_t            nBones  = static_cast<uint32_t>(entry.skeleton.size());
@@ -165,6 +185,8 @@ void AnimationSystem::EvaluateAll(float t,
         for (uint32_t bi = 0; bi < nBones; ++bi)
             skinMats[bi] = globalPose[bi] * entry.skeleton[bi].inverseBindMatrix;
 
+        entry.lastGlobalPose = globalPose;
+
         SkinVertices(entry, skinMats);
         device->UploadBufferData(meshComp->dynVertexBuffer,
                                  entry.deformedVerts.data(),
@@ -177,21 +199,38 @@ void AnimationSystem::EvaluateAll(float t,
 // ─────────────────────────────────────────────────────────────────────────────
 void AnimationSystem::Update(float dt,
                               entt::registry& registry,
+                              Resource::ResourceManager& resMgr,
                               RHI::IRHIDevice* device) {
-    auto view = registry.view<AnimatorComponent,
-                               SkeletonComponent,
-                               SkinnedMeshComponent>();
+    auto view = registry.view<AnimatorComponent, SkinnedMeshComponent>();
 
     for (auto entity : view) {
         auto& animComp = view.get<AnimatorComponent>(entity);
         auto& meshComp = view.get<SkinnedMeshComponent>(entity);
-        if (!meshComp.ready || !animComp.playing) continue;
+        if (!meshComp.ready) continue;
 
         const uint32_t entId = static_cast<uint32_t>(entt::to_integral(entity));
         auto it = m_entries.find(entId);
         if (it == m_entries.end()) continue;
         SkinEntry& entry = it->second;
-        if (!entry.cachedClip || entry.skeleton.empty()) continue;
+
+        // ── Clip hot-swap ─────────────────────────────────────────────────────
+        if (animComp.clipAsset.IsValid() &&
+            !(animComp.clipAsset == entry.currentClipAsset))
+        {
+            const Resource::CookedAnim* newAnim = resMgr.LoadAnimClip(animComp.clipAsset);
+            if (newAnim) {
+                entry.cachedClip       = &newAnim->clip;
+                entry.currentClipAsset = animComp.clipAsset;
+                animComp.time          = 0.f;
+                SA_LOG_INFO("AnimationSystem: swapped clip → '{}'", newAnim->clip.name);
+            } else {
+                SA_LOG_WARN("AnimationSystem: clip {} not found — keeping previous",
+                            animComp.clipAsset.ToString());
+                entry.currentClipAsset = animComp.clipAsset; // don't retry every frame
+            }
+        }
+
+        if (!animComp.playing || !entry.cachedClip || entry.skeleton.empty()) continue;
 
         const Resource::AnimClip& clip = *entry.cachedClip;
 
@@ -236,6 +275,8 @@ void AnimationSystem::Update(float dt,
         std::vector<glm::mat4> skinMats(nBones);
         for (uint32_t bi = 0; bi < nBones; ++bi)
             skinMats[bi] = globalPose[bi] * entry.skeleton[bi].inverseBindMatrix;
+
+        entry.lastGlobalPose = globalPose;
 
         // ── Deform and upload ─────────────────────────────────────────────────
         SkinVertices(entry, skinMats);
@@ -336,6 +377,22 @@ void AnimationSystem::SkinVertices(SkinEntry& e,
         memcpy(v + 36, &rt.w,          4);  // handedness unchanged
         memcpy(v + 40, &e.restUV[vi],  8);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bone pose accessors
+// ─────────────────────────────────────────────────────────────────────────────
+
+std::span<const glm::mat4> AnimationSystem::GetBoneGlobalPoses(entt::entity entity) const {
+    const auto it = m_entries.find(static_cast<uint32_t>(entt::to_integral(entity)));
+    if (it == m_entries.end()) return {};
+    return it->second.lastGlobalPose;
+}
+
+std::span<const Resource::BoneInfo> AnimationSystem::GetBoneSkeleton(entt::entity entity) const {
+    const auto it = m_entries.find(static_cast<uint32_t>(entt::to_integral(entity)));
+    if (it == m_entries.end()) return {};
+    return it->second.skeleton;
 }
 
 } // namespace StellarAlia

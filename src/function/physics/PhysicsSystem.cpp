@@ -10,6 +10,7 @@
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
+#include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyInterface.h>
 
@@ -183,7 +184,7 @@ void PhysicsSystem::SyncIn(Scene& scene) {
 
         // ── Create body on first encounter ────────────────────────────────────
         if (rb.bodyId == ~0u) {
-            // Build shape
+            // Build base shape
             JPH::Ref<JPH::Shape> shape;
             if (col) {
                 switch (col->shape) {
@@ -197,6 +198,17 @@ void PhysicsSystem::SyncIn(Scene& scene) {
                     default:
                         shape = new JPH::BoxShape(ToJolt(col->extents));
                         break;
+                }
+
+                // Wrap with local offset / rotation when non-trivial.
+                const bool hasOffset = glm::dot(col->offset, col->offset) > 1e-10f;
+                const bool hasRot    = glm::abs(col->rotation.w) < 1.f - 1e-6f;
+                if (hasOffset || hasRot) {
+                    JPH::RotatedTranslatedShapeSettings rt(
+                        ToJolt(col->offset), ToJolt(col->rotation), shape);
+                    auto result = rt.Create();
+                    if (result.IsValid())
+                        shape = result.Get();
                 }
             } else {
                 shape = new JPH::BoxShape(JPH::Vec3(0.5f, 0.5f, 0.5f));
@@ -332,17 +344,21 @@ void PhysicsSystem::DrawDebug(const PhysicsDebugSettings& settings, const Scene&
                               ? col_static : col_active;
 
         if (settings.shapes) {
+            // Apply collider-local offset and rotation in world space.
+            const glm::vec3 drawPos  = pos + rot * col.offset;
+            const glm::quat drawRot  = rot * col.rotation;
+
             switch (col.shape) {
                 case ColliderComponent::Shape::Box:
-                    m_debugDraw->DrawBox(pos, col.extents, rot, color);
+                    m_debugDraw->DrawBox(drawPos, col.extents, drawRot, color);
                     break;
                 case ColliderComponent::Shape::Sphere:
-                    m_debugDraw->DrawSphere(pos, col.extents.x, color);
+                    m_debugDraw->DrawSphere(drawPos, col.extents.x, color);
                     break;
                 case ColliderComponent::Shape::Capsule:
                     m_debugDraw->DrawCapsule(
-                        pos - rot * glm::vec3(0, col.extents.y, 0),
-                        pos + rot * glm::vec3(0, col.extents.y, 0),
+                        drawPos - drawRot * glm::vec3(0, col.extents.y, 0),
+                        drawPos + drawRot * glm::vec3(0, col.extents.y, 0),
                         col.extents.x, color);
                     break;
             }

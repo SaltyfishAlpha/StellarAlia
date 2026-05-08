@@ -58,6 +58,10 @@ else()
     message(WARNING "Please place pre-built Vulkan libraries (vulkan-1.lib, libvulkan.so, etc.) in lib/vulkan/")
 endif()
 
+# Active project directory.
+# Override with -DSA_PROJECT_DIR=<path> to work on a custom project.
+set(SA_PROJECT_DIR "${CMAKE_SOURCE_DIR}/demo_project" CACHE PATH "Active project root (contains .saproject and assets/)")
+
 # Shader compilation + asset pipeline
 include(cmake/CompileShaders.cmake)
 include(cmake/Assets.cmake)
@@ -70,7 +74,7 @@ set_property(GLOBAL PROPERTY SHADING_EVALUATORS "")
 # Custom evaluators in examples/ or other subdirectories call
 # register_lighting_evaluator() from their own CMakeLists.txt.
 file(GLOB _builtin_evals CONFIGURE_DEPENDS
-    "${CMAKE_SOURCE_DIR}/assets/shaders/builtin/*.lighting.glsl"
+    "${CMAKE_SOURCE_DIR}/assets/shaders/*.lighting.glsl"
 )
 foreach(_eval ${_builtin_evals})
     register_lighting_evaluator("${_eval}")
@@ -82,6 +86,10 @@ add_subdirectory(third_party)
 # Add runtime library subdirectory
 add_subdirectory(src)
 
+# Importer library (mesh/texture/material cook + sidecar generation).
+# Must come before tools/cook and editor since both link it.
+add_subdirectory(tools/importer)
+
 # Add cook tool (must come before setup_cook and cook-dependent examples)
 add_subdirectory(tools/cook)
 
@@ -91,6 +99,12 @@ add_subdirectory(tools/shader_reflect)
 
 # Wire the project-wide asset cook into the build
 setup_cook()
+
+# Active project: cook its assets alongside engine assets.
+# To use a different project: cmake -DSA_PROJECT_DIR=<path>
+if(EXISTS "${SA_PROJECT_DIR}/CMakeLists.txt")
+    add_subdirectory("${SA_PROJECT_DIR}" "${CMAKE_BINARY_DIR}/project_build")
+endif()
 
 # Editor layer (always on during engine development; disable for pure game builds)
 option(STELLAR_BUILD_EDITOR "Build the editor layer (StellarAliaEditor)" ON)
@@ -159,7 +173,7 @@ if(STELLAR_BUILD_EDITOR)
     )
 endif()
 
-# Setup built-in assets: compile assets/shaders/builtin/ → bin/assets/shaders/builtin/
+# Setup built-in assets: compile assets/shaders/ → bin/assets/shaders/
 # and copy textures/models/hdri to the runtime output directory.
 setup_assets()
 

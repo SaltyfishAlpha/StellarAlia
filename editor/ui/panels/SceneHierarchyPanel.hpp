@@ -2,12 +2,15 @@
 
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <functional>
 
 #include "ui/IEditorWindow.hpp"
 #include <entt/entt.hpp>
 
 namespace StellarAlia { class Scene; }
 namespace StellarAlia { class InputSystem; }
+namespace StellarAlia::Resource { class AssetRegistry; }
 
 namespace StellarAlia::Editor {
 
@@ -24,11 +27,23 @@ namespace StellarAlia::Editor {
 //     Middle 40% of target → make child of target
 //     Bottom 30% of target → insert after as sibling
 //   Drop onto empty window space → detach to scene root.
+//
+//   Assets dragged from the AssetsPanel (payload "SAASSET") are dispatched by
+//   extension: .glb/.gltf → instantiate StaticMesh; .sascene → open scene;
+//   other types (textures, materials, animations) → no-op.
 // ─────────────────────────────────────────────────────────────────────────────
 class SceneHierarchyPanel : public IEditorWindow {
 public:
+    using SceneLoadCallback = std::function<void(const std::filesystem::path&)>;
+
     SceneHierarchyPanel(Scene& scene, InputSystem& input)
         : m_scene(&scene), m_input(&input) {}
+
+    // Optional: provide registry for asset-drop mesh instantiation.
+    void SetRegistry(const Resource::AssetRegistry* registry);
+
+    // Optional: called when a .sascene is dropped onto the panel.
+    void SetSceneLoadCallback(SceneLoadCallback cb);
 
     std::string_view GetName() const override { return "Scene Hierarchy"; }
     void OnDraw() override;
@@ -43,14 +58,16 @@ private:
     // Children are recursively duplicated and re-parented.
     entt::entity DuplicateEntity(entt::entity src);
 
-    Scene*       m_scene = nullptr;
-    InputSystem* m_input = nullptr;
-    uint32_t     m_selected = ~0u;
+    Scene*                          m_scene    = nullptr;
+    InputSystem*                    m_input    = nullptr;
+    const Resource::AssetRegistry*  m_registry = nullptr;
+    SceneLoadCallback               m_onSceneLoad;
+    uint32_t                        m_selected = ~0u;
 
     // ── Rename state ───────────────────────────────────────────────────────
     uint32_t m_renamingEntity  = ~0u;
     char     m_renameBuffer[256] = {};
-    bool     m_renameOpenPopup = false;
+    bool     m_renameFocusNext = false; // focus the InputText on the next frame it appears
 
     // ── Entity create kind (shared between root and child pending ops) ─────
     enum class CreateKind : uint8_t { Empty, Cube, Plane };
@@ -70,6 +87,13 @@ private:
         bool valid = false;
     };
     DnDOp m_pendingDnD;
+
+    struct AssetDropOp {
+        std::filesystem::path assetPath;
+        entt::entity          parent = entt::null;  // entt::null = create at root
+        bool                  valid  = false;
+    };
+    AssetDropOp m_pendingAssetDrop;
 };
 
 } // namespace StellarAlia::Editor
