@@ -67,7 +67,7 @@ struct EntityFactory {
     //   local +X → tangentU (width),  local +Z → tangentV (height),  local +Y → emission normal.
     //
     // withMesh = true  (default): also attaches StaticMeshComponent (built-in plane) +
-    //   pitch-black PBRSurfaceComponent + MaterialParamComponent (emissiveFactor = color × emissiveScale).
+    //   pitch-black MaterialOverrideComponent (baseColor=black, emissiveFactor = color × emissiveScale).
     //   Scale is set to (size.x, kAreaLightPanelThickness, size.y) so the mesh covers the rectangle.
     //
     // withMesh = false: only AreaLightComponent is attached (pure invisible light source).
@@ -100,10 +100,9 @@ struct EntityFactory {
 
     // ── Camera ────────────────────────────────────────────────────────────────
 
-    // Perspective camera. If makeActive is true, also attaches ActiveCameraTag.
-    // Only one entity should be active at a time; callers must remove the tag
-    // from the previous active camera themselves (or use Scene::SetActiveCamera
-    // when that helper is added in Stage 7).
+    // Perspective camera.
+    // priority: the camera with the highest priority across all CameraComponents
+    // is selected as the primary view by SceneRenderer::ExtractCamera.
     static entt::entity CreateCamera(
         Scene&          scene,
         std::string_view name,
@@ -112,7 +111,7 @@ struct EntityFactory {
         float            farPlane  = 1000.f,
         glm::vec3        position  = {0.f, 0.f, 0.f},
         glm::quat        rotation  = glm::quat{1.f, 0.f, 0.f, 0.f},
-        bool             makeActive = true);
+        int              priority  = 0);
 };
 
 } // namespace StellarAlia

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "Camera",
+  "entities": [
+    {
+      "id": 0,
+      "parent": -1,
+      "tag": "Camera",
+      "transform": {
+        "position": [0.0, 0.0, 5.0],
+        "rotation": [1.0, 0.0, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "camera": {
+        "fovY": 1.0472,
+        "near": 0.1,
+        "far": 500.0,
+        "priority": 0
+      }
+    }
+  ]
+}

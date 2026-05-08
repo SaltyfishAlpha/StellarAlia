@@ -2,18 +2,23 @@
 
 #include "ui/IEditorWindow.hpp"
 #include "ui/IComponentDrawer.hpp"
+#include "ui/IAssetInspector.hpp"
 #include "ui/panels/SceneHierarchyPanel.hpp"
 
 #include <entt/entt.hpp>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
-namespace StellarAlia         { class Scene; }
+namespace StellarAlia           { class Scene; class MaterialManager; }
 namespace StellarAlia::Resource { class AssetRegistry; }
 
 namespace StellarAlia::Editor {
+
+class AssetsPanel;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // InspectorPanel — shows component details for the entity selected in the
@@ -44,28 +49,46 @@ struct ComponentDescriptor {
 
 class InspectorPanel : public IEditorWindow {
 public:
-    // registry may be nullptr; AssetID fields degrade to read-only labels.
+    // registry / matMgr may be nullptr; asset fields degrade to read-only labels.
     InspectorPanel(Scene& scene,
                    const SceneHierarchyPanel& hierarchy,
-                   const Resource::AssetRegistry* registry = nullptr);
+                   const Resource::AssetRegistry* registry = nullptr,
+                   const MaterialManager*          matMgr   = nullptr);
 
     std::string_view GetName() const override { return "Inspector"; }
     void OnDraw() override;
+
+    // Wire the Assets panel so the Inspector can show asset details on selection.
+    void SetAssetsPanel(const AssetsPanel* panel) { m_assetsPanel = panel; }
 
     // Register a component type in the "Add Component" popup.
     // Entries are grouped by category in registration order.
     void RegisterComponent(ComponentDescriptor desc);
 
 private:
+    enum class Mode { Entity, Asset };
+
     void RegisterDrawers();
     void RegisterBuiltinComponents();
+    void RegisterAssetDrawers();
+    void DrawEntityInspector(uint32_t sel);
+    void DrawAssetInspector(const std::filesystem::path& path);
 
-    Scene*                          m_scene     = nullptr;
-    const SceneHierarchyPanel*      m_hierarchy = nullptr;
-    const Resource::AssetRegistry*  m_registry  = nullptr;
+    Scene*                          m_scene      = nullptr;
+    const SceneHierarchyPanel*      m_hierarchy  = nullptr;
+    const Resource::AssetRegistry*  m_registry   = nullptr;
+    const MaterialManager*          m_matMgr     = nullptr;
+    const AssetsPanel*              m_assetsPanel = nullptr;
 
     std::vector<std::unique_ptr<IComponentDrawer>> m_drawers;
     std::vector<ComponentDescriptor>               m_addableComponents;
+
+    std::unordered_map<std::string, std::unique_ptr<IAssetInspector>> m_assetDrawers;
+    std::unique_ptr<IAssetInspector>                                   m_defaultAssetDrawer;
+
+    Mode                  m_mode       = Mode::Entity;
+    uint32_t              m_lastEntity = ~0u;
+    std::filesystem::path m_lastAsset;
 };
 
 } // namespace StellarAlia::Editor

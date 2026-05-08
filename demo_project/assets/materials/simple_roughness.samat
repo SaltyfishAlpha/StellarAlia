@@ -1,0 +1,8 @@
+{
+  "type": "SimpleRoughness",
+  "version": 1,
+  "params": {
+    "roughnessFactor": 1.0
+  },
+  "textures": {}
+}

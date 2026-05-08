@@ -500,8 +500,7 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
             return;
         }
 
-        const auto* pbrComp      = reg.try_get<PBRSurfaceComponent>(e);
-        const auto* paramComp    = reg.try_get<MaterialParamComponent>(e);
+        const auto* matOverride  = reg.try_get<MaterialOverrideComponent>(e);
         const auto* meshRenderer = reg.try_get<MeshRendererComponent>(e);
 
         for (size_t si = 0; si < gpuMesh->subMeshes.size(); ++si) {
@@ -520,6 +519,13 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
                 if (loaded) base = loaded;
             }
 
+            // materialAsset override replaces the resolved base for all sub-meshes.
+            if (matOverride && matOverride->materialAsset.IsValid()) {
+                MaterialInstance* loaded = m_matMgr->LoadMaterial(
+                    matOverride->materialAsset, m_cookCacheDir, *m_resMgr);
+                if (loaded) base = loaded;
+            }
+
             DrawItem item{};
             item.entity            = e;
             item.subLocalTransform = sub.localTransform;
@@ -529,28 +535,15 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
             item.indexCount        = sub.indexCount;
             item.vertexOffset      = sub.vertexOffset;
 
-            if (pbrComp || paramComp) {
+            if (matOverride && (!matOverride->scalars.empty() || !matOverride->textures.empty())) {
                 auto clone = m_matMgr->CloneInstance(base);
                 if (!clone) { item.material = base; }
                 else {
-                    if (pbrComp) {
-                        clone->SetVec4 ("baseColorFactor", pbrComp->baseColor);
-                        clone->SetFloat("roughnessFactor", pbrComp->roughness);
-                        clone->SetFloat("metallicFactor",  pbrComp->metallic);
-                        if (pbrComp->albedoMap.IsValid())
-                            clone->SetTexture("t_BaseColor",
-                                m_resMgr->LoadTexture(pbrComp->albedoMap));
-                        if (pbrComp->normalMap.IsValid())
-                            clone->SetTexture("t_Normal",
-                                m_resMgr->LoadTexture(pbrComp->normalMap));
-                    }
-                    if (paramComp) {
-                        for (const auto& [name, val] : paramComp->scalars)
-                            std::visit([&](const auto& v){ clone->SetParam(name, v); }, val);
-                        for (const auto& [name, texID] : paramComp->textures)
-                            if (texID.IsValid())
-                                clone->SetTexture(name, m_resMgr->LoadTexture(texID));
-                    }
+                    for (const auto& [name, val] : matOverride->scalars)
+                        std::visit([&](const auto& v){ clone->SetParam(name, v); }, val);
+                    for (const auto& [name, texID] : matOverride->textures)
+                        if (texID.IsValid())
+                            clone->SetTexture(name, m_resMgr->LoadTexture(texID));
                     item.material      = clone.get();
                     item.ownedMaterial = std::move(clone);
                 }
@@ -578,8 +571,7 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
     {
         if (!meshComp.ready || !meshComp.dynVertexBuffer.IsValid()) return;
 
-        const auto* pbrComp      = reg.try_get<PBRSurfaceComponent>(e);
-        const auto* paramComp    = reg.try_get<MaterialParamComponent>(e);
+        const auto* matOverride  = reg.try_get<MaterialOverrideComponent>(e);
         const auto* meshRenderer = reg.try_get<MeshRendererComponent>(e);
 
         for (size_t si = 0; si < meshComp.subMeshes.size(); ++si) {
@@ -598,6 +590,13 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
                 if (loaded) base = loaded;
             }
 
+            // materialAsset override replaces the resolved base for all sub-meshes.
+            if (matOverride && matOverride->materialAsset.IsValid()) {
+                MaterialInstance* loaded = m_matMgr->LoadMaterial(
+                    matOverride->materialAsset, m_cookCacheDir, *m_resMgr);
+                if (loaded) base = loaded;
+            }
+
             DrawItem item{};
             item.entity            = e;
             item.subLocalTransform = glm::mat4(1.f);  // skeleton drives transforms
@@ -607,28 +606,15 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
             item.indexCount        = sub.indexCount;
             item.vertexOffset      = sub.vertexOffset;
 
-            if (pbrComp || paramComp) {
+            if (matOverride && (!matOverride->scalars.empty() || !matOverride->textures.empty())) {
                 auto clone = m_matMgr->CloneInstance(base);
                 if (!clone) { item.material = base; }
                 else {
-                    if (pbrComp) {
-                        clone->SetVec4 ("baseColorFactor", pbrComp->baseColor);
-                        clone->SetFloat("roughnessFactor", pbrComp->roughness);
-                        clone->SetFloat("metallicFactor",  pbrComp->metallic);
-                        if (pbrComp->albedoMap.IsValid())
-                            clone->SetTexture("t_BaseColor",
-                                m_resMgr->LoadTexture(pbrComp->albedoMap));
-                        if (pbrComp->normalMap.IsValid())
-                            clone->SetTexture("t_Normal",
-                                m_resMgr->LoadTexture(pbrComp->normalMap));
-                    }
-                    if (paramComp) {
-                        for (const auto& [name, val] : paramComp->scalars)
-                            std::visit([&](const auto& v){ clone->SetParam(name, v); }, val);
-                        for (const auto& [name, texID] : paramComp->textures)
-                            if (texID.IsValid())
-                                clone->SetTexture(name, m_resMgr->LoadTexture(texID));
-                    }
+                    for (const auto& [name, val] : matOverride->scalars)
+                        std::visit([&](const auto& v){ clone->SetParam(name, v); }, val);
+                    for (const auto& [name, texID] : matOverride->textures)
+                        if (texID.IsValid())
+                            clone->SetTexture(name, m_resMgr->LoadTexture(texID));
                     item.material      = clone.get();
                     item.ownedMaterial = std::move(clone);
                 }
@@ -716,8 +702,11 @@ CameraData SceneRenderer::ExtractCamera(const Scene& scene,
     out.view = glm::mat4(1.f);
     out.proj = glm::mat4(1.f);
 
-    scene.View<CameraComponent, ActiveCameraTag, WorldTransformComponent>().each(
+    int bestPriority = INT_MIN;
+    scene.View<CameraComponent, WorldTransformComponent>().each(
         [&](auto, const CameraComponent& cam, const WorldTransformComponent& wt) {
+            if (cam.priority <= bestPriority) return;
+            bestPriority = cam.priority;
             const float aspect = (h > 0)
                 ? static_cast<float>(w) / static_cast<float>(h)
                 : 1.f;
@@ -1157,6 +1146,10 @@ void SceneRenderer::GBufferFeature::OnInit(const FeatureInitContext& ctx)
         m_owner->m_defaultMaterial->SetFloat("occlusionStrength", 1.0f);
         m_owner->m_defaultMaterial->SetVec3 ("emissiveFactor",   {0.0f, 0.0f, 0.0f});
     }
+
+    // Auto-register project material types compiled from .saglsl files.
+    // ShaderCookTool embeds shadingModel + vertShader into *.gbuffer.frag.refl (v5+).
+    ctx.matMgr->RegisterTypesFromShaderDir(ctx.shaderDir, ctx);
 }
 
 void SceneRenderer::GBufferFeature::AddPasses(SceneRenderer& renderer,

@@ -53,8 +53,15 @@ void AssetRegistry::ScanDir(const fs::path& dir) {
     if (!fs::exists(dir) || !fs::is_directory(dir)) return;
 
     std::error_code ec;
-    for (const auto& entry : fs::recursive_directory_iterator(
-             dir, fs::directory_options::skip_permission_denied, ec)) {
+    fs::recursive_directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec);
+    for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        // Skip the "templates" directory — template assets are scaffolding for
+        // new-file creation, not assignable assets.
+        if (it->is_directory(ec) && it->path().filename() == "templates") {
+            it.disable_recursion_pending();
+            continue;
+        }
+        const auto& entry = *it;
         if (!entry.is_regular_file(ec)) continue;
         if (entry.path().extension() != ".sameta") continue;
 

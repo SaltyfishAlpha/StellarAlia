@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "name": "New Scene",
+  "entities": [
+    {
+      "id": 0,
+      "parent": -1,
+      "tag": "Main Camera",
+      "transform": {
+        "position": [0.0, 5.0, 10.0],
+        "rotation": [0.9718, -0.2358, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "camera": {
+        "fovY": 1.0472,
+        "near": 0.1,
+        "far": 500.0,
+        "priority": 1
+      }
+    },
+    {
+      "id": 1,
+      "parent": -1,
+      "tag": "Directional Light",
+      "transform": {
+        "position": [0.0, 0.0, 0.0],
+        "rotation": [0.9238795, -0.3826834, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "directionalLight": {
+        "color": [1.0, 1.0, 1.0],
+        "intensity": 2.0,
+        "castShadow": true
+      }
+    }
+  ]
+}

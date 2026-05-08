@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "name": "Spot Light",
+  "entities": [
+    {
+      "id": 0,
+      "parent": -1,
+      "tag": "Spot Light",
+      "transform": {
+        "position": [0.0, 3.0, 0.0],
+        "rotation": [0.7071068, -0.7071068, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "spotLight": {
+        "color": [1.0, 1.0, 1.0],
+        "intensity": 8.0,
+        "range": 15.0,
+        "innerAngle": 0.2618,
+        "outerAngle": 0.5236
+      }
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "name": "Directional Light",
+  "entities": [
+    {
+      "id": 0,
+      "parent": -1,
+      "tag": "Directional Light",
+      "transform": {
+        "position": [0.0, 0.0, 0.0],
+        "rotation": [0.9238795, -0.3826834, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "directionalLight": {
+        "color": [1.0, 1.0, 1.0],
+        "intensity": 2.0,
+        "castShadow": true
+      }
+    }
+  ]
+}

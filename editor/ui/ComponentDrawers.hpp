@@ -1,6 +1,8 @@
 #pragma once
 
 #include "ui/IComponentDrawer.hpp"
+#include "function/material/MaterialManager.hpp"
+#include "function/material/MaterialType.hpp"
 #include "function/scene/Scene.hpp"
 #include "function/scene/Components.hpp"
 #include "resource/AssetRegistry.hpp"
@@ -11,6 +13,9 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <cstdio>
+#include <fstream>
+#include <string>
+#include <unordered_set>
 #include <variant>
 
 namespace StellarAlia::Editor {
@@ -57,9 +62,11 @@ inline bool DrawAssetIDField(const char* label, AssetID& id,
         }
     }
 
-    // Button opens the picker popup.
-    const float btnWidth = ImGui::GetContentRegionAvail().x - (id.IsValid() ? 26.f : 0.f);
-    ImGui::SetNextItemWidth(btnWidth);
+    // Label first, then picker button fills remaining width.
+    ImGui::TextUnformatted(label);
+    ImGui::SameLine();
+    const float clearW   = id.IsValid() ? 26.f : 0.f;
+    const float btnWidth = std::max(10.f, ImGui::GetContentRegionAvail().x - clearW);
     if (ImGui::Button(btnLabel, ImVec2(btnWidth, 0)))
         ImGui::OpenPopup("##asset_pick");
 
@@ -71,9 +78,6 @@ inline bool DrawAssetIDField(const char* label, AssetID& id,
             changed = true;
         }
     }
-
-    ImGui::SameLine(0, 4);
-    ImGui::TextUnformatted(label);
 
     // ── Picker popup ─────────────────────────────────────────────────────────
     if (ImGui::BeginPopup("##asset_pick")) {
@@ -171,7 +175,40 @@ public:
             tr->rotation = glm::quat(glm::radians(m_cachedEuler));
             changed = true;
         }
-        changed |= ImGui::DragFloat3("Scale", glm::value_ptr(tr->scale), 0.01f, 0.001f, 1000.f);
+        // ── Scale ──────────────────────────────────────────────────────────────
+        {
+            const float btnSz = ImGui::GetFrameHeight();
+
+            ImGui::PushID("##scale_lock");
+            if (m_scaleLocked)
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.55f, 0.90f, 1.f));
+            if (ImGui::Button(m_scaleLocked ? "=" : "/", ImVec2(btnSz, btnSz)))
+                m_scaleLocked = !m_scaleLocked;
+            if (m_scaleLocked)
+                ImGui::PopStyleColor();
+            ImGui::PopID();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", m_scaleLocked
+                    ? "Scale: proportional  (click to unlock)"
+                    : "Scale: independent   (click to lock)");
+
+            ImGui::SameLine(0.f, ImGui::GetStyle().ItemInnerSpacing.x);
+            ImGui::SetNextItemWidth(ImGui::CalcItemWidth()
+                                    - btnSz - ImGui::GetStyle().ItemInnerSpacing.x);
+
+            const glm::vec3 prev = tr->scale;
+            if (ImGui::DragFloat3("Scale", glm::value_ptr(tr->scale), 0.01f, 0.001f, 1000.f)) {
+                if (m_scaleLocked) {
+                    const glm::vec3 d = tr->scale - prev;
+                    int axis = (std::abs(d[1]) > std::abs(d[0])) ? 1 : 0;
+                    if (std::abs(d[2]) > std::abs(d[axis])) axis = 2;
+                    const float ratio = std::abs(prev[axis]) > 1e-6f
+                                      ? tr->scale[axis] / prev[axis] : 1.f;
+                    tr->scale = prev * ratio;
+                }
+                changed = true;
+            }
+        }
         if (changed) scene.MarkDirty(entity);
         return true;
     }
@@ -179,6 +216,7 @@ public:
 private:
     uint32_t  m_cachedEulerEntity = ~0u;
     glm::vec3 m_cachedEuler       = {};
+    bool      m_scaleLocked       = true;
 };
 
 // ── CameraDrawer ───────────────────────────────────────────────────────────────
@@ -193,8 +231,11 @@ public:
         float fovDeg = glm::degrees(cam->fovY);
         if (ImGui::DragFloat("FoV Y (deg)", &fovDeg, 0.5f, 10.f, 170.f))
             cam->fovY = glm::radians(fovDeg);
-        ImGui::DragFloat("Near", &cam->nearPlane, 0.001f, 0.001f,  10.f);
-        ImGui::DragFloat("Far",  &cam->farPlane,  1.f,    1.f,    10000.f);
+        ImGui::DragFloat("Near",     &cam->nearPlane, 0.001f, 0.001f,  10.f);
+        ImGui::DragFloat("Far",      &cam->farPlane,  1.f,    1.f,    10000.f);
+        ImGui::DragInt  ("Priority", &cam->priority,  1.f,   -100,    100);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Highest priority camera is used for the primary view.");
         return true;
     }
 };
@@ -412,73 +453,237 @@ private:
     const Resource::AssetRegistry* m_registry = nullptr;
 };
 
-// ── PBRSurfaceDrawer ───────────────────────────────────────────────────────────
-class PBRSurfaceDrawer : public IComponentDrawer {
+// ── MaterialOverrideDrawer ─────────────────────────────────────────────────────
+class MaterialOverrideDrawer : public IComponentDrawer {
 public:
-    explicit PBRSurfaceDrawer(const Resource::AssetRegistry* reg = nullptr)
-        : m_registry(reg) {}
+    explicit MaterialOverrideDrawer(const Resource::AssetRegistry* reg  = nullptr,
+                                    const MaterialManager*          matMgr = nullptr)
+        : m_registry(reg), m_matMgr(matMgr) {}
 
     bool TryDraw(entt::registry& reg, entt::entity entity, Scene& scene) override {
-        auto* pbr = reg.try_get<PBRSurfaceComponent>(entity);
-        if (!pbr) return false;
-        bool open = ImGui::CollapsingHeader("PBR Surface", HeaderFlags(ImGuiTreeNodeFlags_DefaultOpen));
-        if (RemoveButton("x##rem_pbr")) {
-            reg.remove<PBRSurfaceComponent>(entity);
+        auto* mat = reg.try_get<MaterialOverrideComponent>(entity);
+        if (!mat) return false;
+        bool open = ImGui::CollapsingHeader("Material Override",
+                                            HeaderFlags(ImGuiTreeNodeFlags_DefaultOpen));
+        if (RemoveButton("x##rem_mo")) {
+            reg.remove<MaterialOverrideComponent>(entity);
             scene.MarkMaterialDirty();
             return true;
         }
         if (!open) return true;
+
         bool changed = false;
-        changed |= ImGui::ColorEdit4("Base Color", glm::value_ptr(pbr->baseColor), ImGuiColorEditFlags_Float);
-        changed |= ImGui::DragFloat("Roughness",   &pbr->roughness, 0.01f, 0.f, 1.f);
-        changed |= ImGui::DragFloat("Metallic",    &pbr->metallic,  0.01f, 0.f, 1.f);
-        changed |= DrawAssetIDField("Albedo Map", pbr->albedoMap, "Texture", m_registry);
-        changed |= DrawAssetIDField("Normal Map", pbr->normalMap, "Texture", m_registry);
+        ImGui::PushID("MatOvr");
+
+        // Whole-material asset override
+        ImGui::PushID("matAsset");
+        if (DrawAssetIDField("Material Asset", mat->materialAsset, "Material", m_registry))
+            changed = true;
+        ImGui::PopID();
+
+        // ── Scalar overrides ──────────────────────────────────────────────────
+        if (!mat->scalars.empty()) {
+            ImGui::SeparatorText("Scalar Overrides");
+            std::string toRemove;
+            for (auto& [paramName, val] : mat->scalars) {
+                ImGui::PushID(paramName.c_str());
+                const ParamDef* def = FindParamDef(paramName);
+                const char*     labelStr = (def && !def->displayName.empty())
+                                           ? def->displayName.c_str() : paramName.c_str();
+
+                using T = RHI::ParamUIType;
+                const T uit = def ? def->uiType : T::Inferred;
+
+                // Label first, then widget fills remaining width minus the remove button.
+                ImGui::TextUnformatted(labelStr);
+                ImGui::SameLine();
+                const float widgetW = std::max(30.f, ImGui::GetContentRegionAvail().x - 28.f);
+                ImGui::SetNextItemWidth(widgetW);
+                if (auto* f = std::get_if<float>(&val)) {
+                    const float lo  = def ? def->minValue : 0.f;
+                    const float hi  = def ? def->maxValue : 1.f;
+                    const float spd = (hi - lo) * 0.005f;
+                    changed |= ImGui::DragFloat("##v", f, spd, lo, hi);
+                } else if (auto* v2 = std::get_if<glm::vec2>(&val)) {
+                    changed |= ImGui::DragFloat2("##v", glm::value_ptr(*v2), 0.01f);
+                } else if (auto* v3 = std::get_if<glm::vec3>(&val)) {
+                    if (uit == T::Color3 || uit == T::Inferred)
+                        changed |= ImGui::ColorEdit3("##v", glm::value_ptr(*v3));
+                    else
+                        changed |= ImGui::DragFloat3("##v", glm::value_ptr(*v3), 0.01f);
+                } else if (auto* v4 = std::get_if<glm::vec4>(&val)) {
+                    if (uit == T::Color4)
+                        changed |= ImGui::ColorEdit4("##v", glm::value_ptr(*v4),
+                                                     ImGuiColorEditFlags_Float);
+                    else
+                        changed |= ImGui::DragFloat4("##v", glm::value_ptr(*v4), 0.01f);
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("-##rmS")) toRemove = paramName;
+                ImGui::PopID();
+            }
+            if (!toRemove.empty()) { mat->scalars.erase(toRemove); changed = true; }
+        }
+
+        // ── Texture overrides ─────────────────────────────────────────────────
+        if (!mat->textures.empty()) {
+            ImGui::SeparatorText("Texture Overrides");
+            std::string toRemoveTex;
+            for (auto& [texName, texID] : mat->textures) {
+                ImGui::PushID(texName.c_str());
+                const TextureDef* tdef     = FindTextureDef(texName);
+                const char*       labelStr = (tdef && !tdef->displayName.empty())
+                                             ? tdef->displayName.c_str() : texName.c_str();
+                if (ImGui::SmallButton("-##rmT")) { toRemoveTex = texName; }
+                else {
+                    ImGui::SameLine();
+                    if (DrawAssetIDField(labelStr, texID, "Texture", m_registry))
+                        changed = true;
+                }
+                ImGui::PopID();
+            }
+            if (!toRemoveTex.empty()) { mat->textures.erase(toRemoveTex); changed = true; }
+        }
+
+        // ── Add Override popup ────────────────────────────────────────────────
+        if (ImGui::SmallButton("+ Add Override"))
+            ImGui::OpenPopup("##add_ovr");
+        if (ImGui::BeginPopup("##add_ovr")) {
+            if (m_matMgr) {
+                // Resolve the effective type from the assigned .mat asset so the
+                // popup only shows params that belong to this material's shader.
+                // Falls back to all types (deduped) if no asset is assigned.
+                const MaterialType* eff = ResolveEffectiveType(mat);
+
+                auto addParamSelectable = [&](const ParamDef& param) {
+                    if (param.name.empty() || param.name[0] == '_') return;
+                    if (mat->scalars.count(param.name)) return;
+                    const char* lbl = param.displayName.empty()
+                                      ? param.name.c_str()
+                                      : param.displayName.c_str();
+                    if (ImGui::Selectable(lbl)) {
+                        if (param.size == 16)
+                            mat->scalars[param.name] = glm::vec4{
+                                param.defaultValue[0], param.defaultValue[1],
+                                param.defaultValue[2], param.defaultValue[3]};
+                        else if (param.size == 12)
+                            mat->scalars[param.name] = glm::vec3{
+                                param.defaultValue[0], param.defaultValue[1],
+                                param.defaultValue[2]};
+                        else if (param.size == 8)
+                            mat->scalars[param.name] = glm::vec2{
+                                param.defaultValue[0], param.defaultValue[1]};
+                        else
+                            mat->scalars[param.name] = param.defaultValue[0];
+                        changed = true;
+                        ImGui::CloseCurrentPopup();
+                    }
+                };
+
+                ImGui::SeparatorText("Parameters");
+                if (eff) {
+                    for (const auto& param : eff->params)
+                        addParamSelectable(param);
+                } else {
+                    std::unordered_set<std::string> seen;
+                    for (const auto& [typeName, typePtr] : m_matMgr->GetTypes())
+                        for (const auto& param : typePtr->params)
+                            if (seen.insert(param.name).second)
+                                addParamSelectable(param);
+                }
+
+                ImGui::SeparatorText("Textures");
+                if (eff) {
+                    for (const auto& tex : eff->textures) {
+                        if (mat->textures.count(tex.name)) continue;
+                        const char* lbl = tex.displayName.empty()
+                                          ? tex.name.c_str()
+                                          : tex.displayName.c_str();
+                        if (ImGui::Selectable(lbl)) {
+                            mat->textures[tex.name] = AssetID::Invalid();
+                            changed = true;
+                            ImGui::CloseCurrentPopup();
+                        }
+                    }
+                } else {
+                    std::unordered_set<std::string> seenTex;
+                    for (const auto& [typeName, typePtr] : m_matMgr->GetTypes()) {
+                        for (const auto& tex : typePtr->textures) {
+                            if (!seenTex.insert(tex.name).second) continue;
+                            if (mat->textures.count(tex.name)) continue;
+                            const char* lbl = tex.displayName.empty()
+                                              ? tex.name.c_str()
+                                              : tex.displayName.c_str();
+                            if (ImGui::Selectable(lbl)) {
+                                mat->textures[tex.name] = AssetID::Invalid();
+                                changed = true;
+                                ImGui::CloseCurrentPopup();
+                            }
+                        }
+                    }
+                }
+            }
+            ImGui::EndPopup();
+        }
+
+        ImGui::PopID();
         if (changed) scene.MarkMaterialDirty();
         return true;
     }
 
 private:
     const Resource::AssetRegistry* m_registry = nullptr;
-};
+    const MaterialManager*          m_matMgr   = nullptr;
 
-// ── MaterialParamDrawer ────────────────────────────────────────────────────────
-class MaterialParamDrawer : public IComponentDrawer {
-public:
-    explicit MaterialParamDrawer(const Resource::AssetRegistry* reg = nullptr)
-        : m_registry(reg) {}
-
-    bool TryDraw(entt::registry& reg, entt::entity entity, Scene& scene) override {
-        auto* mp = reg.try_get<MaterialParamComponent>(entity);
-        if (!mp) return false;
-        bool open = ImGui::CollapsingHeader("Material Params", HeaderFlags());
-        if (RemoveButton("x##rem_mp")) {
-            reg.remove<MaterialParamComponent>(entity);
-            scene.MarkMaterialDirty();
-            return true;
+    // Read "type" field from a .mat JSON file without a full JSON parser.
+    [[nodiscard]] static std::string ReadMatTypeName(const std::filesystem::path& path) {
+        std::ifstream f(path);
+        std::string line;
+        while (std::getline(f, line)) {
+            const auto pos = line.find("\"type\"");
+            if (pos == std::string::npos) continue;
+            const auto colon = line.find(':', pos);
+            if (colon == std::string::npos) continue;
+            const auto q1 = line.find('"', colon + 1);
+            if (q1 == std::string::npos) continue;
+            const auto q2 = line.find('"', q1 + 1);
+            if (q2 == std::string::npos) continue;
+            return line.substr(q1 + 1, q2 - q1 - 1);
         }
-        if (!open) return true;
-        bool changed = false;
-        for (auto& [name, val] : mp->scalars) {
-            ImGui::PushID(name.c_str());
-            if (auto* f = std::get_if<float>(&val))
-                changed |= ImGui::DragFloat(name.c_str(), f, 0.01f);
-            else if (auto* v2 = std::get_if<glm::vec2>(&val))
-                changed |= ImGui::DragFloat2(name.c_str(), glm::value_ptr(*v2), 0.01f);
-            else if (auto* v3 = std::get_if<glm::vec3>(&val))
-                changed |= ImGui::DragFloat3(name.c_str(), glm::value_ptr(*v3), 0.01f);
-            else if (auto* v4 = std::get_if<glm::vec4>(&val))
-                changed |= ImGui::DragFloat4(name.c_str(), glm::value_ptr(*v4), 0.01f);
-            ImGui::PopID();
-        }
-        for (auto& [name, tex] : mp->textures)
-            changed |= DrawAssetIDField(name.c_str(), tex, "Texture", m_registry);
-        if (changed) scene.MarkMaterialDirty();
-        return true;
+        return {};
     }
 
-private:
-    const Resource::AssetRegistry* m_registry = nullptr;
+    // Resolve the MaterialType for the currently-assigned material asset.
+    // Returns nullptr if no asset is assigned, the asset can't be found, or the
+    // type hasn't been registered yet.
+    [[nodiscard]] const MaterialType*
+    ResolveEffectiveType(const MaterialOverrideComponent* mat) const {
+        if (!mat || !mat->materialAsset.IsValid() || !m_registry || !m_matMgr)
+            return nullptr;
+        const auto* entry = m_registry->FindByID(mat->materialAsset);
+        if (!entry) return nullptr;
+        const std::string typeName = ReadMatTypeName(entry->sourcePath);
+        if (typeName.empty()) return nullptr;
+        return m_matMgr->GetType(typeName);
+    }
+
+    // Search all registered types for a ParamDef by name.
+    [[nodiscard]] const ParamDef* FindParamDef(const std::string& name) const {
+        if (!m_matMgr) return nullptr;
+        for (const auto& [tname, tptr] : m_matMgr->GetTypes())
+            for (const auto& p : tptr->params)
+                if (p.name == name) return &p;
+        return nullptr;
+    }
+
+    // Search all registered types for a TextureDef by name.
+    [[nodiscard]] const TextureDef* FindTextureDef(const std::string& name) const {
+        if (!m_matMgr) return nullptr;
+        for (const auto& [tname, tptr] : m_matMgr->GetTypes())
+            for (const auto& t : tptr->textures)
+                if (t.name == name) return &t;
+        return nullptr;
+    }
 };
 
 // ── RigidBodyDrawer ────────────────────────────────────────────────────────────

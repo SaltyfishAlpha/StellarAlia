@@ -1,6 +1,8 @@
 #include "ui/panels/InspectorPanel.hpp"
 
 #include "ui/ComponentDrawers.hpp"
+#include "ui/AssetInspectors.hpp"
+#include "ui/panels/AssetsPanel.hpp"
 #include "resource/AssetRegistry.hpp"
 #include "function/scene/Scene.hpp"
 #include "function/scene/Components.hpp"
@@ -12,11 +14,13 @@ namespace StellarAlia::Editor {
 
 InspectorPanel::InspectorPanel(Scene& scene,
                                const SceneHierarchyPanel& hierarchy,
-                               const Resource::AssetRegistry* registry)
-    : m_scene(&scene), m_hierarchy(&hierarchy), m_registry(registry)
+                               const Resource::AssetRegistry* registry,
+                               const MaterialManager*          matMgr)
+    : m_scene(&scene), m_hierarchy(&hierarchy), m_registry(registry), m_matMgr(matMgr)
 {
     RegisterDrawers();
     RegisterBuiltinComponents();
+    RegisterAssetDrawers();
 }
 
 void InspectorPanel::RegisterComponent(ComponentDescriptor desc) {
@@ -36,14 +40,9 @@ void InspectorPanel::RegisterBuiltinComponents() {
         [](auto& r, auto e, auto& s){ r.template emplace_or_replace<MeshRendererComponent>(e); s.MarkMaterialDirty(); }
     });
     RegisterComponent({
-        "Rendering", "PBR Surface",
-        [](auto& r, auto e){ return r.template any_of<PBRSurfaceComponent>(e); },
-        [](auto& r, auto e, auto& s){ r.template emplace_or_replace<PBRSurfaceComponent>(e); s.MarkMaterialDirty(); }
-    });
-    RegisterComponent({
-        "Rendering", "Material Params",
-        [](auto& r, auto e){ return r.template any_of<MaterialParamComponent>(e); },
-        [](auto& r, auto e, auto& ){ r.template emplace_or_replace<MaterialParamComponent>(e); }
+        "Rendering", "Material Override",
+        [](auto& r, auto e){ return r.template any_of<MaterialOverrideComponent>(e); },
+        [](auto& r, auto e, auto& s){ r.template emplace_or_replace<MaterialOverrideComponent>(e); s.MarkMaterialDirty(); }
     });
 
     // ── Lighting ──────────────────────────────────────────────────────────────
@@ -100,6 +99,22 @@ void InspectorPanel::RegisterBuiltinComponents() {
     });
 }
 
+void InspectorPanel::RegisterAssetDrawers() {
+    m_defaultAssetDrawer = std::make_unique<DefaultAssetInspector>();
+
+    for (auto ext : {".txt", ".md", ".saglsl", ".glsl", ".vert", ".frag", ".comp", ".hlsl", ".json"})
+        m_assetDrawers[ext] = std::make_unique<TextAssetInspector>();
+
+    m_assetDrawers[".samat"]   = std::make_unique<MaterialAssetInspector>();
+    m_assetDrawers[".sascene"] = std::make_unique<SceneAssetInspector>();
+
+    for (auto ext : {".gltf", ".glb", ".fbx", ".obj"})
+        m_assetDrawers[ext] = std::make_unique<ModelAssetInspector>();
+
+    for (auto ext : {".png", ".jpg", ".jpeg", ".hdr", ".tga", ".bmp", ".exr"})
+        m_assetDrawers[ext] = std::make_unique<ImageAssetInspector>();
+}
+
 void InspectorPanel::RegisterDrawers() {
     m_drawers.push_back(std::make_unique<TagDrawer>());
     m_drawers.push_back(std::make_unique<TransformDrawer>());
@@ -112,14 +127,36 @@ void InspectorPanel::RegisterDrawers() {
     m_drawers.push_back(std::make_unique<MeshRendererDrawer>(m_registry));
     m_drawers.push_back(std::make_unique<AnimatorDrawer>(m_registry));
     m_drawers.push_back(std::make_unique<SkinnedMeshDrawer>(m_registry));
-    m_drawers.push_back(std::make_unique<PBRSurfaceDrawer>(m_registry));
-    m_drawers.push_back(std::make_unique<MaterialParamDrawer>(m_registry));
+    m_drawers.push_back(std::make_unique<MaterialOverrideDrawer>(m_registry, m_matMgr));
     m_drawers.push_back(std::make_unique<RigidBodyDrawer>());
     m_drawers.push_back(std::make_unique<ColliderDrawer>());
 }
 
 void InspectorPanel::OnDraw() {
-    const uint32_t sel = m_hierarchy->GetSelectedEntity();
+    const uint32_t selEntity = m_hierarchy->GetSelectedEntity();
+    const std::filesystem::path selAsset =
+        m_assetsPanel ? m_assetsPanel->GetSelectedPath() : std::filesystem::path{};
+
+    // Mode switching: whichever selection changed most recently wins.
+    if (selEntity != m_lastEntity) {
+        m_mode = (selEntity != ~0u) ? Mode::Entity
+               : (!selAsset.empty() ? Mode::Asset : m_mode);
+        m_lastEntity = selEntity;
+    }
+    if (selAsset != m_lastAsset) {
+        if (!selAsset.empty()) m_mode = Mode::Asset;
+        m_lastAsset = selAsset;
+    }
+
+    if (m_mode == Mode::Entity)
+        DrawEntityInspector(selEntity);
+    else if (!selAsset.empty())
+        DrawAssetInspector(selAsset);
+    else
+        ImGui::TextDisabled("Nothing selected");
+}
+
+void InspectorPanel::DrawEntityInspector(uint32_t sel) {
     if (sel == ~0u) {
         ImGui::TextDisabled("No entity selected");
         return;
@@ -133,10 +170,11 @@ void InspectorPanel::OnDraw() {
         return;
     }
 
+    ImGui::PushItemWidth(-150.f);
     for (auto& drawer : m_drawers)
         drawer->TryDraw(reg, entity, *m_scene);
+    ImGui::PopItemWidth();
 
-    // ── Add Component ──────────────────────────────────────────────────────
     ImGui::Separator();
     if (ImGui::Button("Add Component", ImVec2(-1.f, 0.f)))
         ImGui::OpenPopup("add_component_popup");
@@ -156,6 +194,15 @@ void InspectorPanel::OnDraw() {
         }
         ImGui::EndPopup();
     }
+}
+
+void InspectorPanel::DrawAssetInspector(const std::filesystem::path& path) {
+    const std::string ext = path.extension().string();
+    auto it = m_assetDrawers.find(ext);
+    IAssetInspector* drawer = (it != m_assetDrawers.end())
+                            ? it->second.get()
+                            : m_defaultAssetDrawer.get();
+    drawer->Draw(path);
 }
 
 } // namespace StellarAlia::Editor

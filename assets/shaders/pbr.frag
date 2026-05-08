@@ -7,20 +7,20 @@
 
 // ── set=1 Material parameters ─────────────────────────────────────────────────
 layout(set = 1, binding = 0) uniform MaterialParams {
-    vec4  baseColorFactor;
-    float roughnessFactor;
-    float metallicFactor;
-    float normalScale;
-    float occlusionStrength;
-    vec3  emissiveFactor;
-    float _pad;
+    vec4  baseColorFactor;   // @Color4("Base Color") = 1,1,1,1
+    float roughnessFactor;   // @Range(0.0, 1.0, "Roughness") = 0.5
+    float metallicFactor;    // @Range(0.0, 1.0, "Metallic") = 0.0
+    float normalScale;       // @Float("Normal Scale") = 1.0
+    float occlusionStrength; // @Range(0.0, 1.0, "Occlusion Strength") = 1.0
+    vec3  emissiveFactor;       // @Color3("Emissive Color") = 0,0,0
+    float emissiveIntensity;    // @Range(0.0, 50.0, "Emissive Intensity") = 1.0
 } u_Mat;
 
-layout(set = 1, binding = 1) uniform sampler2D t_BaseColor;
-layout(set = 1, binding = 2) uniform sampler2D t_Normal;
-layout(set = 1, binding = 3) uniform sampler2D t_MetallicRoughness; // g=roughness b=metallic
-layout(set = 1, binding = 4) uniform sampler2D t_Occlusion;
-layout(set = 1, binding = 5) uniform sampler2D t_Emissive;
+layout(set = 1, binding = 1) uniform sampler2D t_BaseColor;         // @Texture("Albedo Map")
+layout(set = 1, binding = 2) uniform sampler2D t_Normal;             // @Texture("Normal Map")
+layout(set = 1, binding = 3) uniform sampler2D t_MetallicRoughness; // @Texture("Metallic Roughness")
+layout(set = 1, binding = 4) uniform sampler2D t_Occlusion;         // @Texture("Occlusion Map")
+layout(set = 1, binding = 5) uniform sampler2D t_Emissive;          // @Texture("Emissive Map")
 
 // ── Inputs from vertex stage ──────────────────────────────────────────────────
 layout(location = 0) in vec3 v_WorldPos;
@@ -38,7 +38,7 @@ void main() {
     vec2  mr        = texture(t_MetallicRoughness,  v_TexCoord0).gb; // g=rough, b=metal
     float roughness = clamp(mr.x * u_Mat.roughnessFactor, 0.04, 1.0);
     float metallic  = clamp(mr.y * u_Mat.metallicFactor,  0.0,  1.0);
-    vec3  emissive  = texture(t_Emissive,           v_TexCoord0).rgb * u_Mat.emissiveFactor;
+    vec3  emissive  = texture(t_Emissive,           v_TexCoord0).rgb * u_Mat.emissiveFactor * u_Mat.emissiveIntensity;
 
     vec3  N     = normalize(v_Normal);
     vec3  V     = normalize(u_Frame.cameraPos - v_WorldPos);

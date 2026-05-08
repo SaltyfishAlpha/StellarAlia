@@ -1,8 +1,10 @@
 #pragma once
 
-#include "gizmo/GizmoSystem.hpp"
+#include <cstdint>
 
 namespace StellarAlia::Editor {
+
+enum class GizmoMode : uint8_t { Translate, Rotate, Scale };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // EditorOverlaySettings — visibility toggles for all editor overlay symbols.
@@ -32,8 +34,9 @@ struct EditorOverlaySettings {
     float outlineWidth      = 2.f;    // dilation radius in pixels [1, 8]
 
     // ── Gizmo ────────────────────────────────────────────────────────────────
-    bool      drawGizmo   = true;
-    GizmoMode gizmoMode   = GizmoMode::Translate;  // T / R / S to cycle
+    bool      drawGizmo      = true;
+    GizmoMode gizmoMode      = GizmoMode::Translate;  // T / R / S to cycle
+    bool      gizmoWorldSpace = true;                 // world vs local space
 };
 
 } // namespace StellarAlia::Editor

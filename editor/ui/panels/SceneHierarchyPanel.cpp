@@ -3,8 +3,10 @@
 #include "function/scene/Scene.hpp"
 #include "function/scene/Components.hpp"
 #include "function/scene/EntityFactory.hpp"
+#include "function/scene/SceneSerializer.hpp"
 #include "function/input/InputSystem.hpp"
 #include "resource/AssetRegistry.hpp"
+#include "resource/EntityTemplateRegistry.hpp"
 #include "core/asset/AssetID.hpp"
 #include "core/logs/Log.hpp"
 
@@ -23,14 +25,12 @@ namespace StellarAlia::Editor {
 void SceneHierarchyPanel::SetRegistry(const Resource::AssetRegistry* registry) {
     m_registry = registry;
 }
+void SceneHierarchyPanel::SetTemplateRegistry(const EntityTemplateRegistry* tmplRegistry) {
+    m_tmplRegistry = tmplRegistry;
+}
 void SceneHierarchyPanel::SetSceneLoadCallback(SceneLoadCallback cb) {
     m_onSceneLoad = std::move(cb);
 }
-
-// UUIDs from assets/models/*.sameta — file-level mesh IDs used by
-// EntityFactory (single-node GLTF files are cooked with the file UUID).
-static constexpr std::string_view kBuiltinCubeUUID  = "c0be0000-0000-4000-0000-000000000001";
-static constexpr std::string_view kBuiltinPlaneUUID = "c0be0000-0000-4000-0000-000000000002";
 
 // ── Hierarchy helpers ──────────────────────────────────────────────────────────
 
@@ -93,8 +93,7 @@ entt::entity SceneHierarchyPanel::DuplicateEntity(entt::entity src) {
     if (auto* sl = reg.try_get<SpotLightComponent>(src))        reg.emplace_or_replace<SpotLightComponent>(dst, *sl);
     if (auto* al = reg.try_get<AreaLightComponent>(src))        reg.emplace_or_replace<AreaLightComponent>(dst, *al);
     if (auto* sm = reg.try_get<StaticMeshComponent>(src))       reg.emplace_or_replace<StaticMeshComponent>(dst, *sm);
-    if (auto* pbr= reg.try_get<PBRSurfaceComponent>(src))       reg.emplace_or_replace<PBRSurfaceComponent>(dst, *pbr);
-    if (auto* mp = reg.try_get<MaterialParamComponent>(src))    reg.emplace_or_replace<MaterialParamComponent>(dst, *mp);
+    if (auto* mo = reg.try_get<MaterialOverrideComponent>(src)) reg.emplace_or_replace<MaterialOverrideComponent>(dst, *mo);
     if (auto* an = reg.try_get<AnimatorComponent>(src))         reg.emplace_or_replace<AnimatorComponent>(dst, *an);
     if (auto* rb = reg.try_get<RigidBodyComponent>(src)) {
         RigidBodyComponent rbCopy = *rb;
@@ -185,14 +184,19 @@ void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
             }
             if (ImGui::BeginMenu("Create Child")) {
                 if (ImGui::MenuItem("Empty Entity")) {
-                    m_pendingCreateChild = entity; m_createKind = CreateKind::Empty;
+                    m_pendingCreate = { CreateOp::Empty, {}, entity };
                 }
-                ImGui::SeparatorText("Builtin Models");
-                if (ImGui::MenuItem("Cube")) {
-                    m_pendingCreateChild = entity; m_createKind = CreateKind::Cube;
-                }
-                if (ImGui::MenuItem("Plane")) {
-                    m_pendingCreateChild = entity; m_createKind = CreateKind::Plane;
+                if (m_tmplRegistry) {
+                    std::string lastCategory;
+                    for (const auto& entry : m_tmplRegistry->Entries()) {
+                        if (entry.category != lastCategory) {
+                            if (!entry.category.empty())
+                                ImGui::SeparatorText(entry.category.c_str());
+                            lastCategory = entry.category;
+                        }
+                        if (ImGui::MenuItem(entry.label.c_str()))
+                            m_pendingCreate = { CreateOp::Template, entry.path, entity };
+                    }
                 }
                 ImGui::EndMenu();
             }
@@ -262,27 +266,36 @@ void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
     }
 }
 
+void SceneHierarchyPanel::RequestCreateEmpty() {
+    m_pendingCreate = { CreateOp::Empty, {}, entt::null };
+}
+
+void SceneHierarchyPanel::RequestSpawnTemplate(const fs::path& templatePath) {
+    m_pendingCreate = { CreateOp::Template, templatePath, entt::null };
+}
+
 // ── OnDraw ─────────────────────────────────────────────────────────────────────
 void SceneHierarchyPanel::OnDraw() {
     auto& reg = m_scene->Registry();
 
-    // ── Toolbar ────────────────────────────────────────────────────────────────
-    if (ImGui::Button("+")) ImGui::OpenPopup("create_root_popup");
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Create Entity");
-    if (ImGui::BeginPopup("create_root_popup")) {
-        if (ImGui::MenuItem("Empty Entity")) {
-            m_pendingCreateRoot = true; m_createKind = CreateKind::Empty;
+    // ── Create-entity popup (triggered by menu bar or background right-click) ──
+    // Shared lambda so both triggers show identical items.
+    auto drawCreateItems = [&]() {
+        if (ImGui::MenuItem("Empty Entity"))
+            m_pendingCreate = { CreateOp::Empty, {}, entt::null };
+        if (m_tmplRegistry) {
+            std::string lastCategory;
+            for (const auto& entry : m_tmplRegistry->Entries()) {
+                if (entry.category != lastCategory) {
+                    if (!entry.category.empty())
+                        ImGui::SeparatorText(entry.category.c_str());
+                    lastCategory = entry.category;
+                }
+                if (ImGui::MenuItem(entry.label.c_str()))
+                    m_pendingCreate = { CreateOp::Template, entry.path, entt::null };
+            }
         }
-        ImGui::SeparatorText("Builtin Models");
-        if (ImGui::MenuItem("Cube")) {
-            m_pendingCreateRoot = true; m_createKind = CreateKind::Cube;
-        }
-        if (ImGui::MenuItem("Plane")) {
-            m_pendingCreateRoot = true; m_createKind = CreateKind::Plane;
-        }
-        ImGui::EndPopup();
-    }
-    ImGui::Separator();
+    };
 
     // ── Entity tree ────────────────────────────────────────────────────────────
     auto view = reg.view<TagComponent>();
@@ -297,10 +310,19 @@ void SceneHierarchyPanel::OnDraw() {
         && !ImGui::IsAnyItemHovered())
         m_selected = ~0u;
 
-    // Drop onto empty window area → detach to scene root
-    const float remainH = ImGui::GetContentRegionAvail().y;
-    if (remainH > 2.f) {
-        ImGui::InvisibleButton("##root_drop_zone", ImVec2(-1.f, remainH));
+    // Empty-area InvisibleButton: handles both right-click (create) and
+    // drag-drop (detach to root). Using BeginPopupContextWindow+NoOpenOverItems
+    // was broken because the InvisibleButton itself blocked the flag on the
+    // next frame, so both are now attached to the same item.
+    {
+        const float h = std::max(ImGui::GetContentRegionAvail().y, 4.f);
+        ImGui::InvisibleButton("##hier_bg_zone", ImVec2(-1.f, h));
+
+        if (ImGui::BeginPopupContextItem("##hier_bg_ctx")) {
+            drawCreateItems();
+            ImGui::EndPopup();
+        }
+
         if (ImGui::BeginDragDropTarget()) {
             if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAENTITY")) {
                 entt::entity dragged = static_cast<entt::entity>(
@@ -342,33 +364,26 @@ void SceneHierarchyPanel::OnDraw() {
 
     // ── Execute deferred operations ────────────────────────────────────────────
 
-    // Helper: spawn an entity by kind at origin
-    auto spawnByKind = [&](CreateKind kind, const char* name) -> entt::entity {
-        switch (kind) {
-        case CreateKind::Cube:
-            return EntityFactory::CreateStaticMesh(
-                *m_scene, "Cube", AssetID::FromString(kBuiltinCubeUUID));
-        case CreateKind::Plane:
-            return EntityFactory::CreateStaticMesh(
-                *m_scene, "Plane", AssetID::FromString(kBuiltinPlaneUUID));
-        default:
-            return m_scene->CreateEntity(name);
-        }
-    };
+    if (m_pendingCreate.kind != CreateOp::None) {
+        CreateOp op = std::move(m_pendingCreate);
+        m_pendingCreate = {};
 
-    if (m_pendingCreateRoot) {
-        m_pendingCreateRoot = false;
-        entt::entity e = spawnByKind(m_createKind, "Entity");
-        m_selected = static_cast<uint32_t>(e);
-        if (m_createKind != CreateKind::Empty) m_scene->MarkMaterialDirty();
-    }
-    if (m_pendingCreateChild != entt::null) {
-        entt::entity parent = m_pendingCreateChild;
-        m_pendingCreateChild = entt::null;
-        entt::entity child = spawnByKind(m_createKind, "Entity");
-        m_scene->SetParent(child, parent);
-        m_selected = static_cast<uint32_t>(child);
-        if (m_createKind != CreateKind::Empty) m_scene->MarkMaterialDirty();
+        entt::entity e = entt::null;
+        if (op.kind == CreateOp::Empty) {
+            e = m_scene->CreateEntity("Entity");
+        } else {
+            auto spawned = SceneSerializer::SpawnFromTemplate(*m_scene, op.templatePath);
+            if (!spawned.empty()) {
+                e = spawned.front();
+                m_scene->MarkMaterialDirty();
+            }
+        }
+
+        if (reg.valid(e)) {
+            if (reg.valid(op.parent))
+                m_scene->SetParent(e, op.parent);
+            m_selected = static_cast<uint32_t>(e);
+        }
     }
     if (m_pendingDuplicate != entt::null) {
         entt::entity src = m_pendingDuplicate;

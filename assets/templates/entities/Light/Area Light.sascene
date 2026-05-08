@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "name": "Area Light",
+  "entities": [
+    {
+      "id": 0,
+      "parent": -1,
+      "tag": "Area Light",
+      "transform": {
+        "position": [0.0, 2.0, 0.0],
+        "rotation": [0.7071068, -0.7071068, 0.0, 0.0],
+        "scale": [2.0, 1.0, 1.0]
+      },
+      "areaLight": {
+        "color": [1.0, 1.0, 1.0],
+        "intensity": 8.0,
+        "width": 2.0,
+        "height": 1.0,
+        "twoSided": false,
+        "emissiveScale": 2.0
+      }
+    }
+  ]
+}

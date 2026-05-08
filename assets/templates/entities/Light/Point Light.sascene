@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "name": "Point Light",
+  "entities": [
+    {
+      "id": 0,
+      "parent": -1,
+      "tag": "Point Light",
+      "transform": {
+        "position": [0.0, 2.0, 0.0],
+        "rotation": [1.0, 0.0, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "pointLight": {
+        "color": [1.0, 1.0, 1.0],
+        "intensity": 5.0,
+        "range": 10.0
+      }
+    }
+  ]
+}

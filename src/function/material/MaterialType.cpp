@@ -2,7 +2,9 @@
 #include "function/material/MaterialInstance.hpp"
 #include "core/logs/Log.hpp"
 
+#include <algorithm>
 #include <cassert>
+#include <cstring>
 
 namespace StellarAlia {
 
@@ -27,8 +29,16 @@ MaterialType::CreateInstance(RHI::IRHIDevice*      device,
     inst->m_type   = this;
     inst->m_device = device;
 
-    // CPU-side parameter blob — zero-initialized
+    // CPU-side parameter blob — zero-initialized then defaults applied.
+    // Applying defaults here ensures params absent from a .samat (e.g. newly
+    // added fields like emissiveIntensity) get their annotated default value
+    // rather than 0, without requiring every .samat to be re-cooked.
     inst->m_uboBlob.assign(uboSize, 0u);
+    for (const auto& p : params) {
+        if (p.offset + p.size <= uboSize)
+            std::memcpy(inst->m_uboBlob.data() + p.offset, p.defaultValue,
+                        std::min<size_t>(p.size, sizeof(p.defaultValue)));
+    }
 
     // GPU-side UBO (cpu-visible for per-frame updates)
     if (uboSize > 0) {

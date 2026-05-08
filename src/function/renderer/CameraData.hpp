@@ -8,7 +8,7 @@ namespace StellarAlia {
 // CameraData — device-agnostic camera descriptor passed to SceneRenderer.
 //
 // Both the editor camera (EditorMode member, not a Scene entity) and the
-// game camera (Scene entity with CameraComponent + ActiveCameraTag) talk to
+// game camera (Scene entity with CameraComponent) talk to
 // the renderer through this struct.  SceneRenderer does not distinguish between
 // the two sources.
 //

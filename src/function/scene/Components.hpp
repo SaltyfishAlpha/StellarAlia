@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstring>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -66,12 +67,9 @@ struct CameraComponent {
     float fovY      = glm::radians(60.f);  // vertical FOV in radians
     float nearPlane = 0.1f;
     float farPlane  = 1000.f;
+    int   priority  = 0;  // highest priority camera is the primary view; ties: first found
     // Aspect ratio is derived from the swapchain at render time.
 };
-
-// Marks the entity whose CameraComponent is used for the primary view.
-// At most one entity should carry this tag at a time.
-struct ActiveCameraTag {};
 
 // ── Lights ────────────────────────────────────────────────────────────────────
 // Direction/position is taken from the entity's TransformComponent.
@@ -119,35 +117,21 @@ struct AreaLightComponent {
 
 // ── Material overrides ────────────────────────────────────────────────────────
 //
-// Two-tier override system. Both components are optional and independent.
-// The render system clones the base MaterialInstance on first override, then
-// applies whichever components are present. Entities with no override components
-// share the cached instance directly (no clone, no allocation).
+// Unified override component. When present, the render system clones the base
+// MaterialInstance and applies overrides. Entities without this component share
+// the cached instance directly (no clone, no allocation).
 //
-// Tier 1 — PBRSurfaceComponent
-//   Typed fast path for the built-in PBR shader. No string lookups at runtime.
-//   Only set fields that differ from the .samat default; an invalid AssetID means
-//   "keep the texture from the base material".
-//
-struct PBRSurfaceComponent {
-    glm::vec4 baseColor = {1.f, 1.f, 1.f, 1.f};
-    float     roughness = 0.5f;
-    float     metallic  = 0.f;
-    AssetID   albedoMap;   // invalid → keep base material texture
-    AssetID   normalMap;   // invalid → keep base material texture
-};
-
-//
-// Tier 2 — MaterialParamComponent
-//   Generic path for any shader (custom, modified PBR, toon, …).
-//   Parameter names must match the MaterialType's ParamDef / TextureDef names.
-//   Can be combined with PBRSurfaceComponent: PBR fields apply first, then these.
+//   materialAsset — replaces the resolved base material for all sub-meshes;
+//                   invalid = keep using the mesh-default or MeshRenderer slot.
+//   scalars       — named UBO parameter overrides (names match shader ParamDefs).
+//   textures      — named texture slot overrides (names match shader TextureDefs).
 //
 using ParamValue = std::variant<float, glm::vec2, glm::vec3, glm::vec4>;
 
-struct MaterialParamComponent {
-    std::unordered_map<std::string, ParamValue> scalars;   // name → UBO value
-    std::unordered_map<std::string, AssetID>    textures;  // name → sampler AssetID
+struct MaterialOverrideComponent {
+    AssetID                           materialAsset;
+    std::map<std::string, ParamValue> scalars;
+    std::map<std::string, AssetID>    textures;
 };
 
 // ── Animation ─────────────────────────────────────────────────────────────────

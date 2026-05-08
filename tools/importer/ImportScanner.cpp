@@ -16,8 +16,14 @@ std::string AssetTypeFromExtension(const fs::path& ext) {
     if (e == ".gltf" || e == ".glb")
         return "Mesh";
 
-    if (e == ".mat")
+    if (e == ".samat")
         return "Material";
+
+    if (e == ".saglsl")
+        return "Shader";
+
+    if (e == ".sascene")
+        return "Scene";
 
     // .sanim / .saskel / .sameta are sidecar files, not primary cook targets.
     return {};
@@ -54,8 +60,8 @@ std::vector<AssetEntry> ScanAndImport(const fs::path& dir) {
         const fs::path& src = entry.path();
         const std::string ext = src.extension().string();
 
-        // Skip sidecars and hidden files.
-        if (ext == ".sameta" || ext == ".sanim" || ext == ".saskel" ||
+        // Skip sidecars, cooked outputs, and hidden files.
+        if (ext == ".sameta" || ext == ".sanim" || ext == ".saskel" || ext == ".samatc" ||
             src.filename().string().front() == '.')
             continue;
 

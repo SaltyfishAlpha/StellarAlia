@@ -1,0 +1,8 @@
+{
+  "type": "SimpleAlbedo",
+  "version": 1,
+  "params": {
+    "baseColorFactor": [1,1,1,1]
+  },
+  "textures": {}
+}

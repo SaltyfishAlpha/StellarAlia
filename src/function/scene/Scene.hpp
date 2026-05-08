@@ -52,7 +52,6 @@ struct WorldSettings {
 //   Scene scene("MyLevel");
 //   entt::entity cam = scene.CreateEntity("MainCamera");
 //   scene.Registry().emplace<CameraComponent>(cam);
-//   scene.Registry().emplace<ActiveCameraTag>(cam);
 //   // ...per frame:
 //   scene.UpdateTransforms();
 // ─────────────────────────────────────────────────────────────────────────────

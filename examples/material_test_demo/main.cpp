@@ -1,10 +1,10 @@
 // MaterialTestDemo
 //
-// Visual test for the two-tier material override system (MaterialParamComponent).
+// Visual test for the material override system (MaterialOverrideComponent).
 //
 // Scene: material_test.sascene — two cubes + camera + directional light:
 //   Left  (PbrCube):          PBR material (default_pbr.mat) — textured PBR shading
-//   Right (SimpleAlbedoCube): SimpleAlbedo base material + MaterialParamComponent
+//   Right (SimpleAlbedoCube): SimpleAlbedo base material + MaterialOverrideComponent
 //                             orange override (baseColorFactor = {1, 0.5, 0, 1})
 //
 // SimpleAlbedo MaterialType is registered by SimpleAlbedoFeature, which is added
@@ -159,7 +159,7 @@ int main() {
     // ── Ensure SimpleAlbedoWhite .samat in cook cache ─────────────────────────
     {
         const fs::path matPath =
-            cookDir / (BuiltinAssets::SimpleAlbedoWhite.ToString() + ".samat");
+            cookDir / (BuiltinAssets::SimpleAlbedoWhite.ToString() + ".samatc");
         if (!fs::exists(matPath)) {
             std::ofstream f(matPath);
             f << R"({

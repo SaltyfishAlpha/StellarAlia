@@ -2,6 +2,8 @@
 #include "function/renderer/RenderFeature.hpp"
 #include "platform/rhi/ShaderReflection.hpp"
 #include "platform/rhi/ShaderReflectionIO.hpp"
+
+#include <filesystem>
 #include "resource/ResourceManager.hpp"
 #include "resource/vfs/VFS.hpp"
 #include "core/logs/Log.hpp"
@@ -77,8 +79,20 @@ bool MaterialManager::RegisterTypeFromShaders(const MaterialTypeDesc&   desc,
 
     if (auto ubo = merged.FindBinding(1, 0)) {
         type->uboSize = ubo->blockSize;
-        for (const auto& m : ubo->members)
-            type->params.push_back({m.name, m.offset, m.size});
+        for (const auto& m : ubo->members) {
+            if (!m.name.empty() && m.name[0] == '_') continue; // skip padding fields
+            ParamDef pd;
+            pd.name        = m.name;
+            pd.offset      = m.offset;
+            pd.size        = m.size;
+            pd.uiType      = m.uiType;
+            pd.displayName = m.displayName;
+            pd.minValue    = m.minValue;
+            pd.maxValue    = m.maxValue;
+            std::copy(std::begin(m.defaultValue), std::end(m.defaultValue),
+                      std::begin(pd.defaultValue));
+            type->params.push_back(std::move(pd));
+        }
     }
 
     for (const auto& b : merged.bindings) {
@@ -87,7 +101,8 @@ bool MaterialManager::RegisterTypeFromShaders(const MaterialTypeDesc&   desc,
             b.type == RHI::RHIDescriptorType::TextureCube  ||
             b.type == RHI::RHIDescriptorType::Sampler)
             type->textures.push_back({b.name, b.binding,
-                                      static_cast<uint32_t>(type->textures.size())});
+                                      static_cast<uint32_t>(type->textures.size()),
+                                      b.displayName});
     }
     std::sort(type->textures.begin(), type->textures.end(),
               [](const auto& a, const auto& b){ return a.binding < b.binding; });
@@ -114,6 +129,39 @@ bool MaterialManager::RegisterTypeFromShaders(const MaterialTypeDesc&   desc,
     return true;
 }
 
+void MaterialManager::RegisterTypesFromShaderDir(const std::string&        shaderDir,
+                                                   const FeatureInitContext& ctx)
+{
+    namespace fs = std::filesystem;
+    if (!fs::is_directory(shaderDir)) return;
+
+    for (const auto& entry : fs::directory_iterator(shaderDir)) {
+        const fs::path& p = entry.path();
+        // Match *.gbuffer.frag.refl — the cooked fragment refl for .saglsl shaders.
+        if (p.extension() != ".refl") continue;
+        const fs::path stem1 = p.stem();             // *.gbuffer.frag
+        if (stem1.extension() != ".frag") continue;
+        const fs::path stem2 = stem1.stem();          // *.gbuffer
+        if (stem2.extension().string() != ".gbuffer") continue;
+
+        RHI::ShaderReflection fragRefl;
+        if (!RHI::ShaderReflectionIO::LoadFromFile(p, fragRefl)) continue;
+        if (fragRefl.shadingModel.empty()) continue;   // builtin shader, not a .saglsl type
+
+        // Skip already-registered types (builtin or previously scanned).
+        if (GetType(fragRefl.shadingModel)) continue;
+
+        const std::string fragStem = stem2.string();  // e.g. "simple_albedo.gbuffer"
+        const std::string vertName = fragRefl.vertShader.empty()
+                                         ? "deferred_geometry"
+                                         : fragRefl.vertShader;
+
+        SA_LOG_INFO("MaterialManager: auto-registering '{}' from .refl",
+                    fragRefl.shadingModel);
+        RegisterTypeFromShaders({fragRefl.shadingModel, vertName, fragStem}, ctx);
+    }
+}
+
 MaterialType* MaterialManager::GetType(const std::string& name) const {
     auto it = m_types.find(name);
     return it != m_types.end() ? it->second.get() : nullptr;
@@ -131,9 +179,9 @@ MaterialManager::LoadMaterial(const AssetID& id,
 
     // Resolve .samat path from cook cache.
     Resource::VFS::SetCookCacheDir(cookCacheDir);
-    auto pathOpt = Resource::VFS::ResolveCookedPath(id, ".samat");
+    auto pathOpt = Resource::VFS::ResolveCookedPath(id, ".samatc");
     if (!pathOpt) {
-        SA_LOG_ERROR("MaterialManager::LoadMaterial — .samat not found for {}", id.ToString());
+        SA_LOG_ERROR("MaterialManager::LoadMaterial — .samatc not found for {}", id.ToString());
         return nullptr;
     }
 
@@ -158,27 +206,37 @@ MaterialManager::LoadMaterial(const AssetID& id,
     auto inst = CreateInstance(typeName);
     if (!inst) return nullptr;
 
-    // ── Apply scalar params ───────────────────────────────────────────────────
+    // ── Apply scalar params (type-driven from reflection metadata) ────────────
     if (root.contains("params")) {
         const auto& p = root["params"];
+        const MaterialType* mtype = GetType(typeName);
+        if (mtype) {
+            for (const auto& param : mtype->params) {
+                if (!p.contains(param.name)) continue;
+                const auto& val = p[param.name];
 
-        if (p.contains("baseColorFactor")) {
-            const auto& a = p["baseColorFactor"];
-            glm::vec4 v{a[0], a[1], a[2], a[3]};
-            inst->SetParam<glm::vec4>("baseColorFactor", v);
-        }
-        if (p.contains("roughnessFactor"))
-            inst->SetParam<float>("roughnessFactor", p["roughnessFactor"].get<float>());
-        if (p.contains("metallicFactor"))
-            inst->SetParam<float>("metallicFactor",  p["metallicFactor"].get<float>());
-        if (p.contains("normalScale"))
-            inst->SetParam<float>("normalScale",     p["normalScale"].get<float>());
-        if (p.contains("occlusionStrength"))
-            inst->SetParam<float>("occlusionStrength", p["occlusionStrength"].get<float>());
-        if (p.contains("emissiveFactor")) {
-            const auto& a = p["emissiveFactor"];
-            glm::vec3 v{a[0], a[1], a[2]};
-            inst->SetParam<glm::vec3>("emissiveFactor", v);
+                // Dispatch on uiType; fall back to member size for Inferred.
+                using T = RHI::ParamUIType;
+                const T uit = param.uiType;
+                const bool is4  = (uit == T::Color4 || uit == T::Vec4) ||
+                                  (uit == T::Inferred && param.size == 16);
+                const bool is3  = (uit == T::Color3 || uit == T::Vec3) ||
+                                  (uit == T::Inferred && param.size == 12);
+                const bool is2  = (uit == T::Vec2) ||
+                                  (uit == T::Inferred && param.size == 8);
+
+                if (is4)
+                    inst->SetParam<glm::vec4>(param.name,
+                        {val[0], val[1], val[2], val[3]});
+                else if (is3)
+                    inst->SetParam<glm::vec3>(param.name,
+                        {val[0], val[1], val[2]});
+                else if (is2)
+                    inst->SetParam<glm::vec2>(param.name,
+                        {val[0], val[1]});
+                else
+                    inst->SetParam<float>(param.name, val.get<float>());
+            }
         }
     }
 

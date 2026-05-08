@@ -118,6 +118,9 @@ public:
     // User features always execute after the built-in skybox and geometry passes.
     void AddFeature(std::unique_ptr<RenderFeature> feature);
 
+    // Access the MaterialManager used by this renderer (e.g. for editor drawers).
+    [[nodiscard]] MaterialManager* GetMaterialManager() const { return m_matMgr; }
+
     // Bind a DebugDraw source for the per-frame line overlay pass.
     // Call after Init(). The overlay is a no-op when dd is null or has no lines.
     void SetDebugDraw(DebugDraw* dd) { m_debugDraw = dd; }
@@ -139,8 +142,8 @@ public:
     //   queried for lights and draw items.
     //
     // Overload 2 — camera from scene (game runtime path)
-    //   Extracts the first entity tagged ActiveCameraTag from the Scene and
-    //   derives CameraData from its CameraComponent + WorldTransformComponent.
+    //   Extracts the highest-priority CameraComponent entity from the Scene
+    //   and derives CameraData from its WorldTransformComponent.
     //   Equivalent to calling Overload 1 with ExtractCamera(scene, w, h).
     //
     // Both overloads execute one complete frame:
@@ -159,7 +162,7 @@ public:
     void RenderFrame(Scene& scene, uint32_t w, uint32_t h);
 
     // Extract CameraData from the Scene's active camera entity.
-    // Returns identity matrices when no ActiveCameraTag entity is found.
+    // Returns identity matrices when no CameraComponent entity is found.
     [[nodiscard]] static CameraData ExtractCamera(const Scene& scene,
                                                    uint32_t w, uint32_t h);
 

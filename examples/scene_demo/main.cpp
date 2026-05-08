@@ -2,7 +2,7 @@
 //
 // Stages exercised:
 //   1. ECS unit tests — entity creation, hierarchy, transform propagation,
-//      PBRSurfaceComponent / MaterialParamComponent, SceneSerializer round-trip
+//      MaterialOverrideComponent, SceneSerializer round-trip
 //   2. Full render — loads assets/scenes/default.sascene, cooks assets via
 //      the pre-build CookAssets target, binds meshes + default PBR materials,
 //      and renders with SceneRenderer.
@@ -156,28 +156,26 @@ static void RunUnitTests(const fs::path& tmpDir) {
         CHECK(!h || h->parent == entt::null, "child orphaned");
     }
 
-    // PBRSurfaceComponent and MaterialParamComponent
+    // MaterialOverrideComponent
     {
         Scene s("T");
         auto e = s.CreateEntity("M");
-        auto& pbr = s.Registry().emplace<PBRSurfaceComponent>(e);
-        pbr.roughness = 0.1f;
-        pbr.metallic  = 1.0f;
-        CHECK(s.Registry().try_get<PBRSurfaceComponent>(e) != nullptr,
-              "PBRSurfaceComponent attached");
+        auto& mo = s.Registry().emplace<MaterialOverrideComponent>(e);
+        mo.scalars["roughnessFactor"] = 0.1f;
+        mo.scalars["metallicFactor"]  = 1.0f;
+        CHECK(s.Registry().try_get<MaterialOverrideComponent>(e) != nullptr,
+              "MaterialOverrideComponent attached");
 
-        auto& param = s.Registry().emplace<MaterialParamComponent>(e);
-        param.scalars["customBlend"] = 0.75f;
-        const auto& got = std::get<float>(param.scalars.at("customBlend"));
-        CHECK(std::abs(got - 0.75f) < 1e-6f, "MaterialParamComponent scalar round-trip");
+        mo.scalars["customBlend"] = 0.75f;
+        const auto& got = std::get<float>(mo.scalars.at("customBlend"));
+        CHECK(std::abs(got - 0.75f) < 1e-6f, "MaterialOverrideComponent scalar round-trip");
     }
 
     // SceneSerializer round-trip
     {
         Scene src("Saved");
         auto cam = src.CreateEntity("Camera");
-        src.Registry().emplace<CameraComponent>(cam, CameraComponent{glm::radians(60.f), 0.1f, 500.f});
-        src.Registry().emplace<ActiveCameraTag>(cam);
+        src.Registry().emplace<CameraComponent>(cam, CameraComponent{glm::radians(60.f), 0.1f, 500.f, 1});
 
         auto mesh = src.CreateEntity("Mesh");
         StaticMeshComponent smc;

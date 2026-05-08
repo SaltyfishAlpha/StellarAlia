@@ -2,6 +2,9 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
+
+#include <entt/entt.hpp>
 
 namespace StellarAlia {
 
@@ -27,6 +30,14 @@ struct SceneSerializer {
     // Returns false and leaves 'scene' unchanged on failure.
     [[nodiscard]] static bool LoadFromFile(Scene&                       scene,
                                            const std::filesystem::path& path);
+
+    // Like LoadFromFile but does NOT overwrite WorldSettings or the scene name.
+    // Returns the newly added root entities (those with no parent), or empty on failure.
+    // Use this to instantiate entity templates from a .sascene that contains a single
+    // prototype entity, without disturbing the current scene's global settings.
+    [[nodiscard]] static std::vector<entt::entity> SpawnFromTemplate(
+        Scene&                       scene,
+        const std::filesystem::path& path);
 };
 
 } // namespace StellarAlia

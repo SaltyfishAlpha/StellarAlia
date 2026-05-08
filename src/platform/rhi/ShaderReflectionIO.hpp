@@ -16,7 +16,7 @@ namespace StellarAlia::RHI {
 //
 // File layout (little-endian):
 //   magic              uint32_t  0x4C464552  ('REFL')
-//   version            uint32_t  3
+//   version            uint32_t  5
 //   pushConstantSize   uint32_t
 //   pushConstantStages uint32_t
 //   bindingCount       uint32_t
@@ -31,16 +31,28 @@ namespace StellarAlia::RHI {
 //     members[M]:
 //       offset         uint32_t
 //       size           uint32_t
+//       uiType         uint8_t   (ParamUIType; v4+)
+//       minValue       float     (v4+)
+//       maxValue       float     (v4+)
+//       defaultValue   float[4]  (v4+)
 //       nameLen        uint32_t
 //       name           char[nameLen]
+//       displayNameLen uint32_t  (v4+)
+//       displayName    char[displayNameLen]  (v4+)
 //     nameLen          uint32_t
 //     name             char[nameLen]  (no null terminator stored)
+//     displayNameLen   uint32_t  (v4+)
+//     displayName      char[displayNameLen]  (v4+)
+//   shadingModelLen    uint32_t  (v5+; 0 for builtin shaders)
+//   shadingModel       char[shadingModelLen]  (v5+; e.g. "SimpleAlbedo")
+//   vertShaderLen      uint32_t  (v5+; 0 if default)
+//   vertShader         char[vertShaderLen]    (v5+; e.g. "deferred_geometry")
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace ShaderReflectionIO {
 
 static constexpr uint32_t kMagic   = 0x4C464552u; // 'REFL'
-static constexpr uint32_t kVersion = 3u;
+static constexpr uint32_t kVersion = 5u;
 
 // Serialize reflection to a byte buffer.
 [[nodiscard]] std::vector<uint8_t> Serialize(const ShaderReflection& refl);

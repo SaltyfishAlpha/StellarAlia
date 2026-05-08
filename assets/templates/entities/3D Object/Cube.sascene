@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "name": "Cube",
+  "entities": [
+    {
+      "id": 0,
+      "parent": -1,
+      "tag": "Cube",
+      "transform": {
+        "position": [0.0, 0.0, 0.0],
+        "rotation": [1.0, 0.0, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "staticMesh": { "mesh": "c0be0000-0000-4000-0000-000000000001" },
+      "meshRenderer": { "castShadow": true, "receiveShadow": true, "materials": [] }
+    }
+  ]
+}

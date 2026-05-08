@@ -348,3 +348,33 @@ else()
                     "https://github.com/KhronosGroup/SPIRV-Cross.git third_party/SPIRV-Cross")
 endif()
 # Target available: spirv-cross-core
+
+# ============================================================================
+# nativefiledialog-extended — native file open/save dialogs (cross-platform)
+# Preferred: git submodule at third_party/nfd/
+# ============================================================================
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/nfd/CMakeLists.txt)
+    set(NFD_BUILD_TESTS     OFF CACHE BOOL "" FORCE)
+    set(NFD_INSTALL         OFF CACHE BOOL "" FORCE)
+    add_subdirectory(nfd)
+    message(STATUS "nfd: Using local submodule at third_party/nfd")
+else()
+    message(WARNING "nfd submodule not found at third_party/nfd/ — import dialogs will fall back to text input")
+endif()
+# Target available: nfd
+
+# ============================================================================
+# ImGuizmo — interactive transform gizmo widget built on ImGui
+# Preferred: git submodule at third_party/ImGuizmo/
+# ============================================================================
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/ImGuizmo/CMakeLists.txt)
+    set(IMGUIZMO_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
+    add_subdirectory(ImGuizmo)
+    # ImGuizmo's CMakeLists.txt only links imgui when building its own example;
+    # link our existing imgui target so ImGuizmo.cpp can find imgui headers.
+    target_link_libraries(imguizmo PUBLIC imgui)
+    message(STATUS "ImGuizmo: Using local submodule at third_party/ImGuizmo")
+else()
+    message(WARNING "ImGuizmo not found at third_party/ImGuizmo/ — transform gizmo unavailable")
+endif()
+# Target available: imguizmo (alias: imguizmo::imguizmo)

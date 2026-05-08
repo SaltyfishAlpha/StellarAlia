@@ -61,8 +61,19 @@ public:
     // This is the preferred path from RenderFeature::OnInit.
     bool RegisterTypeFromShaders(const MaterialTypeDesc& desc, const FeatureInitContext& ctx);
 
+    // Scan shaderDir for *.gbuffer.frag.refl files that carry a shadingModel field
+    // (written by ShaderCookTool for .saglsl-compiled shaders) and auto-register
+    // each as a MaterialType. Already-registered types are silently skipped.
+    // Call once from GBufferFeature::OnInit after registering builtin types.
+    void RegisterTypesFromShaderDir(const std::string& shaderDir, const FeatureInitContext& ctx);
+
     // Find a registered type by name. Returns nullptr if not found.
     [[nodiscard]] MaterialType* GetType(const std::string& name) const;
+
+    // Access the full type registry (read-only). Used by editor drawers to
+    // enumerate all params without hardcoding material type names.
+    [[nodiscard]] const std::unordered_map<std::string, std::unique_ptr<MaterialType>>&
+    GetTypes() const { return m_types; }
 
     // Create a MaterialInstance from the named type.
     // Lifetime is managed by the caller.

@@ -4,7 +4,10 @@
 // information via SPIRV-Cross, and writes a binary .refl sidecar understood by
 // StellarAlia::RHI::ShaderReflectionIO.
 //
-// Usage:  ShaderReflectTool --spv <input.spv> --out <output.refl>
+// Usage:  ShaderReflectTool --spv <input.spv> --out <output.refl> [--glsl <source.glsl>]
+//
+// When --glsl is provided, the tool also parses GLSL @Type("Display Name") = defaults
+// annotations from source comments and embeds them in the .refl (version 4).
 // Stage is inferred from the SPIR-V execution model embedded in the binary.
 
 #include "core/logs/Log.hpp"
@@ -16,16 +19,149 @@
 #include <spirv_cross.hpp>
 #include <spirv_common.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace fs = std::filesystem;
 using namespace StellarAlia;
 using namespace StellarAlia::RHI;
+
+// ── GLSL annotation parser ────────────────────────────────────────────────────
+
+namespace {
+
+struct GLSLAnnotation {
+    ParamUIType uiType          = ParamUIType::Inferred;
+    std::string displayName;
+    float       minValue        = 0.f;
+    float       maxValue        = 1.f;
+    float       defaultValue[4] = {};
+    bool        isTexture       = false;
+};
+
+// Parse "@Type(...) = defaults" from a GLSL comment string.
+// Returns true and fills `out` if a recognised annotation is found.
+static bool ParseAnnotation(const std::string& comment, GLSLAnnotation& out) {
+    const size_t at = comment.find('@');
+    if (at == std::string::npos) return false;
+
+    size_t i = at + 1;
+    const size_t nameStart = i;
+    while (i < comment.size() && (std::isalpha((unsigned char)comment[i]) ||
+                                   std::isdigit((unsigned char)comment[i])))
+        ++i;
+    const std::string typeName = comment.substr(nameStart, i - nameStart);
+    if (i >= comment.size() || comment[i] != '(') return false;
+    ++i; // skip '('
+
+    ParamUIType uiType = ParamUIType::Inferred;
+    bool isTexture = false;
+    if      (typeName == "Float")   uiType = ParamUIType::Float;
+    else if (typeName == "Vec2")    uiType = ParamUIType::Vec2;
+    else if (typeName == "Vec3")    uiType = ParamUIType::Vec3;
+    else if (typeName == "Vec4")    uiType = ParamUIType::Vec4;
+    else if (typeName == "Color3")  uiType = ParamUIType::Color3;
+    else if (typeName == "Color4")  uiType = ParamUIType::Color4;
+    else if (typeName == "Range")   uiType = ParamUIType::Range;
+    else if (typeName == "Texture") isTexture = true;
+    else return false;
+
+    out.uiType    = uiType;
+    out.isTexture = isTexture;
+
+    float minV = 0.f, maxV = 1.f;
+    if (uiType == ParamUIType::Range) {
+        char* end;
+        minV = std::strtof(comment.c_str() + i, &end);
+        i    = static_cast<size_t>(end - comment.c_str());
+        while (i < comment.size() && (comment[i] == ',' || comment[i] == ' ')) ++i;
+        maxV = std::strtof(comment.c_str() + i, &end);
+        i    = static_cast<size_t>(end - comment.c_str());
+        while (i < comment.size() && (comment[i] == ',' || comment[i] == ' ')) ++i;
+    }
+    out.minValue = minV;
+    out.maxValue = maxV;
+
+    // Quoted display name
+    const size_t q1 = comment.find('"', i);
+    if (q1 != std::string::npos) {
+        const size_t q2 = comment.find('"', q1 + 1);
+        if (q2 != std::string::npos) {
+            out.displayName = comment.substr(q1 + 1, q2 - q1 - 1);
+            i = q2 + 1;
+        }
+    }
+
+    // Default values after '='
+    const size_t eq = comment.find('=', i);
+    if (eq != std::string::npos) {
+        size_t j = eq + 1;
+        while (j < comment.size() && (comment[j] == ' ' || comment[j] == '\t')) ++j;
+        int di = 0;
+        while (j < comment.size() && di < 4) {
+            char* end;
+            out.defaultValue[di++] = std::strtof(comment.c_str() + j, &end);
+            if (end == comment.c_str() + j) break;
+            j = static_cast<size_t>(end - comment.c_str());
+            while (j < comment.size() && (comment[j] == ',' || comment[j] == ' ')) ++j;
+        }
+    }
+
+    return true;
+}
+
+// Extract the last identifier before ';' (handles arrays like float arr[4]).
+static std::string ExtractVarName(const std::string& decl) {
+    size_t end = decl.find(';');
+    if (end == std::string::npos) end = decl.size();
+    while (end > 0 && std::isspace((unsigned char)decl[end - 1])) --end;
+    // Skip array dimension
+    if (end > 0 && decl[end - 1] == ']') {
+        const size_t lb = decl.rfind('[', end);
+        if (lb != std::string::npos) end = lb;
+        while (end > 0 && std::isspace((unsigned char)decl[end - 1])) --end;
+    }
+    size_t start = end;
+    while (start > 0 && (std::isalnum((unsigned char)decl[start - 1]) ||
+                         decl[start - 1] == '_'))
+        --start;
+    if (start >= end) return {};
+    return decl.substr(start, end - start);
+}
+
+// Parse a GLSL source file and return a map of variable name → annotation.
+static std::unordered_map<std::string, GLSLAnnotation>
+ParseGLSLAnnotations(const fs::path& path) {
+    std::unordered_map<std::string, GLSLAnnotation> result;
+    std::ifstream f(path);
+    if (!f) return result;
+
+    std::string line;
+    while (std::getline(f, line)) {
+        const size_t commentPos = line.find("//");
+        if (commentPos == std::string::npos) continue;
+        const std::string comment = line.substr(commentPos + 2);
+        if (comment.find('@') == std::string::npos) continue;
+
+        GLSLAnnotation ann;
+        if (!ParseAnnotation(comment, ann)) continue;
+
+        const std::string varName = ExtractVarName(line.substr(0, commentPos));
+        if (varName.empty()) continue;
+        result[varName] = ann;
+    }
+    return result;
+}
+
+} // anonymous namespace
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -60,15 +196,16 @@ static RHIShaderStage StageFromModel(spv::ExecutionModel model) {
 int main(int argc, char** argv) {
     Core::Log::Initialize();
 
-    fs::path spvPath, outPath;
+    fs::path spvPath, outPath, glslPath;
     for (int i = 1; i < argc - 1; ++i) {
         const std::string_view arg(argv[i]);
-        if      (arg == "--spv") spvPath = argv[++i];
-        else if (arg == "--out") outPath = argv[++i];
+        if      (arg == "--spv")  spvPath  = argv[++i];
+        else if (arg == "--out")  outPath  = argv[++i];
+        else if (arg == "--glsl") glslPath = argv[++i];
     }
 
     if (spvPath.empty() || outPath.empty()) {
-        SA_LOG_ERROR("Usage: ShaderReflectTool --spv <file.spv> --out <file.refl>");
+        SA_LOG_ERROR("Usage: ShaderReflectTool --spv <file.spv> --out <file.refl> [--glsl <source.glsl>]");
         Core::Log::Shutdown();
         return 1;
     }
@@ -178,6 +315,33 @@ int main(int argc, char** argv) {
             compiler.get_declared_struct_size(baseType));
         refl.pushConstantStages = stage;
         break; // one push-constant block per stage
+    }
+
+    // ── Apply GLSL annotations ────────────────────────────────────────────────
+    if (!glslPath.empty()) {
+        const auto annotations = ParseGLSLAnnotations(glslPath);
+        for (auto& bd : refl.bindings) {
+            // Texture / sampler display name
+            auto texIt = annotations.find(bd.name);
+            if (texIt != annotations.end() && texIt->second.isTexture)
+                bd.displayName = texIt->second.displayName;
+
+            // UBO member metadata
+            for (auto& md : bd.members) {
+                auto it = annotations.find(md.name);
+                if (it == annotations.end()) continue;
+                const GLSLAnnotation& ann = it->second;
+                if (ann.isTexture) continue;
+                md.uiType      = ann.uiType;
+                md.displayName = ann.displayName;
+                md.minValue    = ann.minValue;
+                md.maxValue    = ann.maxValue;
+                std::copy(std::begin(ann.defaultValue), std::end(ann.defaultValue),
+                          std::begin(md.defaultValue));
+            }
+        }
+        SA_LOG_INFO("ShaderReflectTool: applied {} annotations from '{}'",
+                    annotations.size(), glslPath.filename().string());
     }
 
     // ── Write .refl ───────────────────────────────────────────────────────────

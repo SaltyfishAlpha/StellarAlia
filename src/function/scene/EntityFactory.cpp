@@ -101,14 +101,12 @@ entt::entity EntityFactory::CreateAreaLight(
         reg.emplace<MeshRendererComponent>(e, MeshRendererComponent{
             {}, /*castShadow=*/false, /*receiveShadow=*/false});
 
-        reg.emplace<PBRSurfaceComponent>(e, PBRSurfaceComponent{
-            /*baseColor=*/{0.f, 0.f, 0.f, 1.f},
-            /*roughness=*/1.f,
-            /*metallic=*/0.f});
-
-        MaterialParamComponent mp;
-        mp.scalars["emissiveFactor"] = color * emissiveScale;
-        reg.emplace<MaterialParamComponent>(e, std::move(mp));
+        MaterialOverrideComponent mo;
+        mo.scalars["baseColorFactor"] = glm::vec4{0.f, 0.f, 0.f, 1.f};
+        mo.scalars["roughnessFactor"] = 1.f;
+        mo.scalars["metallicFactor"]  = 0.f;
+        mo.scalars["emissiveFactor"]  = color * emissiveScale;
+        reg.emplace<MaterialOverrideComponent>(e, std::move(mo));
     }
 
     return e;
@@ -120,13 +118,11 @@ entt::entity EntityFactory::CreateCamera(
     Scene& scene, std::string_view name,
     float fovY, float nearPlane, float farPlane,
     glm::vec3 position, glm::quat rotation,
-    bool makeActive)
+    int priority)
 {
     auto e = MakeBase(scene, name, position, rotation, {1.f, 1.f, 1.f});
     scene.Registry().emplace<CameraComponent>(e,
-        CameraComponent{fovY, nearPlane, farPlane});
-    if (makeActive)
-        scene.Registry().emplace<ActiveCameraTag>(e);
+        CameraComponent{fovY, nearPlane, farPlane, priority});
     return e;
 }
 

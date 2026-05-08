@@ -87,9 +87,10 @@ function(sa_compile_builtin_shaders)
             add_custom_command(
                 OUTPUT  "${_refl}"
                 COMMAND "$<TARGET_FILE:ShaderReflectTool>"
-                        --spv "${_spv}"
-                        --out "${_refl}"
-                DEPENDS "${_spv}" ShaderReflectTool
+                        --spv  "${_spv}"
+                        --out  "${_refl}"
+                        --glsl "${_src}"
+                DEPENDS "${_spv}" "${_src}" ShaderReflectTool
                 COMMENT "Reflecting builtin shader: ${_stem}.${_stage}.spv → .refl"
                 VERBATIM
             )
@@ -130,6 +131,101 @@ configure_file(
     "${CMAKE_BINARY_DIR}/generated/AssetsPath.hpp"
     @ONLY
 )
+
+# ── 4. Compile demo-specific shaders ─────────────────────────────────────────
+# sa_compile_demo_shaders(TARGET <name> SRC_DIR <abs_path> OUT_DIR <abs_path>)
+#
+# Compiles all .vert/.frag/.comp files in SRC_DIR to SPV + .refl in OUT_DIR.
+# .lighting.glsl and other .glsl files are NOT compiled (they are evaluated
+# includes only).  Caller is responsible for register_lighting_evaluator() and
+# for wiring the returned target into the executable's add_dependencies().
+#
+# Include search paths match the builtin shader pipeline so demo shaders can
+# use common.glsl, frame_uniforms.glsl, and the generated shading_model_ids.glsl.
+function(sa_compile_demo_shaders)
+    cmake_parse_arguments(ARG "" "TARGET;SRC_DIR;OUT_DIR" "" ${ARGN})
+
+    if(NOT GLSLC_EXECUTABLE)
+        message(STATUS "sa_compile_demo_shaders: glslc not found — skipping ${ARG_TARGET}")
+        return()
+    endif()
+    if(NOT ARG_TARGET OR NOT ARG_SRC_DIR OR NOT ARG_OUT_DIR)
+        message(FATAL_ERROR "sa_compile_demo_shaders: TARGET, SRC_DIR, and OUT_DIR are required")
+    endif()
+
+    # Generated GLSL written at configure time by generate_shading_dispatch().
+    set(_gen_glsl
+        "${CMAKE_BINARY_DIR}/generated/shaders/shading_dispatch.glsl"
+        "${CMAKE_BINARY_DIR}/generated/shaders/shading_model_ids.glsl"
+    )
+
+    file(GLOB _shaders
+        "${ARG_SRC_DIR}/*.vert"
+        "${ARG_SRC_DIR}/*.frag"
+        "${ARG_SRC_DIR}/*.comp"
+    )
+    if(NOT _shaders)
+        message(STATUS "sa_compile_demo_shaders: no shaders found in ${ARG_SRC_DIR}")
+        return()
+    endif()
+
+    file(MAKE_DIRECTORY "${ARG_OUT_DIR}")
+
+    set(_outputs "")
+    foreach(_src ${_shaders})
+        get_filename_component(_fname "${_src}" NAME)
+        get_filename_component(_stem  "${_src}" NAME_WLE)
+        get_filename_component(_ext   "${_src}" LAST_EXT)
+
+        if(_ext STREQUAL ".vert")
+            set(_stage vert)
+        elseif(_ext STREQUAL ".frag")
+            set(_stage frag)
+        elseif(_ext STREQUAL ".comp")
+            set(_stage comp)
+        else()
+            continue()
+        endif()
+
+        set(_spv "${ARG_OUT_DIR}/${_stem}.${_stage}.spv")
+        add_custom_command(
+            OUTPUT  "${_spv}"
+            COMMAND "${GLSLC_EXECUTABLE}"
+                    -fshader-stage=${_stage}
+                    -I${CMAKE_SOURCE_DIR}/assets/shaders
+                    -I${CMAKE_BINARY_DIR}/generated/shaders
+                    "${_src}"
+                    -o "${_spv}"
+            DEPENDS "${_src}"
+                    ${_gen_glsl}
+            COMMENT "Compiling demo shader: ${_fname}"
+            VERBATIM
+        )
+        list(APPEND _outputs "${_spv}")
+
+        if(TARGET ShaderReflectTool)
+            set(_refl "${ARG_OUT_DIR}/${_stem}.${_stage}.refl")
+            add_custom_command(
+                OUTPUT  "${_refl}"
+                COMMAND "$<TARGET_FILE:ShaderReflectTool>"
+                        --spv  "${_spv}"
+                        --out  "${_refl}"
+                        --glsl "${_src}"
+                DEPENDS "${_spv}" "${_src}" ShaderReflectTool
+                COMMENT "Reflecting demo shader: ${_stem}.${_stage}.spv → .refl"
+                VERBATIM
+            )
+            list(APPEND _outputs "${_refl}")
+        endif()
+    endforeach()
+
+    if(_outputs)
+        add_custom_target(${ARG_TARGET} ALL
+            DEPENDS ${_outputs}
+            COMMENT "Building demo shaders: ${ARG_TARGET}"
+        )
+    endif()
+endfunction()
 
 # ── Entry point — call from root CMakeLists.txt ───────────────────────────────
 function(setup_assets)

@@ -33,10 +33,12 @@
 //                              "width": 2.0, "height": 3.0, "twoSided": false },
 //       "skybox": { "cubemap": "uuid..." },
 //       "ibl":    { "irradiance": "uuid...", "prefilteredEnv": "uuid...", "brdfLut": "uuid..." },
-//       "pbrSurface":     { "baseColor": [1,1,1,1], "roughness": 0.5, "metallic": 0.0,
-//                           "albedoMap": "uuid...", "normalMap": "uuid..." },
-//       "materialParams": { "scalars": { "baseColorFactor": [1,0.5,0,1] },
-//                           "textures": { "t_BaseColor": "uuid..." } },
+//       "materialOverride": {
+//           "materialAsset": "uuid...",          // optional: replaces mesh-default material
+//           "scalars":  { "roughnessFactor": 0.3, "emissiveFactor": [1,0.5,0] },
+//           "textures": { "t_BaseColor": "uuid..." }
+//       },
+//       // (Backward compat: "pbrSurface" + "materialParams" are migrated on load)
 //       "staticGeometry": true
 //     }
 //   ]
@@ -48,6 +50,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <fstream>
 #include <type_traits>
 #include <unordered_map>
@@ -144,13 +147,12 @@ bool SceneSerializer::SaveToFile(const Scene& scene,
         // Camera
         if (const auto* c = reg.try_get<CameraComponent>(e)) {
             ej["camera"] = {
-                {"fovY", c->fovY},
-                {"near", c->nearPlane},
-                {"far",  c->farPlane}
+                {"fovY",     c->fovY},
+                {"near",     c->nearPlane},
+                {"far",      c->farPlane},
+                {"priority", c->priority}
             };
         }
-        if (reg.all_of<ActiveCameraTag>(e))
-            ej["activeCamera"] = true;
 
         // Static mesh
         if (const auto* m = reg.try_get<StaticMeshComponent>(e))
@@ -241,22 +243,13 @@ bool SceneSerializer::SaveToFile(const Scene& scene,
             };
         }
 
-        // PBRSurfaceComponent
-        if (const auto* pb = reg.try_get<PBRSurfaceComponent>(e)) {
-            json pbj;
-            pbj["baseColor"] = Vec4ToJson(pb->baseColor);
-            pbj["roughness"] = pb->roughness;
-            pbj["metallic"]  = pb->metallic;
-            if (pb->albedoMap.IsValid()) pbj["albedoMap"] = AssetToStr(pb->albedoMap);
-            if (pb->normalMap.IsValid()) pbj["normalMap"] = AssetToStr(pb->normalMap);
-            ej["pbrSurface"] = std::move(pbj);
-        }
-
-        // MaterialParamComponent
-        if (const auto* mp = reg.try_get<MaterialParamComponent>(e)) {
-            json mpj;
+        // MaterialOverrideComponent
+        if (const auto* mo = reg.try_get<MaterialOverrideComponent>(e)) {
+            json moj;
+            if (mo->materialAsset.IsValid())
+                moj["materialAsset"] = AssetToStr(mo->materialAsset);
             json scalarsJ = json::object();
-            for (const auto& [name, val] : mp->scalars) {
+            for (const auto& [name, val] : mo->scalars) {
                 std::visit([&](const auto& v) {
                     using T = std::decay_t<decltype(v)>;
                     if constexpr (std::is_same_v<T, float>)
@@ -269,12 +262,12 @@ bool SceneSerializer::SaveToFile(const Scene& scene,
                         scalarsJ[name] = { v.x, v.y, v.z, v.w };
                 }, val);
             }
-            mpj["scalars"] = std::move(scalarsJ);
+            moj["scalars"] = std::move(scalarsJ);
             json texturesJ = json::object();
-            for (const auto& [name, id] : mp->textures)
+            for (const auto& [name, id] : mo->textures)
                 if (id.IsValid()) texturesJ[name] = AssetToStr(id);
-            mpj["textures"] = std::move(texturesJ);
-            ej["materialParams"] = std::move(mpj);
+            moj["textures"] = std::move(texturesJ);
+            ej["materialOverride"] = std::move(moj);
         }
 
         if (reg.all_of<StaticGeometryTag>(e))
@@ -377,12 +370,14 @@ bool SceneSerializer::LoadFromFile(Scene& scene,
             const auto& cj = ej["camera"];
             CameraComponent c;
             c.fovY      = cj.value("fovY", c.fovY);
-            c.nearPlane = cj.value("near", c.nearPlane);
-            c.farPlane  = cj.value("far",  c.farPlane);
+            c.nearPlane = cj.value("near",     c.nearPlane);
+            c.farPlane  = cj.value("far",      c.farPlane);
+            c.priority  = cj.value("priority", c.priority);
+            // Backward compat: old scenes used "activeCamera":true at entity level.
+            if (ej.value("activeCamera", false) && c.priority == 0)
+                c.priority = 1;
             reg.emplace<CameraComponent>(e, c);
         }
-        if (ej.value("activeCamera", false))
-            reg.emplace<ActiveCameraTag>(e);
 
         // Static mesh
         if (ej.contains("staticMesh")) {
@@ -511,41 +506,67 @@ bool SceneSerializer::LoadFromFile(Scene& scene,
             reg.emplace<AreaLightComponent>(e, l);
         }
 
-        // PBRSurfaceComponent
-        if (ej.contains("pbrSurface")) {
-            const auto& pbj = ej["pbrSurface"];
-            PBRSurfaceComponent pb;
-            if (pbj.contains("baseColor")) pb.baseColor = JsonToVec4(pbj["baseColor"]);
-            pb.roughness = pbj.value("roughness", pb.roughness);
-            pb.metallic  = pbj.value("metallic",  pb.metallic);
-            if (pbj.contains("albedoMap")) pb.albedoMap = StrToAsset(pbj["albedoMap"].get<std::string>());
-            if (pbj.contains("normalMap")) pb.normalMap = StrToAsset(pbj["normalMap"].get<std::string>());
-            reg.emplace<PBRSurfaceComponent>(e, pb);
-        }
-
-        // MaterialParamComponent
-        if (ej.contains("materialParams")) {
-            const auto& mpj = ej["materialParams"];
-            MaterialParamComponent mp;
-            if (mpj.contains("scalars")) {
-                for (const auto& [name, val] : mpj["scalars"].items()) {
+        // MaterialOverrideComponent (new format)
+        if (ej.contains("materialOverride")) {
+            const auto& moj = ej["materialOverride"];
+            MaterialOverrideComponent mo;
+            if (moj.contains("materialAsset"))
+                mo.materialAsset = StrToAsset(moj["materialAsset"].get<std::string>());
+            if (moj.contains("scalars")) {
+                for (const auto& [name, val] : moj["scalars"].items()) {
                     if (val.is_number())
-                        mp.scalars[name] = val.get<float>();
+                        mo.scalars[name] = val.get<float>();
                     else if (val.is_array()) {
                         const size_t n = val.size();
-                        if      (n == 2) mp.scalars[name] = glm::vec2{val[0].get<float>(), val[1].get<float>()};
-                        else if (n == 3) mp.scalars[name] = JsonToVec3(val);
-                        else if (n == 4) mp.scalars[name] = JsonToVec4(val);
+                        if      (n == 2) mo.scalars[name] = glm::vec2{val[0].get<float>(), val[1].get<float>()};
+                        else if (n == 3) mo.scalars[name] = JsonToVec3(val);
+                        else if (n == 4) mo.scalars[name] = JsonToVec4(val);
                     }
                 }
             }
-            if (mpj.contains("textures")) {
-                for (const auto& [name, val] : mpj["textures"].items()) {
+            if (moj.contains("textures")) {
+                for (const auto& [name, val] : moj["textures"].items()) {
                     const AssetID id = StrToAsset(val.get<std::string>());
-                    if (id.IsValid()) mp.textures[name] = id;
+                    if (id.IsValid()) mo.textures[name] = id;
                 }
             }
-            reg.emplace<MaterialParamComponent>(e, std::move(mp));
+            reg.emplace<MaterialOverrideComponent>(e, std::move(mo));
+        }
+        // Backward compat: old pbrSurface / materialParams → MaterialOverrideComponent
+        else if (ej.contains("pbrSurface") || ej.contains("materialParams")) {
+            auto& mo = reg.emplace_or_replace<MaterialOverrideComponent>(e);
+            if (ej.contains("pbrSurface")) {
+                const auto& pbj = ej["pbrSurface"];
+                if (pbj.contains("baseColor"))
+                    mo.scalars["baseColorFactor"] = JsonToVec4(pbj["baseColor"]);
+                mo.scalars["roughnessFactor"] = pbj.value("roughness", 0.5f);
+                mo.scalars["metallicFactor"]  = pbj.value("metallic",  0.f);
+                if (pbj.contains("albedoMap"))
+                    mo.textures["t_BaseColor"] = StrToAsset(pbj["albedoMap"].get<std::string>());
+                if (pbj.contains("normalMap"))
+                    mo.textures["t_Normal"]    = StrToAsset(pbj["normalMap"].get<std::string>());
+            }
+            if (ej.contains("materialParams")) {
+                const auto& mpj = ej["materialParams"];
+                if (mpj.contains("scalars")) {
+                    for (const auto& [name, val] : mpj["scalars"].items()) {
+                        if (val.is_number())
+                            mo.scalars[name] = val.get<float>();
+                        else if (val.is_array()) {
+                            const size_t n = val.size();
+                            if      (n == 2) mo.scalars[name] = glm::vec2{val[0].get<float>(), val[1].get<float>()};
+                            else if (n == 3) mo.scalars[name] = JsonToVec3(val);
+                            else if (n == 4) mo.scalars[name] = JsonToVec4(val);
+                        }
+                    }
+                }
+                if (mpj.contains("textures")) {
+                    for (const auto& [name, val] : mpj["textures"].items()) {
+                        const AssetID id = StrToAsset(val.get<std::string>());
+                        if (id.IsValid()) mo.textures[name] = id;
+                    }
+                }
+            }
         }
 
         if (ej.value("staticGeometry", false))
@@ -561,6 +582,42 @@ bool SceneSerializer::LoadFromFile(Scene& scene,
 
     SA_LOG_INFO("SceneSerializer: loaded '{}' ({} entities)", path.string(), count);
     return true;
+}
+
+// ── SpawnFromTemplate ──────────────────────────────────────────────────────────
+
+std::vector<entt::entity> SceneSerializer::SpawnFromTemplate(
+    Scene& scene, const std::filesystem::path& path)
+{
+    // Snapshot state that templates must not overwrite.
+    const WorldSettings savedWS   = scene.GetWorldSettings();
+    const std::string   savedName = scene.GetName();
+
+    // Collect entity IDs that exist before the load so we can identify new ones.
+    std::vector<entt::entity> before;
+    scene.Registry().view<TagComponent>().each(
+        [&](entt::entity e, const TagComponent&) { before.push_back(e); });
+    std::sort(before.begin(), before.end());
+
+    if (!LoadFromFile(scene, path)) {
+        scene.GetWorldSettings() = savedWS;
+        scene.SetName(savedName);
+        return {};
+    }
+
+    // Restore global state overwritten by LoadFromFile.
+    scene.GetWorldSettings() = savedWS;
+    scene.SetName(savedName);
+
+    // Return newly added root entities (no HierarchyComponent parent).
+    std::vector<entt::entity> added;
+    scene.Registry().view<TagComponent>().each([&](entt::entity e, const TagComponent&) {
+        if (std::binary_search(before.begin(), before.end(), e)) return;
+        const auto* hc = scene.Registry().try_get<HierarchyComponent>(e);
+        if (!hc || hc->parent == entt::null)
+            added.push_back(e);
+    });
+    return added;
 }
 
 } // namespace StellarAlia

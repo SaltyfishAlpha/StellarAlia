@@ -8,6 +8,7 @@
 #include "function/material/AttachmentKey.hpp"
 #include "function/material/ShaderProgram.hpp"
 #include "platform/rhi/IRHIDevice.hpp"
+#include "platform/rhi/ShaderReflection.hpp"
 
 namespace StellarAlia {
 
@@ -17,9 +18,15 @@ class MaterialInstance;
 // Parameter entry — describes one field in the MaterialParams UBO.
 // ─────────────────────────────────────────────────────────────────────────────
 struct ParamDef {
-    std::string name;
-    uint32_t    offset;  // byte offset in MaterialParams UBO
-    uint32_t    size;    // byte size (4, 8, 12, 16)
+    std::string          name;
+    uint32_t             offset = 0;       // byte offset in MaterialParams UBO
+    uint32_t             size   = 0;       // byte size (4, 8, 12, 16)
+    // Populated from GLSL @Type("Display Name") annotations:
+    RHI::ParamUIType     uiType       = RHI::ParamUIType::Inferred;
+    std::string          displayName;      // human-readable label; empty → use name
+    float                minValue     = 0.f;
+    float                maxValue     = 1.f;
+    float                defaultValue[4] = {};
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -29,6 +36,7 @@ struct TextureDef {
     std::string name;
     uint32_t    binding;    // set=1 binding index
     uint32_t    slotIndex;  // index into MaterialInstance::m_textures
+    std::string displayName; // from @Texture("Display Name") annotation; empty → use name
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

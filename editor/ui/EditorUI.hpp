@@ -1,8 +1,12 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
+
+// Forward-declared so EditorUI.hpp stays cheap to include.
+namespace StellarAlia::Editor { class EditorDiagnostics; }
 
 struct GLFWwindow;
 
@@ -62,10 +66,31 @@ public:
     // Notify backend when swapchain is recreated (pass new min image count).
     void OnSwapchainResize(uint32_t minImageCount);
 
+    // File menu callbacks — set before DrawPanels() is first called.
+    struct FileCallbacks {
+        std::function<void()> onNewScene;
+        std::function<void()> onSaveScene;
+    };
+    void SetFileCallbacks(FileCallbacks cbs) { m_fileCallbacks = std::move(cbs); }
+
+    // Assets menu callbacks (assets panel actions).
+    struct AssetCallbacks {
+        std::function<void()> onImport;       // open import-file modal
+        std::function<void()> onRefresh;      // rescan registry
+        std::function<void()> onReimportAll;  // force-recook all project assets
+    };
+    void SetAssetCallbacks(AssetCallbacks cbs) { m_assetCallbacks = std::move(cbs); }
+
+    // Wire the diagnostic bus so the menu bar can show an error/warning badge.
+    void SetDiagnostics(EditorDiagnostics* diags) { m_diagnostics = diags; }
+
 private:
-    RHI::VulkanDevice*                          m_device      = nullptr;
+    RHI::VulkanDevice*                          m_device        = nullptr;
     std::vector<std::unique_ptr<IEditorWindow>> m_windows;
-    bool                                        m_initialized = false;
+    bool                                        m_initialized   = false;
+    FileCallbacks                               m_fileCallbacks;
+    AssetCallbacks                              m_assetCallbacks;
+    EditorDiagnostics*                          m_diagnostics   = nullptr;
     // ImGui manages its own descriptor pool (DescriptorPoolSize path).
     // No VkDescriptorPool member needed in this header.
 };

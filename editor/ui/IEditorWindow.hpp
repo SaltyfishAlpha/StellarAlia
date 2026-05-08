@@ -1,5 +1,6 @@
 #pragma once
 
+#include <imgui.h>
 #include <string_view>
 
 namespace StellarAlia::Editor {
@@ -28,6 +29,12 @@ public:
     // Called every frame while the panel is open.
     // Runs between ImGui::Begin and ImGui::End — place widgets directly here.
     virtual void OnDraw() = 0;
+
+    // Window flags passed to ImGui::Begin() each frame.
+    // Override to enable horizontal scroll (ImGuiWindowFlags_HorizontalScrollbar)
+    // for panels whose content intentionally exceeds the panel width (file trees,
+    // hierarchy trees).  All other panels should keep the default (no horizontal scroll).
+    [[nodiscard]] virtual ImGuiWindowFlags GetWindowFlags() const { return ImGuiWindowFlags_None; }
 
     // Optional lifecycle hooks.
     virtual void OnOpen()  {}

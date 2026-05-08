@@ -11,6 +11,7 @@
 namespace StellarAlia { class Scene; }
 namespace StellarAlia { class InputSystem; }
 namespace StellarAlia::Resource { class AssetRegistry; }
+namespace StellarAlia::Editor { class EntityTemplateRegistry; }
 
 namespace StellarAlia::Editor {
 
@@ -39,17 +40,25 @@ public:
     SceneHierarchyPanel(Scene& scene, InputSystem& input)
         : m_scene(&scene), m_input(&input) {}
 
-    // Optional: provide registry for asset-drop mesh instantiation.
+    // Optional: provide asset registry for asset-drop mesh instantiation.
     void SetRegistry(const Resource::AssetRegistry* registry);
+
+    // Optional: provide template registry to drive the spawn menu.
+    void SetTemplateRegistry(const EntityTemplateRegistry* tmplRegistry);
 
     // Optional: called when a .sascene is dropped onto the panel.
     void SetSceneLoadCallback(SceneLoadCallback cb);
 
-    std::string_view GetName() const override { return "Scene Hierarchy"; }
+    std::string_view GetName()    const override { return "Scene Hierarchy"; }
+    ImGuiWindowFlags GetWindowFlags() const override { return ImGuiWindowFlags_HorizontalScrollbar; }
     void OnDraw() override;
 
     // Returns the currently selected entity raw bits (~0u = none).
     uint32_t GetSelectedEntity() const { return m_selected; }
+
+    // Called from the top menu bar Entity entries to create at scene root.
+    void RequestCreateEmpty();
+    void RequestSpawnTemplate(const std::filesystem::path& templatePath);
 
 private:
     void DrawNode(entt::entity entity, entt::registry& reg);
@@ -58,26 +67,30 @@ private:
     // Children are recursively duplicated and re-parented.
     entt::entity DuplicateEntity(entt::entity src);
 
-    Scene*                          m_scene    = nullptr;
-    InputSystem*                    m_input    = nullptr;
-    const Resource::AssetRegistry*  m_registry = nullptr;
-    SceneLoadCallback               m_onSceneLoad;
-    uint32_t                        m_selected = ~0u;
+    Scene*                           m_scene          = nullptr;
+    InputSystem*                     m_input          = nullptr;
+    const Resource::AssetRegistry*   m_registry       = nullptr;
+    const EntityTemplateRegistry*    m_tmplRegistry   = nullptr;
+    SceneLoadCallback                m_onSceneLoad;
+    uint32_t                         m_selected = ~0u;
+
 
     // ── Rename state ───────────────────────────────────────────────────────
     uint32_t m_renamingEntity  = ~0u;
     char     m_renameBuffer[256] = {};
     bool     m_renameFocusNext = false; // focus the InputText on the next frame it appears
 
-    // ── Entity create kind (shared between root and child pending ops) ─────
-    enum class CreateKind : uint8_t { Empty, Cube, Plane };
-    CreateKind m_createKind = CreateKind::Empty;
+    // ── Deferred create operation ──────────────────────────────────────────
+    struct CreateOp {
+        enum Kind : uint8_t { None, Empty, Template } kind = None;
+        std::filesystem::path templatePath;   // for Template kind
+        entt::entity          parent = entt::null;  // entt::null = scene root
+    };
+    CreateOp m_pendingCreate;
 
     // ── Deferred operations (applied after tree traversal) ─────────────────
-    entt::entity m_pendingDelete      = entt::null;
-    entt::entity m_pendingDuplicate   = entt::null;
-    entt::entity m_pendingCreateChild = entt::null;
-    bool         m_pendingCreateRoot  = false;
+    entt::entity m_pendingDelete    = entt::null;
+    entt::entity m_pendingDuplicate = entt::null;
 
     // ── Drag-and-drop ──────────────────────────────────────────────────────
     struct DnDOp {

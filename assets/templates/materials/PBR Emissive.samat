@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "type": "PBR",
+  "params": {
+    "baseColorFactor":   [0.02, 0.02, 0.02, 1.0],
+    "roughnessFactor":   1.0,
+    "metallicFactor":    0.0,
+    "normalScale":       1.0,
+    "occlusionStrength": 1.0,
+    "emissiveFactor":    [2.0, 1.5, 0.5]
+  },
+  "textures": {}
+}

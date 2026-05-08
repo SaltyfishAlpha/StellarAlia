@@ -47,6 +47,11 @@ void SettingsPanel::OnDraw() {
                 ImGui::RadioButton("Rotate (R)",    &mode, 1); ImGui::SameLine();
                 ImGui::RadioButton("Scale (S)",     &mode, 2);
                 m_overlaySettings->gizmoMode = static_cast<GizmoMode>(mode);
+
+                int ws = m_overlaySettings->gizmoWorldSpace ? 1 : 0;
+                ImGui::RadioButton("World", &ws, 1); ImGui::SameLine();
+                ImGui::RadioButton("Local", &ws, 0);
+                m_overlaySettings->gizmoWorldSpace = (ws != 0);
             }
             ImGui::EndDisabled();
             ImGui::EndDisabled();

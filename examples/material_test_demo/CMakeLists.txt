@@ -14,6 +14,10 @@ target_include_directories(MaterialTestDemo
         ${CMAKE_CURRENT_BINARY_DIR}
 )
 
-# CookAssets must run first so meshes/textures are in the cook cache.
-# StellarAliaBuiltinShaders must run so .spv/.refl files are available.
+# Shaders and materials live in demo_project/; no local assets to cook.
+# CookDemoShaders   — compiles .saglsl → .spv + .refl, writes dispatch GLSL
+# StellarAliaBuiltinShaders — already depends on CookDemoShaders (root CMakeLists)
 add_dependencies(MaterialTestDemo CookAssets StellarAliaBuiltinShaders)
+if(TARGET CookDemoShaders)
+    add_dependencies(MaterialTestDemo CookDemoShaders)
+endif()

@@ -23,7 +23,7 @@ bool CookMaterial(const Resource::MaterialData& mat,
                   const AssetID& matID,
                   const std::function<AssetID(int32_t)>& resolveTexID,
                   const fs::path& cookCacheDir) {
-    const fs::path outPath = cookCacheDir / (matID.ToString() + ".samat");
+    const fs::path outPath = cookCacheDir / (matID.ToString() + ".samatc");
     if (fs::exists(outPath)) return true;
 
     auto texUUID = [&](int32_t imgIdx) -> std::string {
@@ -42,9 +42,10 @@ bool CookMaterial(const Resource::MaterialData& mat,
     root["params"]["metallicFactor"]    = mat.metallicFactor;
     root["params"]["normalScale"]       = mat.normalScale;
     root["params"]["occlusionStrength"] = mat.occlusionStrength;
-    root["params"]["emissiveFactor"]    = {mat.emissiveFactor.x,
-                                           mat.emissiveFactor.y,
-                                           mat.emissiveFactor.z};
+    root["params"]["emissiveFactor"]     = {mat.emissiveFactor.x,
+                                            mat.emissiveFactor.y,
+                                            mat.emissiveFactor.z};
+    root["params"]["emissiveIntensity"] = 1.0f;
 
     root["textures"]["t_BaseColor"]         = texUUID(mat.baseColorTexture.imageIndex);
     root["textures"]["t_Normal"]            = texUUID(mat.normalTexture.imageIndex);
@@ -67,7 +68,7 @@ bool CookStandaloneMaterial(const fs::path& sourcePath,
                              const AssetID&  id,
                              const fs::path& cookCacheDir,
                              bool            force) {
-    const fs::path outPath = cookCacheDir / (id.ToString() + ".samat");
+    const fs::path outPath = cookCacheDir / (id.ToString() + ".samatc");
     if (!force && fs::exists(outPath)) return true;
 
     std::error_code ec;

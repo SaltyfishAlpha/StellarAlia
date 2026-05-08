@@ -1,5 +1,6 @@
 #include "ui/EditorUI.hpp"
 #include "ui/IEditorWindow.hpp"
+#include "EditorDiagnostics.hpp"
 
 #include "platform/rhi/vulkan/VulkanDevice.hpp"
 #include "platform/rhi/vulkan/VulkanCommandList.hpp"
@@ -128,8 +129,31 @@ void EditorUI::NewFrame() {
 }
 
 void EditorUI::DrawPanels() {
-    // ── Main menu bar — Windows submenu lets users reopen closed panels ────────
+    // ── Main menu bar ─────────────────────────────────────────────────────────
     if (ImGui::BeginMainMenuBar()) {
+        if (ImGui::BeginMenu("File")) {
+            if (ImGui::MenuItem("New Scene", "Ctrl+N")) {
+                if (m_fileCallbacks.onNewScene) m_fileCallbacks.onNewScene();
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Save Scene", "Ctrl+S")) {
+                if (m_fileCallbacks.onSaveScene) m_fileCallbacks.onSaveScene();
+            }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Assets")) {
+            if (ImGui::MenuItem("Import\xe2\x80\xa6")) {        // "Import…"
+                if (m_assetCallbacks.onImport) m_assetCallbacks.onImport();
+            }
+            if (ImGui::MenuItem("Refresh")) {
+                if (m_assetCallbacks.onRefresh) m_assetCallbacks.onRefresh();
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Reimport All")) {
+                if (m_assetCallbacks.onReimportAll) m_assetCallbacks.onReimportAll();
+            }
+            ImGui::EndMenu();
+        }
         if (ImGui::BeginMenu("Windows")) {
             for (auto& w : m_windows) {
                 bool open = w->isOpen;
@@ -141,6 +165,32 @@ void EditorUI::DrawPanels() {
             }
             ImGui::EndMenu();
         }
+
+        // ── Diagnostic badge ────────────────────────────────────────────────
+        if (m_diagnostics) {
+            const int errN  = m_diagnostics->ErrorCount();
+            const int warnN = m_diagnostics->WarningCount();
+            if (errN > 0) {
+                char lbl[32];
+                std::snprintf(lbl, sizeof(lbl), "  E:%d", errN);
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.35f, 1.f));
+                ImGui::TextUnformatted(lbl);
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%d error(s) — see Console panel", errN);
+                if (warnN > 0) ImGui::SameLine();
+            }
+            if (warnN > 0) {
+                char lbl[32];
+                std::snprintf(lbl, sizeof(lbl), "  W:%d", warnN);
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.80f, 0.20f, 1.f));
+                ImGui::TextUnformatted(lbl);
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%d warning(s) — see Console panel", warnN);
+            }
+        }
+
         ImGui::EndMainMenuBar();
     }
 
@@ -148,7 +198,7 @@ void EditorUI::DrawPanels() {
     for (auto& w : m_windows) {
         if (!w->isOpen) continue;
         bool open = w->isOpen;
-        if (ImGui::Begin(std::string(w->GetName()).c_str(), &open))
+        if (ImGui::Begin(std::string(w->GetName()).c_str(), &open, w->GetWindowFlags()))
             w->OnDraw();
         ImGui::End();
         if (!open && w->isOpen) {

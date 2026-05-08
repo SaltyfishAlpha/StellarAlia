@@ -15,7 +15,29 @@ void WriteU32(std::vector<uint8_t>& buf, uint32_t v) {
     buf.insert(buf.end(), p, p + 4);
 }
 
+void WriteU8(std::vector<uint8_t>& buf, uint8_t v) {
+    buf.push_back(v);
+}
+
+void WriteFloat(std::vector<uint8_t>& buf, float v) {
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(&v);
+    buf.insert(buf.end(), p, p + 4);
+}
+
 bool ReadU32(std::span<const uint8_t> data, size_t& offset, uint32_t& out) {
+    if (offset + 4 > data.size()) return false;
+    std::memcpy(&out, data.data() + offset, 4);
+    offset += 4;
+    return true;
+}
+
+bool ReadU8(std::span<const uint8_t> data, size_t& offset, uint8_t& out) {
+    if (offset + 1 > data.size()) return false;
+    out = data[offset++];
+    return true;
+}
+
+bool ReadFloat(std::span<const uint8_t> data, size_t& offset, float& out) {
     if (offset + 4 > data.size()) return false;
     std::memcpy(&out, data.data() + offset, 4);
     offset += 4;
@@ -47,12 +69,26 @@ std::vector<uint8_t> Serialize(const ShaderReflection& refl) {
         for (const auto& m : b.members) {
             WriteU32(buf, m.offset);
             WriteU32(buf, m.size);
+            WriteU8 (buf, static_cast<uint8_t>(m.uiType));
+            WriteFloat(buf, m.minValue);
+            WriteFloat(buf, m.maxValue);
+            for (float dv : m.defaultValue) WriteFloat(buf, dv);
             WriteU32(buf, static_cast<uint32_t>(m.name.size()));
             buf.insert(buf.end(), m.name.begin(), m.name.end());
+            WriteU32(buf, static_cast<uint32_t>(m.displayName.size()));
+            buf.insert(buf.end(), m.displayName.begin(), m.displayName.end());
         }
         WriteU32(buf, static_cast<uint32_t>(b.name.size()));
         buf.insert(buf.end(), b.name.begin(), b.name.end());
+        WriteU32(buf, static_cast<uint32_t>(b.displayName.size()));
+        buf.insert(buf.end(), b.displayName.begin(), b.displayName.end());
     }
+
+    // v5: material type metadata (empty strings for builtin shaders)
+    WriteU32(buf, static_cast<uint32_t>(refl.shadingModel.size()));
+    buf.insert(buf.end(), refl.shadingModel.begin(), refl.shadingModel.end());
+    WriteU32(buf, static_cast<uint32_t>(refl.vertShader.size()));
+    buf.insert(buf.end(), refl.vertShader.begin(), refl.vertShader.end());
 
     return buf;
 }
@@ -67,10 +103,15 @@ bool Deserialize(std::span<const uint8_t> data, ShaderReflection& out) {
         SA_LOG_ERROR("ShaderReflectionIO: bad magic (got {:08X})", magic);
         return false;
     }
-    if (!ReadU32(data, offset, version) || version != kVersion) {
+    if (!ReadU32(data, offset, version) ||
+        (version != 3u && version != 4u && version != kVersion)) {
         SA_LOG_ERROR("ShaderReflectionIO: unsupported version {}", version);
         return false;
     }
+    // Annotation fields (uiType, min/max/default, displayName) were introduced in v5.
+    // v4 files (committed baseline) use the basic layout without them.
+    const bool v4 = (version >= 5u);
+    const bool v5 = (version >= 5u);
 
     uint32_t pcSize = 0, pcStages = 0, bindingCount = 0;
     if (!ReadU32(data, offset, pcSize))     return false;
@@ -104,18 +145,37 @@ bool Deserialize(std::span<const uint8_t> data, ShaderReflection& out) {
 
         for (uint32_t m = 0; m < memberCount; ++m) {
             uint32_t mOffset = 0, mSize = 0, mNameLen = 0;
-            if (!ReadU32(data, offset, mOffset))  return false;
-            if (!ReadU32(data, offset, mSize))    return false;
+            if (!ReadU32(data, offset, mOffset)) return false;
+            if (!ReadU32(data, offset, mSize))   return false;
+            ShaderMemberDesc md;
+            md.offset = mOffset;
+            md.size   = mSize;
+            if (v4) {
+                uint8_t uiRaw = 0;
+                if (!ReadU8   (data, offset, uiRaw))        return false;
+                if (!ReadFloat(data, offset, md.minValue))  return false;
+                if (!ReadFloat(data, offset, md.maxValue))  return false;
+                for (float& dv : md.defaultValue)
+                    if (!ReadFloat(data, offset, dv)) return false;
+                md.uiType = static_cast<ParamUIType>(uiRaw);
+            }
             if (!ReadU32(data, offset, mNameLen)) return false;
             if (offset + mNameLen > data.size()) {
                 SA_LOG_ERROR("ShaderReflectionIO: member name truncated");
                 return false;
             }
-            ShaderMemberDesc md;
-            md.offset = mOffset;
-            md.size   = mSize;
             md.name.assign(reinterpret_cast<const char*>(data.data() + offset), mNameLen);
             offset += mNameLen;
+            if (v4) {
+                uint32_t dispLen = 0;
+                if (!ReadU32(data, offset, dispLen)) return false;
+                if (offset + dispLen > data.size()) {
+                    SA_LOG_ERROR("ShaderReflectionIO: member displayName truncated");
+                    return false;
+                }
+                md.displayName.assign(reinterpret_cast<const char*>(data.data() + offset), dispLen);
+                offset += dispLen;
+            }
             bd.members.push_back(std::move(md));
         }
 
@@ -126,8 +186,38 @@ bool Deserialize(std::span<const uint8_t> data, ShaderReflection& out) {
         }
         bd.name.assign(reinterpret_cast<const char*>(data.data() + offset), nameLen);
         offset += nameLen;
+        if (v4) {
+            uint32_t dispLen = 0;
+            if (!ReadU32(data, offset, dispLen)) return false;
+            if (offset + dispLen > data.size()) {
+                SA_LOG_ERROR("ShaderReflectionIO: binding displayName truncated");
+                return false;
+            }
+            bd.displayName.assign(reinterpret_cast<const char*>(data.data() + offset), dispLen);
+            offset += dispLen;
+        }
 
         result.bindings.push_back(std::move(bd));
+    }
+
+    // v5: material type metadata
+    if (v5) {
+        uint32_t smLen = 0, vsLen = 0;
+        if (!ReadU32(data, offset, smLen)) return false;
+        if (offset + smLen > data.size()) {
+            SA_LOG_ERROR("ShaderReflectionIO: shadingModel truncated");
+            return false;
+        }
+        result.shadingModel.assign(reinterpret_cast<const char*>(data.data() + offset), smLen);
+        offset += smLen;
+
+        if (!ReadU32(data, offset, vsLen)) return false;
+        if (offset + vsLen > data.size()) {
+            SA_LOG_ERROR("ShaderReflectionIO: vertShader truncated");
+            return false;
+        }
+        result.vertShader.assign(reinterpret_cast<const char*>(data.data() + offset), vsLen);
+        offset += vsLen;
     }
 
     out = std::move(result);

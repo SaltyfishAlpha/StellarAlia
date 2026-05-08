@@ -11,20 +11,26 @@ namespace StellarAlia::Editor {
 void PlaybackPanel::OnDraw() {
     const EnginePlayState state = m_app->GetPlayState();
 
-    // Require an active camera entity in the scene before allowing play.
-    bool hasCam = false;
-    m_app->GetScene().View<CameraComponent, ActiveCameraTag>().each(
-        [&](auto) { hasCam = true; });
+    // Require at least one camera and no unresolved errors before allowing play.
+    const bool hasCam    = !m_app->GetScene().View<CameraComponent>().empty();
+    const bool hasErrors = m_diags && m_diags->HasErrors();
+    const bool canPlay   = hasCam && !hasErrors;
 
     switch (state) {
         case EnginePlayState::Editing:
-            if (!hasCam) ImGui::BeginDisabled();
+            if (!canPlay) ImGui::BeginDisabled();
             if (ImGui::Button("Play"))
                 m_app->SetPlayState(EnginePlayState::Playing);
-            if (!hasCam) {
+            if (!canPlay) {
                 ImGui::EndDisabled();
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip("Scene has no active camera");
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                    if (hasErrors)
+                        ImGui::SetTooltip("%d error(s) must be fixed before playing\n"
+                                          "(see Console panel)",
+                                          m_diags->ErrorCount());
+                    else
+                        ImGui::SetTooltip("Scene has no active camera");
+                }
             }
             break;
 
