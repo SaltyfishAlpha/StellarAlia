@@ -108,7 +108,7 @@ std::string ShortcutsPanel::FormatBinding(const BindingDef& b) {
 ShortcutsPanel::ShortcutsPanel(EditorShortcutConfig& config, InputSystem& input,
                                std::filesystem::path defaultConfigPath)
     : m_config(config), m_input(input),
-      m_defaultConfigPath(std::move(defaultConfigPath)) {}
+      m_defaultConfigPath(std::move(defaultConfigPath)) { isOpen = false; }
 
 void ShortcutsPanel::BuildEntries() {
     if (!m_entries.empty()) return;

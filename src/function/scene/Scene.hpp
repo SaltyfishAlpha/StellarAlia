@@ -12,6 +12,34 @@
 namespace StellarAlia {
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PostProcessSettings — runtime post-process parameters.
+//
+// Embedded in WorldSettings::pp.  All fields have sensible defaults.
+// Serialized as a "postProcess" sub-object inside the "world" block.
+// ─────────────────────────────────────────────────────────────────────────────
+struct PostProcessSettings {
+    // ── Bloom ─────────────────────────────────────────────────────────────────
+    bool  bloomEnabled   = true;
+    float bloomThreshold = 1.0f;  // luminance cutoff; knee = threshold * 0.1
+    float bloomStrength  = 0.4f;  // composite blend weight
+    float bloomRadius    = 1.0f;  // widest upsample radius; each level scales by 0.85
+
+    // ── Tonemap ───────────────────────────────────────────────────────────────
+    enum class TonemapMode { Builtin, LUT };
+    TonemapMode tonemapMode  = TonemapMode::Builtin;
+    AssetID     tonemapLut;       // only used when tonemapMode == LUT
+    float       exposure     = 1.f;
+    float       gamma        = 2.2f;  // declared but swapchain sRGB handles gamma
+    float       lutStrength  = 1.f;
+
+    // ── Future effects (placeholder — no pass implementation yet) ─────────────
+    bool ssaoEnabled       = false;
+    bool taaEnabled        = false;
+    bool dofEnabled        = false;
+    bool motionBlurEnabled = false;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // WorldSettings
 //
 // Scene-level global configuration that does not belong to any individual
@@ -33,13 +61,8 @@ struct WorldSettings {
     AssetID brdfLut;          // Split-sum BRDF LUT 2D (fixed UUID, .satex)
     AssetID skyboxCubemap;    // Equirect HDR converted to cubemap (.satex)
 
-    // ── Tonemap ───────────────────────────────────────────────────────────────
-    enum class TonemapMode { Builtin, LUT };
-    TonemapMode tonemapMode  = TonemapMode::Builtin;
-    AssetID     tonemapLut;       // only used when tonemapMode == LUT
-    float       exposure     = 1.f;
-    float       gamma        = 2.2f;
-    float       lutStrength  = 1.f;
+    // ── Post-process ─────────────────────────────────────────────────────────
+    PostProcessSettings pp;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

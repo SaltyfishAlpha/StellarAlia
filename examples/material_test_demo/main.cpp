@@ -137,9 +137,7 @@ int main() {
     rendDesc.shaderDir    = shaderDir;
     rendDesc.cookCacheDir = cookDir.string();
     rendDesc.config.shadowEnabled  = true;
-    rendDesc.config.bloomEnabled   = true;
     rendDesc.config.bloomMipCount  = 6;
-    rendDesc.config.builtinTonemap = true;
 
     if (!renderer.Init(rendDesc)) {
         SA_LOG_CRITICAL("MaterialTestDemo: renderer init failed");

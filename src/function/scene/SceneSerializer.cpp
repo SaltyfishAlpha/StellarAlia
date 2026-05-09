@@ -112,11 +112,20 @@ bool SceneSerializer::SaveToFile(const Scene& scene,
         if (ws.prefilteredEnv.IsValid())  wj["prefilteredEnv"]  = AssetToStr(ws.prefilteredEnv);
         if (ws.brdfLut.IsValid())         wj["brdfLut"]         = AssetToStr(ws.brdfLut);
         if (ws.skyboxCubemap.IsValid())   wj["skyboxCubemap"]   = AssetToStr(ws.skyboxCubemap);
-        wj["tonemapMode"]  = (ws.tonemapMode == WorldSettings::TonemapMode::LUT) ? "LUT" : "Builtin";
-        if (ws.tonemapLut.IsValid())      wj["tonemapLut"]      = AssetToStr(ws.tonemapLut);
-        wj["exposure"]     = ws.exposure;
-        wj["gamma"]        = ws.gamma;
-        wj["lutStrength"]  = ws.lutStrength;
+        {
+            const PostProcessSettings& pp = ws.pp;
+            json ppj;
+            ppj["bloomEnabled"]   = pp.bloomEnabled;
+            ppj["bloomThreshold"] = pp.bloomThreshold;
+            ppj["bloomStrength"]  = pp.bloomStrength;
+            ppj["bloomRadius"]    = pp.bloomRadius;
+            ppj["tonemapMode"]    = (pp.tonemapMode == PostProcessSettings::TonemapMode::LUT) ? "LUT" : "Builtin";
+            if (pp.tonemapLut.IsValid()) ppj["tonemapLut"] = AssetToStr(pp.tonemapLut);
+            ppj["exposure"]    = pp.exposure;
+            ppj["gamma"]       = pp.gamma;
+            ppj["lutStrength"] = pp.lutStrength;
+            wj["postProcess"]  = std::move(ppj);
+        }
         root["world"] = std::move(wj);
     }
 
@@ -331,14 +340,30 @@ bool SceneSerializer::LoadFromFile(Scene& scene,
         if (wj.contains("brdfLut"))        ws.brdfLut        = StrToAsset(wj["brdfLut"].get<std::string>());
         if (wj.contains("skyboxCubemap"))  ws.skyboxCubemap  = StrToAsset(wj["skyboxCubemap"].get<std::string>());
 
-        if (wj.value("tonemapMode", "Builtin") == "LUT")
-            ws.tonemapMode = WorldSettings::TonemapMode::LUT;
-        else
-            ws.tonemapMode = WorldSettings::TonemapMode::Builtin;
-        if (wj.contains("tonemapLut")) ws.tonemapLut = StrToAsset(wj["tonemapLut"].get<std::string>());
-        ws.exposure    = wj.value("exposure",    ws.exposure);
-        ws.gamma       = wj.value("gamma",       ws.gamma);
-        ws.lutStrength = wj.value("lutStrength", ws.lutStrength);
+        PostProcessSettings& pp = ws.pp;
+        if (wj.contains("postProcess")) {
+            const auto& ppj = wj["postProcess"];
+            pp.bloomEnabled   = ppj.value("bloomEnabled",   pp.bloomEnabled);
+            pp.bloomThreshold = ppj.value("bloomThreshold", pp.bloomThreshold);
+            pp.bloomStrength  = ppj.value("bloomStrength",  pp.bloomStrength);
+            pp.bloomRadius    = ppj.value("bloomRadius",    pp.bloomRadius);
+            pp.tonemapMode    = (ppj.value("tonemapMode", "Builtin") == "LUT")
+                                    ? PostProcessSettings::TonemapMode::LUT
+                                    : PostProcessSettings::TonemapMode::Builtin;
+            if (ppj.contains("tonemapLut")) pp.tonemapLut = StrToAsset(ppj["tonemapLut"].get<std::string>());
+            pp.exposure    = ppj.value("exposure",    pp.exposure);
+            pp.gamma       = ppj.value("gamma",       pp.gamma);
+            pp.lutStrength = ppj.value("lutStrength", pp.lutStrength);
+        } else {
+            // Backward compat: read old top-level tonemap keys from pre-#40 scenes.
+            pp.tonemapMode = (wj.value("tonemapMode", "Builtin") == "LUT")
+                                 ? PostProcessSettings::TonemapMode::LUT
+                                 : PostProcessSettings::TonemapMode::Builtin;
+            if (wj.contains("tonemapLut")) pp.tonemapLut = StrToAsset(wj["tonemapLut"].get<std::string>());
+            pp.exposure    = wj.value("exposure",    pp.exposure);
+            pp.gamma       = wj.value("gamma",       pp.gamma);
+            pp.lutStrength = wj.value("lutStrength", pp.lutStrength);
+        }
     }
 
     const auto& entities = root["entities"];

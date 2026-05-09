@@ -102,11 +102,12 @@ private:
 // ─────────────────────────────────────────────────────────────────────────────
 // Per-frame render graph statistics. Physical == logical until aliasing (#16).
 struct RGStats {
-    uint32_t transientCount       = 0;
-    uint32_t importedCount        = 0;
-    uint32_t physicalSlotCount    = 0;   // == transientCount until aliasing
-    uint64_t transientBytesLogical  = 0; // sum of all logical transient sizes
-    uint64_t transientBytesPhysical = 0; // == logical until aliasing
+    uint32_t transientCount         = 0;
+    uint32_t importedCount          = 0;
+    uint32_t physicalSlotCount      = 0;   // == transientCount until aliasing
+    uint64_t transientBytesLogical  = 0;   // sum of all logical transient sizes
+    uint64_t transientBytesPhysical = 0;   // == logical until aliasing
+    uint64_t importedBytesLogical   = 0;   // desc-based size sum for imported textures
 
     struct Entry {
         std::string name;
@@ -115,8 +116,17 @@ struct RGStats {
         uint32_t    mipLevels  = 1;
         const char* formatStr  = nullptr; // points to a static string literal
         uint64_t    bytes      = 0;
+        int         slotIndex  = -1;      // physical slot assigned by Compile()
     };
     std::vector<Entry> entries; // transient textures only
+};
+
+// Persistent physical GPU texture slot shared by aliased transient textures.
+// Survives RenderGraph::Reset(); destroyed only via InvalidateSlots().
+struct RGPhysicalSlot {
+    RHI::RHITextureDesc   desc;
+    RHI::RHITextureHandle handle;
+    int                   freeAfterPass = -1;
 };
 
 class RenderGraph {
@@ -125,9 +135,10 @@ public:
     using ExecuteFn = std::function<void(RHI::IRHICommandList&, const RGResources&)>;
 
     // Discard all passes and textures — call once per frame before rebuilding.
+    // Slot pool (m_slots) is NOT cleared; it persists for handle reuse.
     void Reset();
 
-    // Declare a transient texture (GPU allocation deferred to Stage 3).
+    // Declare a transient texture (GPU allocation deferred to AllocateSlots).
     RGTextureHandle CreateTexture(const std::string& name, const RHI::RHITextureDesc& desc);
 
     // Import an external texture (e.g., swapchain image).
@@ -141,13 +152,28 @@ public:
     // Register a pass.
     void AddPass(const std::string& name, SetupFn setup, ExecuteFn execute);
 
-    // Topological sort (Kahn's algorithm) on read/write dependencies.
+    // Topological sort + lifetime analysis + greedy slot assignment.
     void Compile();
 
+    // Create or reuse GPU textures for physical slots assigned by Compile().
+    // Must be called after Compile(). Execute() calls this automatically.
+    void AllocateSlots(RHI::IRHIDevice& device);
+
+    // Destroy all slot GPU textures and clear the slot pool.
+    // Call on viewport resize before the next frame's Reset/CreateTexture sequence.
+    void InvalidateSlots(RHI::IRHIDevice& device);
+
+    // Returns the physical RHI handle for any texture after AllocateSlots.
+    // Imported: returns the imported handle. Transient: returns the slot handle.
+    // Returns {} for textures with no slot assigned (e.g. unreachable transients).
+    [[nodiscard]] RHI::RHITextureHandle GetResolvedHandle(RGTextureHandle h) const;
+
     // Emit barriers and invoke execute lambdas in sorted order.
+    // Internally calls AllocateSlots(device).
     void Execute(RHI::IRHIDevice& device, RHI::IRHICommandList& cmd);
 
-    [[nodiscard]] const RGStats& GetLastFrameStats() const { return m_lastStats; }
+    [[nodiscard]] const RGStats&              GetLastFrameStats()  const { return m_lastStats; }
+    [[nodiscard]] const RHI::RHIMemoryStats&  GetLastMemoryStats() const { return m_lastMemStats; }
 
 private:
     struct TextureEntry {
@@ -157,6 +183,11 @@ private:
         RHI::RHIResourceState  initState  = RHI::RHIResourceState::Undefined;
         RHI::RHIResourceState  finalState = RHI::RHIResourceState::Undefined;
         bool                   isImported = false;
+        // Lifetime filled by Compile() Phase A (sorted-pass indices):
+        int firstWritePass = -1;
+        int lastReadPass   = -1;
+        // Slot assignment filled by Compile() Phase B:
+        int slotIndex      = -1;  // -1 = imported or unused transient
     };
 
     struct PassEntry {
@@ -166,10 +197,12 @@ private:
         ExecuteFn                    execute;
     };
 
-    std::vector<TextureEntry> m_textures;
-    std::vector<PassEntry>    m_passes;
-    std::vector<uint32_t>     m_sortedPassIndices;
-    RGStats                   m_lastStats;
+    std::vector<TextureEntry>  m_textures;
+    std::vector<PassEntry>     m_passes;
+    std::vector<uint32_t>      m_sortedPassIndices;
+    std::vector<RGPhysicalSlot> m_slots;        // persistent across Reset()
+    RGStats                    m_lastStats;
+    RHI::RHIMemoryStats        m_lastMemStats;  // full GPU stats snapshot per frame
 };
 
 } // namespace StellarAlia

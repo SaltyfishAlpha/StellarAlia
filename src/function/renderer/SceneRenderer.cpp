@@ -123,15 +123,18 @@ bool SceneRenderer::Init(const Desc& desc) {
 
     // ── Pre-register built-in passes as features ───────────────────────────────
     // Insert at front in reverse execution order so final order is:
-    //   [Shadow?, Skybox, GBuffer, DeferredLighting, SelectionMask, Bloom?, Tonemap?,
+    //   [Shadow?, Skybox, GBuffer, DeferredLighting, SelectionMask, Bloom, Tonemap,
     //    ...user features, SelectionOutline, DebugOverlay]
-    if (m_config.builtinTonemap) {
+    {
         auto tf = std::make_unique<TonemapFeature>();
         m_tonemapFeature = tf.get();
         m_features.insert(m_features.begin(), std::move(tf));
     }
-    if (m_config.bloomEnabled)
-        m_features.insert(m_features.begin(), std::make_unique<BloomFeature>(m_bloomMipCount));
+    {
+        auto bf = std::make_unique<BloomFeature>(m_bloomMipCount);
+        m_bloomFeature = bf.get();
+        m_features.insert(m_features.begin(), std::move(bf));
+    }
     m_features.insert(m_features.begin(), std::make_unique<DeferredLightingFeature>());
     // SelectionMask runs immediately after DeferredLighting (depth is populated,
     // already transitioned back to depth-attachment by this WriteDepth declaration).
@@ -319,10 +322,20 @@ bool SceneRenderer::SetIBL(WorldSettings& ws)
 
 void SceneRenderer::ApplyWorldSettings(WorldSettings& ws, bool updateIBL)
 {
+    const PostProcessSettings& pp = ws.pp;
+
     // Update skybox background mode + color immediately (no GPU work needed).
     if (m_skyboxFeature) {
         m_skyboxFeature->m_backgroundMode  = ws.backgroundMode;
         m_skyboxFeature->m_backgroundColor = ws.backgroundColor;
+    }
+
+    // Bloom — update runtime parameters.
+    if (m_bloomFeature) {
+        m_bloomFeature->m_enabled   = pp.bloomEnabled;
+        m_bloomFeature->m_threshold = pp.bloomThreshold;
+        m_bloomFeature->m_strength  = pp.bloomStrength;
+        m_bloomFeature->m_radius    = pp.bloomRadius;
     }
 
     // IBL — solid-color mode encodes backgroundColor as constant ambient (SH L0);
@@ -351,50 +364,50 @@ void SceneRenderer::ApplyWorldSettings(WorldSettings& ws, bool updateIBL)
     const FeatureInitContext ctx{m_device, m_matMgr, m_resMgr,
                                   m_frameUniforms.GetLayout(), m_shaderDir};
 
-    if (ws.tonemapMode == WorldSettings::TonemapMode::Builtin) {
+    if (pp.tonemapMode == PostProcessSettings::TonemapMode::Builtin) {
         if (auto* tf = dynamic_cast<TonemapFeature*>(m_tonemapFeature)) {
-            tf->m_exposure = ws.exposure;
-            tf->m_gamma    = ws.gamma;
+            tf->m_exposure = pp.exposure;
+            tf->m_gamma    = pp.gamma;
         } else {
             // Replace LUT → Builtin
             m_device->WaitIdle();
             auto newFeature = std::make_unique<TonemapFeature>();
-            newFeature->m_exposure = ws.exposure;
-            newFeature->m_gamma    = ws.gamma;
+            newFeature->m_exposure = pp.exposure;
+            newFeature->m_gamma    = pp.gamma;
             ReplaceTonemapFeature(std::move(newFeature), ctx);
         }
     } else {
         // LUT tonemap — requires a valid, loaded texture.
         // If no LUT is set, fall back to the builtin ACES pipeline instead.
         RHI::RHITextureHandle lutTex;
-        if (ws.tonemapLut.IsValid())
-            lutTex = m_resMgr->LoadTexture(ws.tonemapLut);
+        if (pp.tonemapLut.IsValid())
+            lutTex = m_resMgr->LoadTexture(pp.tonemapLut);
 
         if (!lutTex.IsValid()) {
             SA_LOG_WARN("SceneRenderer: LUT mode requested but no valid LUT texture — falling back to builtin tonemap");
             if (!dynamic_cast<TonemapFeature*>(m_tonemapFeature)) {
                 m_device->WaitIdle();
                 auto newFeature = std::make_unique<TonemapFeature>();
-                newFeature->m_exposure = ws.exposure;
-                newFeature->m_gamma    = ws.gamma;
+                newFeature->m_exposure = pp.exposure;
+                newFeature->m_gamma    = pp.gamma;
                 ReplaceTonemapFeature(std::move(newFeature), ctx);
             } else if (auto* tf = dynamic_cast<TonemapFeature*>(m_tonemapFeature)) {
-                tf->m_exposure = ws.exposure;
-                tf->m_gamma    = ws.gamma;
+                tf->m_exposure = pp.exposure;
+                tf->m_gamma    = pp.gamma;
             }
             return;
         }
 
         if (auto* lf = dynamic_cast<LutTonemapFeature*>(m_tonemapFeature)) {
-            lf->m_exposure    = ws.exposure;
-            lf->m_lutStrength = ws.lutStrength;
+            lf->m_exposure    = pp.exposure;
+            lf->m_lutStrength = pp.lutStrength;
             lf->SetLutTexture(m_device, lutTex);
         } else {
             // Replace Builtin → LUT
             m_device->WaitIdle();
             auto newFeature = std::make_unique<LutTonemapFeature>();
-            newFeature->m_exposure    = ws.exposure;
-            newFeature->m_lutStrength = ws.lutStrength;
+            newFeature->m_exposure    = pp.exposure;
+            newFeature->m_lutStrength = pp.lutStrength;
             ReplaceTonemapFeature(std::move(newFeature), ctx);
             static_cast<LutTonemapFeature*>(m_tonemapFeature)->SetLutTexture(m_device, lutTex);
         }
@@ -1488,6 +1501,7 @@ void SceneRenderer::BloomFeature::AddPasses(SceneRenderer& renderer,
                                              const entt::registry& /*reg*/,
                                              uint32_t w, uint32_t h)
 {
+    if (!m_enabled) return;
     if (!m_thresholdType || !m_downsampleType || !m_upsampleType || !m_compositeType) return;
     if (!m_thresholdDescSet.IsValid()) return;
 
@@ -1536,7 +1550,7 @@ void SceneRenderer::BloomFeature::AddPasses(SceneRenderer& renderer,
 
     // ── Threshold: HDR → mip[0] ───────────────────────────────────────────────
     struct ThresholdPC { float threshold; float knee; float p0; float p1; };
-    constexpr ThresholdPC threshPC{1.0f, 0.1f, 0.f, 0.f};
+    const ThresholdPC threshPC{m_threshold, m_threshold * 0.1f, 0.f, 0.f};
     {
         const RGTextureHandle dst = rgMip[0];
         const uint32_t tw = mipW[0], th = mipH[0];
@@ -1590,17 +1604,19 @@ void SceneRenderer::BloomFeature::AddPasses(SceneRenderer& renderer,
     // ── Upsample: mip[i+1] → mip[i], additive accumulation ──────────────────
     // Iterates i = m_mipCount-2 downto 0 (fine → coarse).
     // usSet[passIdx] was bound to mip[m_mipCount-1-passIdx], matching src each time.
-    // Per-layer radius: deepest mip gets widest spread, shallowest stays tight.
+    // Per-layer radius decays geometrically from m_radius: each level scales by 0.85.
     struct UpsamplePC { float radius; float p0, p1, p2; };
-    // Enough entries for kMaxBloomMips-1 passes; only [0..m_mipCount-2] are used.
-    constexpr float kUpsampleRadii[kMaxBloomMips - 1] = {1.00f, 0.85f, 0.70f, 0.60f, 0.55f, 0.50f, 0.45f};
+    float upsampleRadii[kMaxBloomMips - 1];
+    upsampleRadii[0] = m_radius;
+    for (int k = 1; k < m_mipCount - 1; ++k)
+        upsampleRadii[k] = upsampleRadii[k - 1] * 0.85f;
     for (int i = m_mipCount - 2; i >= 0; --i) {
         const int passIdx           = (m_mipCount - 2) - i;
         const RGTextureHandle src   = rgMip[i + 1];
         const RGTextureHandle dst   = rgMip[i];
         const uint32_t dw = mipW[i], dh = mipH[i];
         const RHI::RHIDescSetHandle us = usSet[passIdx];
-        const UpsamplePC upPC{kUpsampleRadii[passIdx], 0.f, 0.f, 0.f};
+        const UpsamplePC upPC{upsampleRadii[passIdx], 0.f, 0.f, 0.f};
         ctx.rg->AddPass("BloomUp" + std::to_string(i),
             [src, dst](RGPassBuilder& b) { b.Read(src); b.Write(dst); },
             [pipeUpsample, frameSet, us, upPC, dst, dw, dh]
@@ -1624,7 +1640,7 @@ void SceneRenderer::BloomFeature::AddPasses(SceneRenderer& renderer,
 
     // ── Composite: mip[0] → HDR (additive, preserves lighting) ──────────────
     struct CompositePC { float strength; float p0; float p1; float p2; };
-    constexpr CompositePC compPC{0.4f, 0.f, 0.f, 0.f};
+    const CompositePC compPC{m_strength, 0.f, 0.f, 0.f};
     {
         const RGTextureHandle src = rgMip[0];
         ctx.rg->AddPass("BloomComposite",

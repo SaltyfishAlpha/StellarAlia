@@ -66,6 +66,10 @@ public:
     // Notify backend when swapchain is recreated (pass new min image count).
     void OnSwapchainResize(uint32_t minImageCount);
 
+    // Temporarily hide / restore all registered panels without changing isOpen.
+    void TogglePanelsHidden();
+    bool ArePanelsHidden() const;
+
     // File menu callbacks — set before DrawPanels() is first called.
     struct FileCallbacks {
         std::function<void()> onNewScene;
@@ -93,6 +97,7 @@ private:
     FileCallbacks                               m_fileCallbacks;
     AssetCallbacks                              m_assetCallbacks;
     EditorDiagnostics*                          m_diagnostics   = nullptr;
+    bool                                        m_panelsHidden  = false;
     // ImGui manages its own descriptor pool (DescriptorPoolSize path).
     // No VkDescriptorPool member needed in this header.
 };

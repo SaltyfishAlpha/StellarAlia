@@ -113,6 +113,7 @@ void RenderGraph::Reset() {
     m_textures.clear();
     m_passes.clear();
     m_sortedPassIndices.clear();
+    // m_slots intentionally NOT cleared — physical handles persist across frames.
 }
 
 RGTextureHandle RenderGraph::CreateTexture(const std::string& name,
@@ -209,38 +210,165 @@ void RenderGraph::Compile() {
         SA_LOG_WARN("RenderGraph::Compile — cycle detected, falling back to declaration order");
         m_sortedPassIndices.resize(passCount);
         for (uint32_t i = 0; i < passCount; i++) m_sortedPassIndices[i] = i;
-        return;
     }
 
-    SA_LOG_DEBUG("RenderGraph::Compile - {} passes sorted", passCount);
+    // ── Phase A — lifetime analysis ───────────────────────────────────────────
+    for (auto& t : m_textures) {
+        t.firstWritePass = -1;
+        t.lastReadPass   = -1;
+        t.slotIndex      = -1;
+    }
+    const int sortedN = static_cast<int>(m_sortedPassIndices.size());
+    for (int si = 0; si < sortedN; ++si) {
+        const auto& pass = m_passes[m_sortedPassIndices[si]];
+        for (const auto& we : pass.writes) {
+            if (!we.handle.IsValid()) continue;
+            auto& t = m_textures[we.handle.index];
+            if (t.firstWritePass < 0) t.firstWritePass = si;
+            t.lastReadPass = si;
+        }
+        for (auto rgt : pass.reads) {
+            if (!rgt.IsValid()) continue;
+            m_textures[rgt.index].lastReadPass = si;
+        }
+    }
+
+    // ── Phase B — greedy interval coloring ───────────────────────────────────
+    // Collect transient textures that participate in at least one pass.
+    struct CandEntry { int fw; uint32_t ti; };
+    std::vector<CandEntry> cands;
+    cands.reserve(m_textures.size());
+    for (uint32_t i = 0; i < static_cast<uint32_t>(m_textures.size()); ++i) {
+        const auto& t = m_textures[i];
+        if (!t.isImported && t.firstWritePass >= 0)
+            cands.push_back({t.firstWritePass, i});
+    }
+    std::sort(cands.begin(), cands.end(),
+              [](const CandEntry& a, const CandEntry& b) { return a.fw < b.fw; });
+
+    // Reset per-frame slot availability.
+    for (auto& s : m_slots) s.freeAfterPass = -1;
+
+    // slot.desc.usage must be a superset of the texture's required usage.
+    auto compatible = [](const RHI::RHITextureDesc& slot, const RHI::RHITextureDesc& tex) {
+        return slot.format    == tex.format
+            && slot.width     == tex.width
+            && slot.height    == tex.height
+            && slot.mipLevels == tex.mipLevels
+            && (static_cast<uint32_t>(slot.usage) & static_cast<uint32_t>(tex.usage))
+               == static_cast<uint32_t>(tex.usage);
+    };
+
+    for (const auto& c : cands) {
+        auto& t = m_textures[c.ti];
+        bool assigned = false;
+        for (int si = 0; si < static_cast<int>(m_slots.size()); ++si) {
+            auto& slot = m_slots[si];
+            if (compatible(slot.desc, t.desc) && slot.freeAfterPass < t.firstWritePass) {
+                t.slotIndex        = si;
+                slot.freeAfterPass = t.lastReadPass;
+                assigned           = true;
+                break;
+            }
+        }
+        if (!assigned) {
+            t.slotIndex = static_cast<int>(m_slots.size());
+            RGPhysicalSlot ns{};
+            ns.desc          = t.desc;
+            ns.freeAfterPass = t.lastReadPass;
+            m_slots.push_back(std::move(ns));
+        }
+    }
+
+    SA_LOG_DEBUG("RenderGraph::Compile — {} passes, {} logical transient, {} physical slots",
+                 passCount,
+                 static_cast<uint32_t>(cands.size()),
+                 static_cast<uint32_t>(m_slots.size()));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AllocateSlots / InvalidateSlots / GetResolvedHandle
+// ─────────────────────────────────────────────────────────────────────────────
+void RenderGraph::AllocateSlots(RHI::IRHIDevice& device) {
+    for (auto& slot : m_slots) {
+        if (!slot.handle.IsValid())
+            slot.handle = device.CreateTexture(slot.desc);
+    }
+}
+
+void RenderGraph::InvalidateSlots(RHI::IRHIDevice& device) {
+    for (auto& slot : m_slots)
+        if (slot.handle.IsValid())
+            device.DestroyTexture(slot.handle);
+    m_slots.clear();
+}
+
+RHI::RHITextureHandle RenderGraph::GetResolvedHandle(RGTextureHandle h) const {
+    if (!h.IsValid() || h.index >= static_cast<uint32_t>(m_textures.size())) return {};
+    const auto& t = m_textures[h.index];
+    if (t.isImported) return t.imported;
+    if (t.slotIndex < 0 || t.slotIndex >= static_cast<int>(m_slots.size())) return {};
+    return m_slots[t.slotIndex].handle;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Execute — emit barriers and call execute lambdas in sorted order
 // ─────────────────────────────────────────────────────────────────────────────
-void RenderGraph::Execute(RHI::IRHIDevice& /*device*/, RHI::IRHICommandList& cmd) {
+void RenderGraph::Execute(RHI::IRHIDevice& device, RHI::IRHICommandList& cmd) {
+    // Ensure all transient textures have backing GPU memory.
+    AllocateSlots(device);
+
     const uint32_t texCount = static_cast<uint32_t>(m_textures.size());
 
     // Build the resolved texture table (RGTextureHandle → RHITextureHandle).
-    // Transient textures are not yet backed by real GPU memory (Stage 3).
+    // Transient textures map to their assigned physical slot handle.
     RGResources resources;
     resources.m_resolved.resize(texCount);
     for (uint32_t i = 0; i < texCount; i++) {
-        auto& t = m_textures[i];
-        resources.m_resolved[i] = t.isImported ? t.imported : RHI::RHITextureHandle{};
+        const auto& t = m_textures[i];
+        if (t.isImported) {
+            resources.m_resolved[i] = t.imported;
+        } else if (t.slotIndex >= 0 && t.slotIndex < static_cast<int>(m_slots.size())) {
+            resources.m_resolved[i] = m_slots[t.slotIndex].handle;
+        } else {
+            resources.m_resolved[i] = {};  // unused transient (not written by any pass)
+        }
     }
 
-    // Track current per-texture resource state.
+    // State tracking is per physical resource, not per logical handle.
+    // Imported textures use states[logical_index]; transient textures use
+    // slotStates[slot_index] so that two logical textures sharing a slot
+    // always agree on the physical image's current Vulkan layout.
     std::vector<RHI::RHIResourceState> states(texCount, RHI::RHIResourceState::Undefined);
     for (uint32_t i = 0; i < texCount; i++)
         if (m_textures[i].isImported)
             states[i] = m_textures[i].initState;
 
-    // Track which textures have been written by any previous pass this frame.
-    // Even when the target state hasn't changed (e.g. RenderTarget→RenderTarget),
-    // a barrier is required between two consecutive vkCmdBeginRendering blocks
-    // on the same attachment to establish a memory dependency.
-    std::vector<bool> writtenInPreviousPass(texCount, false);
+    std::vector<RHI::RHIResourceState> slotStates(
+        m_slots.size(), RHI::RHIResourceState::Undefined);
+
+    auto getState = [&](uint32_t idx) -> RHI::RHIResourceState& {
+        const auto& t = m_textures[idx];
+        if (t.isImported) return states[idx];
+        return slotStates[static_cast<uint32_t>(t.slotIndex)];
+    };
+
+    // writtenInPrevious: per-slot for transient, per-logical for imported.
+    // Ensures a memory dependency barrier between consecutive render passes
+    // on the same attachment even when the layout doesn't change.
+    std::vector<bool> writtenImported(texCount, false);
+    std::vector<bool> writtenSlot(m_slots.size(), false);
+
+    auto wasWritten = [&](uint32_t idx) -> bool {
+        const auto& t = m_textures[idx];
+        if (t.isImported) return writtenImported[idx];
+        return writtenSlot[static_cast<uint32_t>(t.slotIndex)];
+    };
+    auto markWritten = [&](uint32_t idx) {
+        const auto& t = m_textures[idx];
+        if (t.isImported) writtenImported[idx] = true;
+        else              writtenSlot[static_cast<uint32_t>(t.slotIndex)] = true;
+    };
 
     // Execute each pass in topological order.
     for (uint32_t pi : m_sortedPassIndices) {
@@ -252,27 +380,29 @@ void RenderGraph::Execute(RHI::IRHIDevice& /*device*/, RHI::IRHICommandList& cmd
             auto rhi = resources.m_resolved[rgt.index];
             if (!rhi.IsValid()) continue;
             constexpr auto kReadState = RHI::RHIResourceState::ShaderRead;
-            if (states[rgt.index] != kReadState) {
-                cmd.TransitionTexture(rhi, states[rgt.index], kReadState);
-                states[rgt.index] = kReadState;
+            auto& cur = getState(rgt.index);
+            if (cur != kReadState) {
+                cmd.TransitionTexture(rhi, cur, kReadState);
+                cur = kReadState;
             }
         }
 
         // Emit write barriers.
         // Always barrier if (a) state needs to change OR (b) a previous pass
-        // already wrote this texture — even a same-layout transition acts as
-        // the memory dependency required between render pass instances.
+        // already wrote this physical resource — even a same-layout transition
+        // acts as the memory dependency required between render pass instances.
         for (auto& we : pass.writes) {
             if (!we.handle.IsValid()) continue;
             auto rhi = resources.m_resolved[we.handle.index];
             if (!rhi.IsValid()) continue;
-            const bool stateChanges   = (states[we.handle.index] != we.targetState);
-            const bool needsMemoryDep = writtenInPreviousPass[we.handle.index];
+            auto& cur = getState(we.handle.index);
+            const bool stateChanges   = (cur != we.targetState);
+            const bool needsMemoryDep = wasWritten(we.handle.index);
             if (stateChanges || needsMemoryDep) {
-                cmd.TransitionTexture(rhi, states[we.handle.index], we.targetState);
-                states[we.handle.index] = we.targetState;
+                cmd.TransitionTexture(rhi, cur, we.targetState);
+                cur = we.targetState;
             }
-            writtenInPreviousPass[we.handle.index] = true;
+            markWritten(we.handle.index);
         }
 
         SA_LOG_DEBUG("RenderGraph: executing pass '{}'", pass.name);
@@ -291,13 +421,16 @@ void RenderGraph::Execute(RHI::IRHIDevice& /*device*/, RHI::IRHICommandList& cmd
         states[i] = t.finalState;
     }
 
-    // Fill per-frame stats (logical only; physical == logical until aliasing #16).
+    // Fill per-frame stats.
     m_lastStats = {};
     m_lastStats.entries.reserve(texCount);
     for (uint32_t i = 0; i < texCount; i++) {
         const auto& t = m_textures[i];
         if (t.isImported) {
             m_lastStats.importedCount++;
+            // Size of imported textures (swapchain, depth, shadow, etc.)
+            if (const RHI::RHITextureDesc* d = device.GetTextureDesc(t.imported))
+                m_lastStats.importedBytesLogical += CalcTextureBytes(*d);
         } else {
             const uint64_t bytes = CalcTextureBytes(t.desc);
             m_lastStats.transientCount++;
@@ -309,11 +442,17 @@ void RenderGraph::Execute(RHI::IRHIDevice& /*device*/, RHI::IRHICommandList& cmd
             e.mipLevels = t.desc.mipLevels;
             e.formatStr = FormatName(t.desc.format);
             e.bytes     = bytes;
+            e.slotIndex = t.slotIndex;
             m_lastStats.entries.push_back(e);
         }
     }
-    m_lastStats.physicalSlotCount    = m_lastStats.transientCount;
-    m_lastStats.transientBytesPhysical = m_lastStats.transientBytesLogical;
+    // Physical stats: count unique slots and sum their sizes.
+    m_lastStats.physicalSlotCount = static_cast<uint32_t>(m_slots.size());
+    for (const auto& slot : m_slots)
+        m_lastStats.transientBytesPhysical += CalcTextureBytes(slot.desc);
+
+    // Snapshot full GPU memory stats (VMA heap budgets + table totals).
+    m_lastMemStats = device.GetMemoryStats();
 }
 
 } // namespace StellarAlia

@@ -181,9 +181,6 @@ int main() {
     // ── SceneRenderer ─────────────────────────────────────────────────────────
     SceneRenderer renderer;
 
-    const std::string lutPath = (assetsDir / "textures" / "builtin" / "color_grading_lut_blue.png").string();
-    renderer.AddFeature(std::make_unique<LutTonemapFeature>(lutPath));
-
     SceneRenderer::Desc rendDesc{};
     rendDesc.device       = device.get();
     rendDesc.matMgr       = &matMgr;
@@ -192,9 +189,7 @@ int main() {
     rendDesc.cookCacheDir = cookDir.string();
     rendDesc.config.shadowEnabled  = true;
     rendDesc.config.shadowMapSize  = 2048;
-    rendDesc.config.bloomEnabled   = true;
     rendDesc.config.bloomMipCount  = 6;
-    rendDesc.config.builtinTonemap = false;   // LutTonemapFeature handles this
 
     if (!renderer.Init(rendDesc)) {
         SA_LOG_CRITICAL("IblDemo: renderer init failed");

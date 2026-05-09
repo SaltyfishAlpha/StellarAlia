@@ -38,14 +38,8 @@ struct RendererConfig {
     uint32_t shadowMapSize  = 2048;   // texel resolution (width = height)
 
     // ── Bloom pass ────────────────────────────────────────────────────────────
-    bool bloomEnabled       = true;   // multi-scale pyramid bloom
-    int  bloomMipCount      = 3;      // pyramid depth [2, kMaxBloomMips]; more = wider glow
-
-    // ── Tonemap pass ─────────────────────────────────────────────────────────
-    // true  → built-in ACES tonemap runs automatically after bloom.
-    // false → no tonemap is registered; the caller is expected to add their own
-    //         RenderFeature that reads m_rgHdr and writes to the swapchain.
-    bool builtinTonemap     = true;
+    // bloomEnabled / bloom params are in WorldSettings::pp (runtime hot-swap).
+    int  bloomMipCount      = 3;      // pyramid depth [2, kMaxBloomMips]; requires rebuild to change
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -363,6 +357,12 @@ private:
         void AddPasses(SceneRenderer& renderer, const FrameContext& ctx,
                        const RendererHandles& handles, const entt::registry& reg,
                        uint32_t w, uint32_t h) override;
+
+        // Runtime parameters — updated by SceneRenderer::ApplyWorldSettings each call.
+        bool  m_enabled   = true;
+        float m_threshold = 1.0f;
+        float m_strength  = 0.4f;
+        float m_radius    = 1.0f;  // widest upsample level; each level scales by ×0.85
     private:
         int                   m_mipCount       = 6;
         MaterialType*         m_thresholdType  = nullptr;
@@ -404,6 +404,7 @@ private:
     // Raw pointers into m_features — stable as long as the vector doesn't reallocate.
     // Set during Init, updated by ApplyWorldSettings on tonemap replacement.
     SkyboxFeature*   m_skyboxFeature  = nullptr;
+    BloomFeature*    m_bloomFeature   = nullptr;
     RenderFeature*   m_tonemapFeature = nullptr;  // either TonemapFeature or LutTonemapFeature
 
     // ── Solid-color ambient environment ──────────────────────────────────────

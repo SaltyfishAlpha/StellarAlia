@@ -68,6 +68,7 @@ public:
                              std::span<MipReadback> mips) override;
     [[nodiscard]] const RHITextureDesc* GetTextureDesc(
         RHITextureHandle handle) const override;
+    [[nodiscard]] RHIMemoryStats GetMemoryStats() const override;
 
     void DestroyTexture(RHITextureHandle  handle) override;
     void DestroyBuffer(RHIBufferHandle   handle) override;

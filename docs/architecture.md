@@ -32,7 +32,7 @@
 │  EditorMode : AppMode                                            │
 │    EditorCamera, EditorUI (ImGui), EditorOverlaySettings        │
 │    Panels: Hierarchy, Inspector, Assets, Console, Playback,     │
-│            Settings, WorldSettings, Shortcuts                    │
+│            Settings, Performance, WorldSettings, Shortcuts       │
 │    EntityTemplateRegistry — data-driven spawn templates          │
 │    AssetsPanel — native file picker (nfd-extended), import       │
 │    ProjectManager — create/open/recent projects                  │
@@ -73,8 +73,9 @@
 │                                                                  │
 │  RenderGraph                                                     │
 │    Reset / CreateTexture / ImportTexture / AddPass              │
-│    Compile / Execute / GetLastFrameStats() → RGStats            │
-│    Topological pass ordering via read/write dependency edges     │
+│    Compile / Execute / GetLastFrameStats() / GetLastMemoryStats()│
+│    Topological sort + greedy interval slot aliasing             │
+│    RGPhysicalSlot — persistent GPU handles, reused across frames │
 │                                                                  │
 │  FrameUniformsBuffer (owned by SceneRenderer)                   │
 │    set=0: per-frame camera + light + IBL data                   │
@@ -106,6 +107,7 @@
 │    CreatePipeline / CreateComputePipeline                        │
 │    AllocateDescriptorSet / WriteDescriptor*                      │
 │    BeginFrame / EndFrame / Present / ImmediateCompute           │
+│    GetMemoryStats() → RHIMemoryStats                            │
 │                                                                  │
 │  VulkanDevice  (Vulkan 1.3, dynamic rendering)                  │
 └─────────────────────────────────────────────────────────────────┘
@@ -754,6 +756,32 @@ MEMORY_READ|WRITE` masks for correctness.
 Blit chain from mip 0→1→…→N-1. Input must be in `ShaderRead`; output all mips
 in `ShaderRead`. Texture must have `CopySrc` usage bit.
 
+### `IRHIDevice::GetMemoryStats` → `RHIMemoryStats`
+
+Cross-device memory snapshot, populated by `RenderGraph::Execute()` at the end of each frame.
+
+```cpp
+struct RHIMemoryStats {
+    uint64_t gpuTextureBytes = 0;  // logical sum of all live (non-swapchain) textures
+    uint64_t gpuBufferBytes  = 0;  // logical sum of all live buffers
+    uint64_t gpuUsedBytes    = 0;  // VMA device-local heap usage (real VRAM including alignment)
+    uint64_t gpuBudgetBytes  = 0;  // VMA device-local heap budget (OS-reported)
+};
+```
+
+`VulkanDevice` implements it via:
+- `m_textures`/`m_buffers` iteration for logical byte sums
+- `vmaGetHeapBudgets` filtered to `VK_MEMORY_HEAP_DEVICE_LOCAL_BIT` for real VRAM numbers
+
+### Cross-Platform CPU Memory
+
+`src/platform/PlatformMemory.hpp` provides `Platform::GetProcessMemoryBytes()`:
+- Windows: `GetProcessMemoryInfo` → `WorkingSetSize`
+- Linux: `/proc/self/status` VmRSS
+- macOS: `getrusage RUSAGE_SELF ru_maxrss`
+
+Used by `PerformancePanel` to display process RAM usage.
+
 ---
 
 ## Resource Layer — Material System
@@ -845,42 +873,70 @@ that receive `MaterialOverrideComponent` overrides.
 
 ```
 Reset()
-CreateTexture(name, desc)  → RGTextureHandle   (transient; GPU alloc deferred to Stage 3)
+CreateTexture(name, desc)  → RGTextureHandle   (transient; GPU alloc deferred)
 ImportTexture(name, handle, initState, finalState)  → RGTextureHandle
 AddPass(name, setupFn, executeFn)
+  — passes must be declared in forward dependency order (writers before readers)
 
-Compile()  → Kahn's topological sort on read/write edges
+Compile()
+  Phase 0: Kahn's topological sort on read/write dependency edges
+  Phase A: lifetime analysis — firstWritePass / lastReadPass per transient texture
+  Phase B: greedy interval slot coloring — assign transient textures to compatible
+           RGPhysicalSlot entries (format + size + usage superset must match)
 
 Execute(device, cmd)
+  → allocate/reuse RGPhysicalSlot handles (create if first use or desc changed)
   → for each sorted pass:
-      emit barriers (state transitions)
+      emit barriers — per-PHYSICAL-SLOT state tracking for transients,
+                      per-logical-index tracking for imported textures
       call executeFn(cmd, resources)
   → final state transitions for imported textures
-  → fill m_lastStats (RGStats) at end
+  → fill m_lastStats (RGStats) + snapshot device.GetMemoryStats() → m_lastMemStats
 
-GetLastFrameStats() const → const RGStats&
+GetLastFrameStats()  const → const RGStats&
+GetLastMemoryStats() const → const RHIMemoryStats&
+InvalidateSlots()           — call on resize; forces all slot handles to be
+                              recreated next Execute()
 ```
 
-### RGStats
-
-Per-frame read-only snapshot written at the end of `Execute()`. Physical values equal
-logical values until RG-handle aliasing (#16) is implemented.
+### RGPhysicalSlot
 
 ```cpp
-struct RGStats {
-    uint32_t transientCount;        // CreateTexture() textures
-    uint32_t importedCount;         // ImportTexture() textures
-    uint32_t physicalSlotCount;     // == transientCount (pre-aliasing)
-    uint64_t transientBytesLogical; // sum of all logical transient sizes
-    uint64_t transientBytesPhysical;// == logical (pre-aliasing)
-    struct Entry { std::string name; uint32_t width, height, mipLevels;
-                   const char* formatStr; uint64_t bytes; };
-    std::vector<Entry> entries;     // one per transient texture
+struct RGPhysicalSlot {
+    RHITextureDesc   desc;
+    RHITextureHandle handle;       // persistent across frames; recreated on desc change
+    int              freeAfterPass = -1;  // last sorted-pass index that reads this slot
 };
 ```
 
-Exposed to the editor via `SceneRenderer::GetRenderGraph()` → `SettingsPanel` → "Render Stats"
-collapsing header (transient/imported counts, MB totals, optional per-texture detail table).
+`m_slots` is a `std::vector<RGPhysicalSlot>` that grows but never shrinks (except on
+`InvalidateSlots`). Once the pipeline stabilises, the slot count converges.
+
+### RGStats
+
+Per-frame read-only snapshot written at the end of `Execute()`.
+
+```cpp
+struct RGStats {
+    uint32_t transientCount;          // CreateTexture() textures
+    uint32_t importedCount;           // ImportTexture() textures
+    uint32_t physicalSlotCount;       // actual RGPhysicalSlot entries (≤ transientCount)
+    uint64_t transientBytesLogical;   // sum of logical transient sizes
+    uint64_t transientBytesPhysical;  // sum of physical slot sizes (< logical when aliasing)
+    uint64_t importedBytesLogical;    // sum of imported texture sizes
+    struct Entry {
+        std::string name;
+        uint32_t width, height, mipLevels;
+        const char* formatStr;
+        uint64_t bytes;
+        int slotIndex;  // ≥ 0 for transients; -1 for imported
+    };
+    std::vector<Entry> entries;   // one per transient texture
+};
+```
+
+Exposed via `SceneRenderer::GetRenderGraph()` → `PerformancePanel` → "Render Stats"
+collapsing header (imported + transient counts/MB, physical vs logical savings, per-texture detail table).
 
 ---
 
@@ -1111,8 +1167,19 @@ Phase 2: GPU
 | `WorldSettingsPanel` | Scene-level settings: skybox HDR/LUT pickers, tonemap mode, exposure, background color |
 | `PlaybackPanel` | Play / Pause / Stop buttons; triggers `Application::SetPlayState` |
 | `ConsolePanel` | Two-tab panel: **Diagnostics** (action-required events from `EditorDiagnostics`) + **Engine Logs** (real-time `SA_LOG_*` stream via `EditorLogCapture`, per-level filter) |
-| `SettingsPanel` | UI scale, display info, overlay toggles, physics debug toggles, render graph stats (transient/imported counts, MB totals, per-texture detail) |
+| `SettingsPanel` | UI scale, overlay toggles (grid/axes/gizmo/outline/skeleton), physics debug toggles (shapes/AABBs/velocity/contacts) |
+| `PerformancePanel` | Display (viewport size, FPS/frame-time); Memory (GPU VRAM progress bar from `RHIMemoryStats`, CPU process RAM); Render Stats (RGStats: imported + transient counts/MB, physical savings, per-texture detail table). Default closed. |
 | `ShortcutsPanel` | Lists all `userConfigurable` Button actions; [Change] enters key-capture mode (next non-modifier key + held Ctrl/Shift/Alt → new binding); [×] clears override; [Default] reloads built-in config; [Reload] discards unsaved changes; [Import...]/[Export...] switch or copy the active config file via NFD; [Apply] rebuilds input maps; [Save] writes to active config file (disabled for built-in path); active config filename shown below toolbar |
+
+### Windows Menu
+
+`EditorUI::DrawPanels()` renders a **Windows** menu that provides:
+- **Open All** / **Close All** — bulk toggle all registered `IEditorWindow` panels
+- **Toggle Panels [F8]** (checkmark when hidden) — temporarily suppresses rendering of all panels without changing `isOpen`; pressing again restores whichever panels were open. Bound to `"TogglePanels"` action (default `F8`, user-configurable via ShortcutsPanel). Implemented via `EditorUI::m_panelsHidden` / `TogglePanelsHidden()`.
+- Per-panel checkmark items — individually toggle visibility, calling `OnOpen`/`OnClose`
+
+`IEditorWindow::isOpen = false` in the constructor gives a panel a default-closed state
+(e.g. `PerformancePanel`).
 
 ### Project Management
 

@@ -1660,6 +1660,70 @@ const RHITextureDesc* VulkanDevice::GetTextureDesc(RHITextureHandle handle) cons
     return m_textures[handle.index].valid ? &m_textures[handle.index].desc : nullptr;
 }
 
+RHIMemoryStats VulkanDevice::GetMemoryStats() const {
+    // Logical sizes computed from stored descriptors (same formula as RenderGraph).
+    auto calcTexBytes = [](const RHITextureDesc& d) -> uint64_t {
+        uint64_t bpp = 0;
+        switch (d.format) {
+            case RHIFormat::BC1_UNORM:                            bpp = 0; break; // handled below
+            case RHIFormat::BC3_UNORM: case RHIFormat::BC5_UNORM:
+            case RHIFormat::BC7_UNORM:                            bpp = 0; break;
+            case RHIFormat::RGBA8_UNORM: case RHIFormat::RGBA8_SRGB:
+            case RHIFormat::BGRA8_UNORM: case RHIFormat::BGRA8_SRGB:
+            case RHIFormat::RG16F:       case RHIFormat::R32F:
+            case RHIFormat::D32F:        case RHIFormat::D24_S8:  bpp = 4; break;
+            case RHIFormat::RGBA16F:     case RHIFormat::RG32F:   bpp = 8; break;
+            case RHIFormat::RGBA32F:                              bpp = 16; break;
+            case RHIFormat::R8_UNORM:                             bpp = 1; break;
+            case RHIFormat::D16_UNORM:                            bpp = 2; break;
+            default:                                              bpp = 4; break;
+        }
+        const uint32_t faces = d.cubemap ? 6u : 1u;
+        if (bpp == 0) {
+            // Block-compressed: 4×4 texel blocks
+            const uint64_t blockBytes = (d.format == RHIFormat::BC1_UNORM) ? 8u : 16u;
+            uint64_t total = 0;
+            uint32_t w = d.width, h = d.height;
+            for (uint32_t m = 0; m < d.mipLevels; ++m) {
+                uint32_t bw = std::max(1u, (w + 3) / 4);
+                uint32_t bh = std::max(1u, (h + 3) / 4);
+                total += static_cast<uint64_t>(bw) * bh * blockBytes * faces;
+                w = std::max(1u, w / 2); h = std::max(1u, h / 2);
+            }
+            return total;
+        }
+        uint64_t total = 0;
+        uint32_t w = d.width, h = d.height;
+        for (uint32_t m = 0; m < d.mipLevels; ++m) {
+            total += static_cast<uint64_t>(w) * h * bpp * faces;
+            w = std::max(1u, w / 2); h = std::max(1u, h / 2);
+        }
+        return total;
+    };
+
+    RHIMemoryStats s{};
+    for (const auto& e : m_textures)
+        if (e.valid && !e.swapchain)
+            s.gpuTextureBytes += calcTexBytes(e.desc);
+    for (const auto& e : m_buffers)
+        if (e.valid)
+            s.gpuBufferBytes += e.desc.size;
+
+    // Actual VRAM usage from VMA — includes alignment overhead and covers all
+    // VMA-managed allocations (textures + buffers). Sum device-local heaps only.
+    VmaBudget budgets[VK_MAX_MEMORY_HEAPS]{};
+    vmaGetHeapBudgets(m_allocator, budgets);
+    VkPhysicalDeviceMemoryProperties memProps{};
+    vkGetPhysicalDeviceMemoryProperties(m_physDevice, &memProps);
+    for (uint32_t i = 0; i < memProps.memoryHeapCount; ++i) {
+        if (memProps.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+            s.gpuUsedBytes   += budgets[i].usage;
+            s.gpuBudgetBytes += budgets[i].budget;
+        }
+    }
+    return s;
+}
+
 bool VulkanDevice::IsComputePipeline(RHIPipelineHandle handle) const {
     if (!handle.IsValid() || handle.index >= m_pipelines.size()) return false;
     return m_pipelines[handle.index].isCompute;

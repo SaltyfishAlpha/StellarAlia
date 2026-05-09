@@ -14,6 +14,8 @@
 #include "ui/panels/SceneHierarchyPanel.hpp"
 #include "ui/panels/InspectorPanel.hpp"
 #include "ui/panels/SettingsPanel.hpp"
+#include "ui/panels/PerformancePanel.hpp"
+#include "ui/panels/PostProcessPanel.hpp"
 #include "ui/panels/WorldSettingsPanel.hpp"
 #include "ui/panels/AssetsPanel.hpp"
 #include "ui/panels/ConsolePanel.hpp"
@@ -137,8 +139,11 @@ void EditorMode::OnAttach(Application& app) {
         m_ui.RegisterWindow(std::move(inspOwned));
     }
     m_ui.RegisterWindow(std::make_unique<SettingsPanel>(
-        &m_overlaySettings, &app.GetPhysicsDebugSettings(), &app.GetRenderer().GetRenderGraph()));
+        &m_overlaySettings, &app.GetPhysicsDebugSettings()));
+    m_ui.RegisterWindow(std::make_unique<PerformancePanel>(
+        &app.GetRenderer().GetRenderGraph()));
     m_ui.RegisterWindow(std::make_unique<WorldSettingsPanel>(scene, app.GetRenderer(), m_assetRegistry));
+    m_ui.RegisterWindow(std::make_unique<PostProcessPanel>(scene, app.GetRenderer(), m_assetRegistry));
     {
         auto assetsOwned = std::make_unique<AssetsPanel>(
             projectDir, app.GetDesc().cookCacheDir, m_assetRegistry);
@@ -286,6 +291,9 @@ void EditorMode::OnUpdate(float dt) {
         NewScene();
     else if (input.WasActivated("SaveScene"))
         SaveScene();
+
+    if (input.WasActivated("TogglePanels"))
+        m_ui.TogglePanelsHidden();
 
     // Gizmo mode shortcuts — T / R / S; guard S with !mouseLook to avoid WASD conflict.
     if (input.WasActivated("GizmoTranslate"))

@@ -162,6 +162,17 @@ void EditorUI::DrawPanels() {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Windows")) {
+            if (ImGui::MenuItem("Open All")) {
+                for (auto& w : m_windows)
+                    if (!w->isOpen) { w->isOpen = true; w->OnOpen(); }
+            }
+            if (ImGui::MenuItem("Close All")) {
+                for (auto& w : m_windows)
+                    if (w->isOpen) { w->isOpen = false; w->OnClose(); }
+            }
+            if (ImGui::MenuItem("Toggle Panels [F8]", nullptr, m_panelsHidden))
+                TogglePanelsHidden();
+            ImGui::Separator();
             for (auto& w : m_windows) {
                 bool open = w->isOpen;
                 if (ImGui::MenuItem(std::string(w->GetName()).c_str(), nullptr, open)) {
@@ -203,7 +214,7 @@ void EditorUI::DrawPanels() {
 
     // ── Panel windows ─────────────────────────────────────────────────────────
     for (auto& w : m_windows) {
-        if (!w->isOpen) continue;
+        if (!w->isOpen || m_panelsHidden) continue;
         bool open = w->isOpen;
         if (ImGui::Begin(std::string(w->GetName()).c_str(), &open, w->GetWindowFlags()))
             w->OnDraw();
@@ -252,5 +263,8 @@ void EditorUI::Render(RHI::IRHICommandList* cmdList) {
 void EditorUI::OnSwapchainResize(uint32_t minImageCount) {
     ImGui_ImplVulkan_SetMinImageCount(minImageCount);
 }
+
+void EditorUI::TogglePanelsHidden() { m_panelsHidden = !m_panelsHidden; }
+bool EditorUI::ArePanelsHidden() const { return m_panelsHidden; }
 
 } // namespace StellarAlia::Editor
