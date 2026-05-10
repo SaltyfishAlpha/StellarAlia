@@ -822,7 +822,8 @@ static const char* GlyphForExt(const std::string& ext) {
     if (IsImageExt(ext))                                   return FA_ICON_TEXTURE;
     if (ext == ".samat" || ext == ".mat")                  return FA_ICON_MATERIAL;
     if (ext == ".sascene")                                 return FA_ICON_SCENE;
-    if (ext == ".saanim")                                  return FA_ICON_ANIMATION;
+    if (ext == ".sanim")                                   return FA_ICON_ANIMATION;
+    if (ext == ".saskel")                                  return FA_ICON_SKELETON;
     if (ext == ".saglsl")                                  return FA_ICON_SCRIPT;
     if (ext == ".json"  || ext == ".jsonc")                return FA_ICON_CONFIG;
     return nullptr;
