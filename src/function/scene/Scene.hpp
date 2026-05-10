@@ -12,6 +12,74 @@
 namespace StellarAlia {
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ColorGradingSettings — parametric color grading applied post-ACES.
+//
+// Parameters are baked into a 32³ RGBA16F 3D LUT by a compute shader whenever
+// they change.  The LUT is then sampled once per pixel in the Tonemap pass.
+// Only active when PostProcessSettings::tonemapMode == Builtin.
+// ─────────────────────────────────────────────────────────────────────────────
+struct ColorGradingSettings {
+    bool      enabled    = false;
+    glm::vec3 lift       = {0.f, 0.f, 0.f};  // shadow additive offset  [-0.5, 0.5]
+    glm::vec3 midtone    = {1.f, 1.f, 1.f};  // midtone power (ASC CDL) [ 0.1, 3.0]
+    glm::vec3 gain       = {1.f, 1.f, 1.f};  // highlight multiplier    [ 0.0, 3.0]
+    float     saturation = 1.f;              // [0, 3]
+    float     contrast   = 1.f;             // [0, 3], pivot at 0.5
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PostProcessSettings — runtime post-process parameters.
+//
+// Embedded in WorldSettings::pp.  All fields have sensible defaults.
+// Serialized as a "postProcess" sub-object inside the "world" block.
+// ─────────────────────────────────────────────────────────────────────────────
+struct PostProcessSettings {
+    // ── Bloom ─────────────────────────────────────────────────────────────────
+    bool  bloomEnabled   = true;
+    float bloomThreshold = 1.0f;  // luminance cutoff; knee = threshold * 0.1
+    float bloomStrength  = 0.4f;  // composite blend weight
+    float bloomRadius    = 1.0f;  // widest upsample radius; each level scales by 0.85
+    int   bloomMipLevels = 3;     // pyramid depth [2, 8]; changing triggers desc set rebuild
+
+    // ── Tonemap ───────────────────────────────────────────────────────────────
+    enum class TonemapMode { Builtin, LUT };
+    TonemapMode tonemapMode  = TonemapMode::Builtin;
+    AssetID     tonemapLut;       // only used when tonemapMode == LUT
+    float       exposure     = 1.f;
+    float       lutStrength  = 1.f;
+
+    // ── Color Grading (Builtin tonemap mode only) ─────────────────────────────
+    ColorGradingSettings colorGrading;
+
+    // ── SSAO (GTAO) ───────────────────────────────────────────────────────────
+    bool  ssaoEnabled       = false;
+    float ssaoRadius        = 32.f;   // sampling radius in pixels
+    float ssaoStrength      = 1.0f;
+    float ssaoBias          = 0.025f; // sin-domain bias against self-occlusion
+    int   ssaoDirections    = 4;
+    int   ssaoSteps         = 3;
+    float ssaoBlurSharpness = 10.f;
+
+    // ── TAA (Temporal Anti-Aliasing) ─────────────────────────────────────────
+    bool  taaEnabled       = false;
+    float taaBlendStatic   = 0.1f;  // history weight in static regions (smaller = more stable)
+    float taaBlendMotion   = 0.5f;  // history weight in motion regions
+    bool  taaAntiGhosting  = true;  // enable 3x3 neighborhood clamping
+
+    // ── Auto Exposure (eye adaptation) ──────────────────────────────────────
+    bool  autoExposureEnabled = false;
+    float aeEvMin        = -4.0f;   // log2 luminance range minimum (EV)
+    float aeEvMax        =  4.0f;   // log2 luminance range maximum (EV)
+    float aeAdaptSpeed   =  2.0f;   // adaptation speed (1/sec)
+    float aeLowPercent   =  0.45f;  // histogram low-cut percentile
+    float aeHighPercent  =  0.95f;  // histogram high-cut percentile
+
+    // ── Future effects (placeholder — no pass implementation yet) ─────────────
+    bool dofEnabled        = false;
+    bool motionBlurEnabled = false;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // WorldSettings
 //
 // Scene-level global configuration that does not belong to any individual
@@ -33,13 +101,8 @@ struct WorldSettings {
     AssetID brdfLut;          // Split-sum BRDF LUT 2D (fixed UUID, .satex)
     AssetID skyboxCubemap;    // Equirect HDR converted to cubemap (.satex)
 
-    // ── Tonemap ───────────────────────────────────────────────────────────────
-    enum class TonemapMode { Builtin, LUT };
-    TonemapMode tonemapMode  = TonemapMode::Builtin;
-    AssetID     tonemapLut;       // only used when tonemapMode == LUT
-    float       exposure     = 1.f;
-    float       gamma        = 2.2f;
-    float       lutStrength  = 1.f;
+    // ── Post-process ─────────────────────────────────────────────────────────
+    PostProcessSettings pp;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

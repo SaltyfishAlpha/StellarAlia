@@ -59,6 +59,10 @@ public:
     // Sampler bindings for set=1, bindings 1..N
     std::vector<TextureDef> textures;
 
+    // True for types registered from a project's cook cache (custom .saglsl models).
+    // Cleared by MaterialManager::ClearProjectTypes() on project switch.
+    bool isProjectType = false;
+
     // Default render state
     RHI::RHICullMode  defaultCullMode  = RHI::RHICullMode::Back;
     RHI::RHIBlendMode defaultBlendMode = RHI::RHIBlendMode::Opaque;

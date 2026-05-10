@@ -1,6 +1,7 @@
 #include "engine/Application.hpp"
 
 #include "core/logs/Log.hpp"
+#include "core/Profiler.hpp"
 #include "function/scene/Components.hpp"
 #include "platform/input/GLFWInputProvider.hpp"
 #include "platform/rhi/vulkan/VulkanDevice.hpp"
@@ -82,6 +83,7 @@ bool Application::Init(const Desc& desc) {
         return false;
     }
     m_renderer.SetDebugDraw(&m_debugDraw);
+    m_animSystem.Init(m_device.get(), m_renderer.GetSkinDescLayout());
 
     // ── PhysicsSystem ─────────────────────────────────────────────────────────
     if (!m_physics.Init(&m_debugDraw))
@@ -111,36 +113,49 @@ void Application::Run() {
     auto lastTime = Clock::now();
 
     while (!m_window->ShouldClose()) {
+        SA_PROFILE_SCOPE_N("Frame");
+
         const auto  now = Clock::now();
         const float dt  = std::chrono::duration<float>(now - lastTime).count();
         lastTime = now;
 
         // ── Input ─────────────────────────────────────────────────────────────
-        m_window->PollEvents();
-        m_input.Poll();
+        {
+            SA_PROFILE_SCOPE_N("Input");
+            m_window->PollEvents();
+            m_input.Poll();
+        }
 
         // ── Debug draw — clear before mode populates it ───────────────────────
         m_debugDraw.Clear();
 
         // ── Fixed-step physics (only while simulation is running) ─────────────
-        constexpr float kFixedStep = 1.f / 60.f;
-        if (m_playState == EnginePlayState::Playing) {
-            m_physicsAccumulator += dt;
-            while (m_physicsAccumulator >= kFixedStep) {
-                m_physics.SyncIn(*m_scene);
-                m_physics.Step(kFixedStep);
-                m_physics.SyncOut(*m_scene);
-                m_physicsAccumulator -= kFixedStep;
+        {
+            SA_PROFILE_SCOPE_N("Physics");
+            constexpr float kFixedStep = 1.f / 60.f;
+            if (m_playState == EnginePlayState::Playing) {
+                m_physicsAccumulator += dt;
+                while (m_physicsAccumulator >= kFixedStep) {
+                    m_physics.SyncIn(*m_scene);
+                    m_physics.Step(kFixedStep);
+                    m_physics.SyncOut(*m_scene);
+                    m_physicsAccumulator -= kFixedStep;
+                }
             }
+            m_physics.DrawDebug(m_physicsDebugSettings, *m_scene);
         }
-        m_physics.DrawDebug(m_physicsDebugSettings, *m_scene);
 
         // ── Mode update ───────────────────────────────────────────────────────
-        m_mode->OnUpdate(dt);
+        {
+            SA_PROFILE_SCOPE_N("ModeUpdate");
+            m_mode->OnUpdate(dt);
+        }
 
         // ── Animation (only while simulation is running) ──────────────────────
-        if (m_playState == EnginePlayState::Playing)
+        if (m_playState == EnginePlayState::Playing) {
+            SA_PROFILE_SCOPE_N("Animation");
             m_animSystem.Update(dt, m_scene->Registry(), m_resMgr, m_device.get());
+        }
 
         // ── Editor skinned-mesh refresh: inspector changed meshAsset → re-prepare
         //    (SceneRenderer handles static-mesh rebuild; skinned meshes also need
@@ -151,6 +166,10 @@ void Application::Run() {
         }
 
         // ── Render ────────────────────────────────────────────────────────────
+        // Skip the frame while the window is minimized (GLFW framebuffer size = 0x0).
+        // m_device->GetSwapchainWidth/Height() lags behind because ResizeSwapchain()
+        // is never called with 0x0; we check the window directly instead.
+        if (m_window->GetWidth() == 0 || m_window->GetHeight() == 0) continue;
         const auto w = m_device->GetSwapchainWidth();
         const auto h = m_device->GetSwapchainHeight();
         if (w == 0 || h == 0) continue;
@@ -159,6 +178,8 @@ void Application::Run() {
         m_scene->UpdateTransforms();
         m_renderer.RenderFrame(*m_scene, m_mode->GetCameraData(aspect), w, h,
             [this](RHI::IRHICommandList* cmd) { m_mode->OnRenderUI(cmd); });
+
+        SA_PROFILE_FRAME();
     }
 }
 
@@ -172,6 +193,7 @@ void Application::Shutdown() {
     m_mode->OnDetach();
 
     m_physics.Shutdown();
+    m_animSystem.Shutdown(m_device.get(), m_scene->Registry());
     m_renderer.Shutdown();
     m_input.Shutdown();
     m_matMgr.Shutdown();

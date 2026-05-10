@@ -12,6 +12,9 @@
 namespace StellarAlia          { class MaterialManager; }
 namespace StellarAlia          { class InputSystem; }
 namespace StellarAlia::Resource { class AssetRegistry; }
+namespace StellarAlia::Editor   { class EditorIconCache; }
+
+struct ImFont;
 
 namespace StellarAlia::Editor {
 
@@ -41,7 +44,7 @@ public:
                          Resource::AssetRegistry* registry = nullptr);
 
     std::string_view GetName()    const override { return "Assets"; }
-    ImGuiWindowFlags GetWindowFlags() const override { return ImGuiWindowFlags_HorizontalScrollbar; }
+    ImGuiWindowFlags GetWindowFlags() const override { return 0; }
     void OnDraw() override;
 
     // Register a callback invoked when the user double-clicks a .sascene file.
@@ -79,6 +82,11 @@ public:
     // Triggers a rescan on the next draw frame.
     void SetProjectDir(const std::filesystem::path& assetsRoot);
 
+    // Wire the icon cache + icon font for file icon display.
+    void SetIconCache(EditorIconCache* cache, ImFont* iconFont) {
+        m_iconCache = cache; m_iconFont = iconFont;
+    }
+
     // ── Top-bar actions (called from EditorUI menu bar) ───────────────────────
     void RequestImport();      // open the import-file modal on next draw
     void RequestRefresh();     // rescan registry immediately
@@ -87,7 +95,10 @@ public:
 private:
     enum class CreateKind : uint8_t { Mat, Saglsl };
 
-    void DrawDirTree(const std::filesystem::path& dir);
+    // Left pane: recursive directory tree (dirs only).
+    void DrawDirPane(const std::filesystem::path& dir);
+    // Right pane: file list / grid for m_selectedDir.
+    void DrawFilePane();
     void ProcessImportQueue();
 
     // Write template content + .sameta + cook, then enter inline rename.
@@ -126,6 +137,7 @@ private:
     void ReimportDir(const std::filesystem::path& dir);
 
     std::filesystem::path    m_assetsRoot;
+    std::filesystem::path    m_selectedDir;    // directory shown in the right pane
     std::filesystem::path    m_selectedPath;   // primary selection (for context ops)
     std::string              m_projectDir;
     std::string              m_cookCacheDir;
@@ -137,6 +149,7 @@ private:
     // ── Multi-selection ────────────────────────────────────────────────────
     std::unordered_set<std::string>   m_selectedPaths;   // path strings of all selected files
     std::string                       m_shiftAnchorPath; // Shift+click range anchor
+    std::string                       m_pendingDeselectOtherPath; // deferred single-select
     std::vector<std::filesystem::path> m_drawOrderFiles; // visible file order (prev frame)
     std::vector<std::filesystem::path> m_drawOrderFilesBuild; // accumulated this frame
 
@@ -170,6 +183,18 @@ private:
     bool                  m_deleteConfirmOpen = false;
 
     bool m_initialScanDone = false;
+
+    // ── File-pane listing cache (avoids per-frame directory scan) ─────────────
+    std::filesystem::path                          m_cachedScanDir;
+    std::vector<std::filesystem::directory_entry>  m_cachedSubdirs;
+    std::vector<std::filesystem::directory_entry>  m_cachedFiles;
+    bool                                           m_filePaneDirty = true;
+
+    // ── File icon display ──────────────────────────────────────────────────
+    EditorIconCache* m_iconCache    = nullptr;
+    ImFont*          m_iconFont     = nullptr;
+    float            m_fileIconSize = 48.f;
+    bool             m_gridView     = true;
 };
 
 } // namespace StellarAlia::Editor

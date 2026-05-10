@@ -20,6 +20,7 @@ layout(set = 1, binding = 1) uniform sampler2D t_GNormalMaterial;
 layout(set = 1, binding = 2) uniform sampler2D t_GData;
 layout(set = 1, binding = 3) uniform sampler2D t_GDepth;
 layout(set = 1, binding = 4) uniform sampler2D t_ShadowMap;
+layout(set = 1, binding = 5) uniform sampler2D t_AO;  // GTAO result (1.0 = no occlusion)
 
 // ── I/O ───────────────────────────────────────────────────────────────────────
 layout(location = 0) in  vec2 v_TexCoord;
@@ -82,7 +83,7 @@ void main() {
     // ── Unpack into GBufferData ───────────────────────────────────────────────
     GBufferData gbuf;
     gbuf.albedo    = albedoOcc.rgb;
-    gbuf.occlusion = albedoOcc.a;
+    gbuf.occlusion = albedoOcc.a * texture(t_AO, v_TexCoord).r;
     gbuf.N         = OctDecode(normalMat.rg);
     gbuf.roughness = normalMat.b;
     gbuf.metallic  = normalMat.a;

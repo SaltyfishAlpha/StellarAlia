@@ -43,7 +43,7 @@ public:
         // Optional: caller-managed layout for set=0 (e.g. per-frame scene data
         // bound by RenderGraph before the dispatch).  When valid, this layout
         // occupies slot 0 in the pipeline layout instead of the auto-derived one.
-        RHI::RHIDescLayoutHandle  frameLayout;
+        RHI::RHIDescLayoutHandle  frameLayout = {};
     };
 
     // Compiles the shader module and creates descriptor set layouts from the

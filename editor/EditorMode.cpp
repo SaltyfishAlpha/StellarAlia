@@ -14,6 +14,8 @@
 #include "ui/panels/SceneHierarchyPanel.hpp"
 #include "ui/panels/InspectorPanel.hpp"
 #include "ui/panels/SettingsPanel.hpp"
+#include "ui/panels/PerformancePanel.hpp"
+#include "ui/panels/PostProcessPanel.hpp"
 #include "ui/panels/WorldSettingsPanel.hpp"
 #include "ui/panels/AssetsPanel.hpp"
 #include "ui/panels/ConsolePanel.hpp"
@@ -28,8 +30,12 @@
 
 #include "core/logs/Log.hpp"
 #include "function/animation/AnimationSystem.hpp"
+#include "shader_cook/ShaderCookLib.hpp"
+#include "ui/EditorIcons.hpp"
 
 #include <GLFW/glfw3.h>
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <glm/gtc/matrix_inverse.hpp>
@@ -37,6 +43,7 @@
 
 #if __has_include(<ImGuizmo.h>)
 #include <ImGuizmo.h>
+#include <imgui_internal.h>
 #define SA_HAS_IMGUIZMO 1
 #endif
 
@@ -110,7 +117,7 @@ void EditorMode::OnAttach(Application& app) {
 
     // ── EditorUI ──────────────────────────────────────────────────────────────
     auto* glfwWin = static_cast<GLFWwindow*>(app.GetNativeWindow());
-    if (!m_ui.Init(glfwWin, &app.GetVulkanDevice()))
+    if (!m_ui.Init(glfwWin, &app.GetVulkanDevice(), app.GetDesc().engineAssetsDir))
         SA_LOG_WARN("EditorMode: UI init failed — editor panels unavailable");
 
     // Register built-in panels.
@@ -137,8 +144,11 @@ void EditorMode::OnAttach(Application& app) {
         m_ui.RegisterWindow(std::move(inspOwned));
     }
     m_ui.RegisterWindow(std::make_unique<SettingsPanel>(
-        &m_overlaySettings, &app.GetPhysicsDebugSettings(), &app.GetRenderer().GetRenderGraph()));
+        &m_overlaySettings, &app.GetPhysicsDebugSettings()));
+    m_ui.RegisterWindow(std::make_unique<PerformancePanel>(
+        &app.GetRenderer().GetRenderGraph(), &app.GetVulkanDevice()));
     m_ui.RegisterWindow(std::make_unique<WorldSettingsPanel>(scene, app.GetRenderer(), m_assetRegistry));
+    m_ui.RegisterWindow(std::make_unique<PostProcessPanel>(scene, app.GetRenderer(), m_assetRegistry));
     {
         auto assetsOwned = std::make_unique<AssetsPanel>(
             projectDir, app.GetDesc().cookCacheDir, m_assetRegistry);
@@ -201,11 +211,20 @@ void EditorMode::OnAttach(Application& app) {
     m_projectBrowserPanel = std::make_unique<ProjectBrowserPanel>(
         m_projectManager, app.GetDesc().engineAssetsDir);
     m_projectBrowserPanel->SetOnProjectSelected([this](const fs::path& path) {
-        LoadProject(path);
+        m_pendingProjectLoad = path;
     });
 
     if (projectDir.empty() || projFile.empty())
         m_showProjectBrowser = true;
+
+    // ── EditorIconCache (must be after ImGui Vulkan backend init) ────────────
+    m_iconCache = std::make_unique<EditorIconCache>();
+    m_iconCache->Init(&app.GetVulkanDevice(),
+                      &app.GetResourceManager(),
+                      app.GetDesc().engineAssetsDir);
+    if (m_assetsPanel)    m_assetsPanel->SetIconCache(m_iconCache.get(), m_ui.GetIconFont());
+    if (m_inspectorPanel) m_inspectorPanel->SetIconCache(m_iconCache.get());
+    if (m_inspectorPanel) m_inspectorPanel->SetIconFont(m_ui.GetIconFont());
 
     SA_LOG_INFO("EditorMode: attached");
     SA_LOG_INFO("  RMB + Mouse / Right stick — Look");
@@ -222,6 +241,7 @@ void EditorMode::OnDetach() {
     const fs::path defaultPath = fs::path(StellarAliaApp::BIN_DIR) / "editor_shortcuts.json";
     if (m_shortcutConfig.IsDirty() && m_shortcutConfig.GetConfigPath() != defaultPath)
         m_shortcutConfig.Save();
+    if (m_iconCache) { m_iconCache->Shutdown(); m_iconCache.reset(); }
     m_ui.Shutdown();
     m_logCapture.reset();  // removes sink from spdlog before logger shuts down
 
@@ -234,6 +254,7 @@ void EditorMode::OnDetach() {
 
 void EditorMode::OnRenderUI(RHI::IRHICommandList* cmd) {
     m_ui.NewFrame();
+    DrawBillboardIcons();
 
     if (m_projectBrowserPanel) {
         if (m_showProjectBrowser) {
@@ -245,10 +266,19 @@ void EditorMode::OnRenderUI(RHI::IRHICommandList* cmd) {
 
     m_ui.DrawPanels();
     DrawImGuizmo();
+    HandleViewportInteraction();
     m_ui.Render(cmd);
 }
 
 void EditorMode::OnUpdate(float dt) {
+    // Flush deferred project load — must run before RenderFrame (before vkAcquireNextImageKHR).
+    if (!m_pendingProjectLoad.empty()) {
+        const fs::path path = std::move(m_pendingProjectLoad);
+        m_pendingProjectLoad.clear();
+        LoadProject(path);
+        return;   // skip this frame's input/camera update; next frame will be the new project
+    }
+
     InputSystem&         input    = m_app->GetInputSystem();
     Platform::GLFWInputProvider& provider = m_app->GetInputProvider();
 
@@ -286,6 +316,9 @@ void EditorMode::OnUpdate(float dt) {
         NewScene();
     else if (input.WasActivated("SaveScene"))
         SaveScene();
+
+    if (input.WasActivated("TogglePanels"))
+        m_ui.TogglePanelsHidden();
 
     // Gizmo mode shortcuts — T / R / S; guard S with !mouseLook to avoid WASD conflict.
     if (input.WasActivated("GizmoTranslate"))
@@ -339,6 +372,88 @@ void EditorMode::DrawOverlays() {
                     dd.DrawFrustum(ivp, color);
                 });
         }
+    }
+
+    // ── Light wireframes ──────────────────────────────────────────────────────
+    if (m_overlaySettings.drawPointLightRange) {
+        const uint32_t sw = m_app->GetVulkanDevice().GetSwapchainWidth();
+        const uint32_t sh = m_app->GetVulkanDevice().GetSwapchainHeight();
+        if (sw > 0 && sh > 0) {
+            const float     aspect   = static_cast<float>(sw) / static_cast<float>(sh);
+            const glm::mat4 view     = m_camera.GetCameraData(aspect).view;
+            const glm::vec3 camRight = glm::vec3(view[0][0], view[1][0], view[2][0]);
+            const glm::vec3 camUp    = glm::vec3(view[0][1], view[1][1], view[2][1]);
+            const glm::vec4 color    = { 1.f, 0.7f, 0.2f, 0.6f };
+            constexpr int   N        = 64;
+            constexpr float kTwoPi   = 6.28318530f;
+            scene.View<PointLightComponent, WorldTransformComponent>().each(
+                [&](entt::entity, const PointLightComponent& pl, const WorldTransformComponent& wt) {
+                    const glm::vec3 pos = glm::vec3(wt.matrix[3]);
+                    for (int i = 0; i < N; ++i) {
+                        const float     a0 = static_cast<float>(i)     / N * kTwoPi;
+                        const float     a1 = static_cast<float>(i + 1) / N * kTwoPi;
+                        const glm::vec3 p0 = pos + (camRight * std::cos(a0) + camUp * std::sin(a0)) * pl.range;
+                        const glm::vec3 p1 = pos + (camRight * std::cos(a1) + camUp * std::sin(a1)) * pl.range;
+                        dd.DrawLine(p0, p1, color);
+                    }
+                });
+        }
+    }
+
+    if (m_overlaySettings.drawSpotLightCone) {
+        const glm::vec4 color = { 1.f, 0.9f, 0.2f, 0.7f };
+        scene.View<SpotLightComponent, WorldTransformComponent>().each(
+            [&](entt::entity, const SpotLightComponent& sl, const WorldTransformComponent& wt) {
+                const glm::vec3 pos = glm::vec3(wt.matrix[3]);
+                const glm::vec3 fwd = glm::normalize(-glm::vec3(wt.matrix[2]));
+                const glm::vec3 tmp = std::abs(fwd.y) < 0.99f
+                                      ? glm::vec3(0.f, 1.f, 0.f) : glm::vec3(1.f, 0.f, 0.f);
+                const glm::vec3 right  = glm::normalize(glm::cross(fwd, tmp));
+                const glm::vec3 up2    = glm::cross(right, fwd);
+                const float     baseR  = sl.range * std::tan(sl.outerAngle);
+                const glm::vec3 baseC  = pos + fwd * sl.range;
+                constexpr int   N      = 32;
+                constexpr float kTwoPi = 6.28318530f;
+                for (int i = 0; i < N; ++i) {
+                    const float a0 = static_cast<float>(i)     / N * kTwoPi;
+                    const float a1 = static_cast<float>(i + 1) / N * kTwoPi;
+                    const glm::vec3 p0 = baseC + (right * std::cos(a0) + up2 * std::sin(a0)) * baseR;
+                    const glm::vec3 p1 = baseC + (right * std::cos(a1) + up2 * std::sin(a1)) * baseR;
+                    dd.DrawLine(p0, p1, color);
+                }
+                for (int i = 0; i < 4; ++i) {
+                    const float     a = static_cast<float>(i) * (kTwoPi / 4.f);
+                    const glm::vec3 p = baseC + (right * std::cos(a) + up2 * std::sin(a)) * baseR;
+                    dd.DrawLine(pos, p, color);
+                }
+            });
+    }
+
+    if (m_overlaySettings.drawAreaLightRect) {
+        const glm::vec4 color = { 0.4f, 0.9f, 1.f, 0.7f };
+        scene.View<AreaLightComponent, WorldTransformComponent>().each(
+            [&](entt::entity, const AreaLightComponent& al, const WorldTransformComponent& wt) {
+                const glm::vec3 pos = glm::vec3(wt.matrix[3]);
+                const glm::vec3 hw  = glm::normalize(glm::vec3(wt.matrix[0])) * (al.size.x * 0.5f);
+                const glm::vec3 hh  = glm::normalize(glm::vec3(wt.matrix[2])) * (al.size.y * 0.5f);
+                const glm::vec3 corners[4] = {
+                    pos - hw - hh, pos + hw - hh, pos + hw + hh, pos - hw + hh
+                };
+                for (int i = 0; i < 4; ++i)
+                    dd.DrawLine(corners[i], corners[(i + 1) % 4], color);
+                const glm::vec3 nrm = glm::normalize(glm::vec3(wt.matrix[1]));
+                dd.DrawArrow(pos, pos + nrm * 0.5f, color, 0.08f);
+            });
+    }
+
+    if (m_overlaySettings.drawDirectionalLightDir) {
+        const glm::vec4 color = { 0.6f, 0.8f, 1.f, 0.9f };
+        scene.View<DirectionalLightComponent, WorldTransformComponent>().each(
+            [&](entt::entity, const DirectionalLightComponent&, const WorldTransformComponent& wt) {
+                const glm::vec3 pos = glm::vec3(wt.matrix[3]);
+                const glm::vec3 dir = glm::normalize(-glm::vec3(wt.matrix[2]));
+                dd.DrawArrow(pos, pos + dir * 2.f, color, 0.15f);
+            });
     }
 
     // ── Selection-dependent overlays ──────────────────────────────────────────
@@ -487,8 +602,56 @@ void EditorMode::LoadProject(const fs::path& saprojectPath) {
     scene.Clear();
     m_currentScenePath.clear();
 
+    // ── Cook project .saglsl shading models (filesystem phase) ───────────────
+    // Runs before GPU teardown; outputs land in cookCacheDir/shaders/.
+    std::string cookedShaderDir;
+    {
+        const fs::path assetsDir = projectDir / "assets";
+        if (ShaderCook::HasSaglslFiles(assetsDir)) {
+            const fs::path spvOut      = cookCacheDir / "shaders";
+            const fs::path dispatchOut = cookCacheDir / "generated" / "shaders";
+
+#ifdef _WIN32
+            const std::string exeSuffix = ".exe";
+#else
+            const std::string exeSuffix;
+#endif
+            ShaderCook::CookConfig cookCfg;
+            cookCfg.glslcPath    = StellarAliaApp::GLSLC_PATH;
+            cookCfg.reflToolPath = std::string(StellarAliaApp::BIN_DIR) + "/ShaderReflectTool" + exeSuffix;
+            cookCfg.includePaths = { StellarAliaApp::ENGINE_SHADER_SRC_DIR, dispatchOut.string() };
+
+            const auto cookResult = ShaderCook::CookDirectory(assetsDir, spvOut, dispatchOut, cookCfg);
+            if (!cookResult.failedModels.empty()) {
+                SA_LOG_WARN("EditorMode: {} shading model(s) failed to cook",
+                            cookResult.failedModels.size());
+            }
+
+            if (cookResult.modelCount > 0) {
+                // Recompile deferred_lighting.frag with the project dispatch.
+                const fs::path fragSrc = fs::path(StellarAliaApp::ENGINE_SHADER_SRC_DIR)
+                                         / "deferred_lighting.frag";
+                const fs::path outSpv  = spvOut / "deferred_lighting.frag.spv";
+                ShaderCook::RecompileDeferredLighting(fragSrc, dispatchOut, outSpv,
+                                                       cookCfg.glslcPath,
+                                                       { StellarAliaApp::ENGINE_SHADER_SRC_DIR });
+            }
+
+            cookedShaderDir = spvOut.string();
+        }
+    }
+
     // Update Application paths
     m_app->UpdateProjectPaths(projectDir, cookCacheDir);
+
+    m_app->GetResourceManager().ClearProjectAssets();
+    m_app->GetMaterialManager().ClearProjectInstances();
+    m_app->GetRenderer().ResetProjectIBL();
+
+    // ── GPU hot-swap: replace project shader types (GPU is idle by now) ───────
+    m_app->GetRenderer().ApplyProjectShaderTypes(cookedShaderDir);
+
+    m_diagnostics.ClearSource(DiagSource::Runtime);
 
     // Rescan asset registry
     m_assetRegistry->Scan(projectDir / "assets", m_app->GetDesc().engineAssetsDir);
@@ -519,6 +682,28 @@ void EditorMode::LoadProject(const fs::path& saprojectPath) {
                                 saprojectPath);
     m_projectManager.SaveRecents(m_recentsConfigPath);
 
+    // Warn if cook_cache is empty but project has uncooked assets
+    {
+        const fs::path assetsDir = projectDir / "assets";
+        bool cookEmpty = true;
+        {
+            std::error_code ec;
+            for (const auto& e : fs::directory_iterator(cookCacheDir, ec))
+                if (e.path().filename() != ".gitkeep") { cookEmpty = false; break; }
+        }
+        bool hasAssets = false;
+        {
+            std::error_code ec;
+            for (const auto& e : fs::recursive_directory_iterator(assetsDir, ec))
+                if (e.path().extension() == ".sameta") { hasAssets = true; break; }
+        }
+        if (cookEmpty && hasAssets) {
+            SA_LOG_WARN("EditorMode: project cook cache is empty — run Reimport All to cook project assets");
+            m_diagnostics.Push({DiagLevel::Warning, DiagSource::Runtime,
+                "Project cook cache is empty — run \"Reimport All\" to cook project assets.", {}});
+        }
+    }
+
     SA_LOG_INFO("EditorMode: switched to project '{}'", projectDir.string());
 }
 
@@ -528,7 +713,7 @@ void EditorMode::NewScene() {
     m_currentScenePath.clear();
     const fs::path tmpl = m_templateRegistry.DefaultScenePath();
     if (!tmpl.empty())
-        SceneSerializer::LoadFromFile(scene, tmpl);
+        (void)SceneSerializer::LoadFromFile(scene, tmpl);
     m_app->GetRenderer().ApplyWorldSettings(scene.GetWorldSettings());
     m_app->PrepareAnimatedEntities();
     m_app->RebuildDrawList();
@@ -636,6 +821,71 @@ CameraData EditorMode::GetCameraData(float aspectRatio) const {
     return m_camera.GetCameraData(aspectRatio);
 }
 
+void EditorMode::DrawBillboardIcons() {
+    if (!m_overlaySettings.enabled || !m_overlaySettings.drawEntityIcons) return;
+    if (!m_iconCache) return;
+
+    ImFont* iconFont = m_ui.GetIconFont();
+    if (!iconFont) return;
+
+    const uint32_t sw = m_app->GetVulkanDevice().GetSwapchainWidth();
+    const uint32_t sh = m_app->GetVulkanDevice().GetSwapchainHeight();
+    if (sw == 0 || sh == 0) return;
+
+    const float w    = static_cast<float>(sw);
+    const float h    = static_cast<float>(sh);
+    const float half = m_overlaySettings.billboardIconSize * 0.5f;
+
+    const float aspect  = w / h;
+    const auto camData  = m_camera.GetCameraData(aspect);
+    const glm::mat4 vp  = camData.proj * camData.view;
+
+    const entt::entity selected = m_hierarchyPanel
+        ? static_cast<entt::entity>(m_hierarchyPanel->GetSelectedEntity())
+        : entt::null;
+
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+
+    m_billboardHits.clear();
+    auto project = [&](entt::entity e, glm::vec3 worldPos, const char* glyph, bool isSelected) {
+        const glm::vec4 clip = vp * glm::vec4(worldPos, 1.f);
+        if (clip.w <= 0.001f) return;
+        const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+        if (ndc.z < 0.f || ndc.z > 1.f) return;
+        const float sx = (ndc.x * 0.5f + 0.5f) * w;
+        const float sy = (ndc.y * 0.5f + 0.5f) * h;
+        const ImU32 col = isSelected
+            ? IM_COL32(255, 230, 80, 255)
+            : IM_COL32(220, 220, 220, 220);
+        dl->AddText(iconFont, m_overlaySettings.billboardIconSize,
+                    {sx - half, sy - half}, col, glyph);
+        m_billboardHits.push_back(BillboardHit{e, ImVec2{sx, sy}});
+    };
+
+    auto& reg = m_app->GetScene().Registry();
+
+    reg.view<WorldTransformComponent, DirectionalLightComponent>().each(
+        [&](entt::entity e, const WorldTransformComponent& wt, const DirectionalLightComponent&) {
+            project(e, glm::vec3(wt.matrix[3]), FA_ICON_LIGHT, e == selected);
+        });
+    reg.view<WorldTransformComponent, PointLightComponent>().each(
+        [&](entt::entity e, const WorldTransformComponent& wt, const PointLightComponent&) {
+            project(e, glm::vec3(wt.matrix[3]), FA_ICON_LIGHT, e == selected);
+        });
+    reg.view<WorldTransformComponent, SpotLightComponent>().each(
+        [&](entt::entity e, const WorldTransformComponent& wt, const SpotLightComponent&) {
+            project(e, glm::vec3(wt.matrix[3]), FA_ICON_LIGHT, e == selected);
+        });
+    reg.view<WorldTransformComponent, AreaLightComponent>().each(
+        [&](entt::entity e, const WorldTransformComponent& wt, const AreaLightComponent&) {
+            project(e, glm::vec3(wt.matrix[3]), FA_ICON_LIGHT, e == selected);
+        });
+    reg.view<WorldTransformComponent, CameraComponent>().each(
+        [&](entt::entity e, const WorldTransformComponent& wt, const CameraComponent&) {
+            project(e, glm::vec3(wt.matrix[3]), FA_ICON_CAMERA, e == selected);
+        });
+}
+
 void EditorMode::DrawImGuizmo() {
 #ifdef SA_HAS_IMGUIZMO
     if (!m_overlaySettings.enabled || !m_overlaySettings.drawGizmo) {
@@ -688,8 +938,11 @@ void EditorMode::DrawImGuizmo() {
     ImGuizmo::SetDrawlist(ImGui::GetBackgroundDrawList());
     ImGuizmo::SetRect(0.f, 0.f, io.DisplaySize.x, io.DisplaySize.y);
 
-    const bool changed = ImGuizmo::Manipulate(viewArr, projArr, op, mode, matArr);
+    const bool wasUsing = m_gizmoIsUsing;
+    const bool changed  = ImGuizmo::Manipulate(viewArr, projArr, op, mode, matArr);
     m_gizmoIsUsing = ImGuizmo::IsUsing();
+    if (wasUsing && !m_gizmoIsUsing)
+        scene.MarkMaterialDirty();
 
     if (changed) {
         // Convert manipulated world matrix back to local space
@@ -718,6 +971,125 @@ void EditorMode::DrawImGuizmo() {
 #else
     m_gizmoIsUsing = false;
 #endif
+}
+
+// ── Viewport interaction (picking + asset drop) ───────────────────────────────
+
+void EditorMode::HandleViewportInteraction() {
+    if (m_app->GetPlayState() != EnginePlayState::Editing) return;
+
+    const uint32_t sw = m_app->GetVulkanDevice().GetSwapchainWidth();
+    const uint32_t sh = m_app->GetVulkanDevice().GetSwapchainHeight();
+    if (sw == 0 || sh == 0) return;
+
+    const ImGuiIO& io = ImGui::GetIO();
+
+    // Transparent full-screen window behind all panels — receives drag-drop payloads
+    // and left-click picking when no UI panel is under the cursor.
+    ImGui::SetNextWindowPos({0.f, 0.f});
+    ImGui::SetNextWindowSize({static_cast<float>(sw), static_cast<float>(sh)});
+    ImGui::SetNextWindowBgAlpha(0.f);
+    constexpr ImGuiWindowFlags kFlags =
+        ImGuiWindowFlags_NoDecoration          |
+        ImGuiWindowFlags_NoNav                 |
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoFocusOnAppearing    |
+        ImGuiWindowFlags_NoDocking             |
+        ImGuiWindowFlags_NoSavedSettings;
+    ImGui::Begin("##viewport_interact", nullptr, kFlags);
+
+    // Tell ImGuizmo to treat this overlay as an acceptable hover target.
+    // Without this, IsHoveringWindow() returns false (any non-gizmo window blocks it),
+    // setting mbMouseOver=false and disabling all gizmo handle hit-tests.
+#ifdef SA_HAS_IMGUIZMO
+    ImGuizmo::SetAlternativeWindow(ImGui::GetCurrentWindow());
+#endif
+
+    // ── Asset drop from AssetsPanel ───────────────────────────────────────────
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAASSET")) {
+            if (m_hierarchyPanel) {
+                fs::path assetPath(static_cast<const char*>(p->Data));
+                std::string ext = assetPath.extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                               [](unsigned char c){ return static_cast<char>(::tolower(c)); });
+                if (ext == ".glb" || ext == ".gltf") {
+                    glm::vec3 spawnPos(0.f);
+                    const Core::Ray ray = ScreenToWorldRay(io.MousePos.x, io.MousePos.y);
+                    if (!RayHitHorizontalPlane(ray, 0.f, spawnPos))
+                        spawnPos = ray.origin + ray.dir * 10.f; // fallback: 10 units in front
+                    m_hierarchyPanel->TriggerAssetDrop(assetPath, spawnPos);
+                }
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
+
+    // ── Left-click entity picking ─────────────────────────────────────────────
+    if (!m_gizmoIsUsing &&
+#ifdef SA_HAS_IMGUIZMO
+        !ImGuizmo::IsOver() &&
+#endif
+        ImGui::IsWindowHovered() &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+    {
+        // Billboard icons (lights / cameras) are checked first — they have no mesh.
+        entt::entity hit = entt::null;
+        if (!m_billboardHits.empty()) {
+            const float radius = m_overlaySettings.billboardIconSize * 0.5f;
+            float bestDist = radius;
+            for (const auto& bh : m_billboardHits) {
+                const float dx = io.MousePos.x - bh.screenPos.x;
+                const float dy = io.MousePos.y - bh.screenPos.y;
+                const float d  = std::sqrt(dx * dx + dy * dy);
+                if (d < bestDist) { bestDist = d; hit = bh.entity; }
+            }
+        }
+        // Fall back to geometry raycast when no billboard was hit.
+        if (hit == entt::null) {
+            const Core::Ray ray = ScreenToWorldRay(io.MousePos.x, io.MousePos.y);
+            hit = m_app->GetRenderer().RaycastScene(ray);
+        }
+        if (m_hierarchyPanel) {
+            if (hit != entt::null)
+                m_hierarchyPanel->SetSelection(hit);
+            else
+                m_hierarchyPanel->ClearSelection();
+        }
+    }
+
+    ImGui::End();
+}
+
+Core::Ray EditorMode::ScreenToWorldRay(float sx, float sy) const {
+    const uint32_t sw = m_app->GetVulkanDevice().GetSwapchainWidth();
+    const uint32_t sh = m_app->GetVulkanDevice().GetSwapchainHeight();
+    if (sw == 0 || sh == 0)
+        return Core::Ray::FromOriginDir({}, {0.f, 0.f, -1.f});
+
+    const float aspect = static_cast<float>(sw) / static_cast<float>(sh);
+    const CameraData cam = m_camera.GetCameraData(aspect);
+
+    // cam.proj has Vulkan Y-flip (proj[1][1]*=-1) already applied,
+    // so ndcY = (sy/sh)*2−1 directly maps top→-1, bottom→+1.
+    const float ndcX = (sx / static_cast<float>(sw)) * 2.f - 1.f;
+    const float ndcY = (sy / static_cast<float>(sh)) * 2.f - 1.f;
+
+    const glm::mat4 invProjView = glm::inverse(cam.proj * cam.view);
+    const glm::vec4 near4 = invProjView * glm::vec4(ndcX, ndcY, 0.f, 1.f);
+    const glm::vec4 far4  = invProjView * glm::vec4(ndcX, ndcY, 1.f, 1.f);
+    const glm::vec3 nearPt = glm::vec3(near4) / near4.w;
+    const glm::vec3 farPt  = glm::vec3(far4)  / far4.w;
+
+    return Core::Ray::FromOriginDir(cam.worldPosition, glm::normalize(farPt - nearPt));
+}
+
+bool EditorMode::RayHitHorizontalPlane(const Core::Ray& ray, float planeY, glm::vec3& outHit) {
+    if (std::abs(ray.dir.y) < 1e-6f) return false;
+    const float t = (planeY - ray.origin.y) / ray.dir.y;
+    if (t < 0.f) return false;
+    outHit = ray.origin + t * ray.dir;
+    return true;
 }
 
 } // namespace StellarAlia::Editor

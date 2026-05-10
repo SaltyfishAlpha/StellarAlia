@@ -8,7 +8,6 @@ namespace StellarAlia::Editor {
 
 void WorldSettingsPanel::OnDraw() {
     WorldSettings& ws = m_scene->GetWorldSettings();
-    bool liveUpdate = false;
 
     // ── Background ────────────────────────────────────────────────────────────
     if (ImGui::CollapsingHeader("Background", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -24,7 +23,7 @@ void WorldSettingsPanel::OnDraw() {
             if (ImGui::ColorEdit3("Color (linear)", col,
                     ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR)) {
                 ws.backgroundColor = { col[0], col[1], col[2] };
-                liveUpdate = true;
+                m_renderer->ApplyWorldSettings(ws, /*updateIBL=*/false);
             }
         } else {
             // HDR asset picker — changing it clears stale baked products.
@@ -71,40 +70,12 @@ void WorldSettingsPanel::OnDraw() {
     }
 
     ImGui::Spacing();
-
-    // ── Tonemap ───────────────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Tonemap", ImGuiTreeNodeFlags_DefaultOpen)) {
-        int tmMode = (ws.tonemapMode == WorldSettings::TonemapMode::LUT) ? 1 : 0;
-        if (ImGui::RadioButton("ACES (Builtin)", &tmMode, 0))
-            ws.tonemapMode = WorldSettings::TonemapMode::Builtin;
-        ImGui::SameLine();
-        if (ImGui::RadioButton("LUT", &tmMode, 1))
-            ws.tonemapMode = WorldSettings::TonemapMode::LUT;
-
-        if (ImGui::SliderFloat("Exposure", &ws.exposure, 0.1f, 10.f, "%.2f",
-                ImGuiSliderFlags_Logarithmic))
-            liveUpdate = true;
-
-        if (ws.tonemapMode == WorldSettings::TonemapMode::Builtin) {
-            if (ImGui::SliderFloat("Gamma", &ws.gamma, 1.f, 3.f, "%.2f"))
-                liveUpdate = true;
-        } else {
-            if (DrawAssetIDField("LUT Asset", ws.tonemapLut, "Texture", m_registry))
-                liveUpdate = true;
-            if (ImGui::SliderFloat("LUT Strength", &ws.lutStrength, 0.f, 1.f, "%.2f"))
-                liveUpdate = true;
-        }
-    }
-
-    ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
 
-    // ── Apply ─────────────────────────────────────────────────────────────────
+    // ── Apply (IBL bake / settings reload) ───────────────────────────────────
     if (ImGui::Button("Apply Settings", { -1.f, 0.f }))
         m_renderer->ApplyWorldSettings(ws);
-    else if (liveUpdate)
-        m_renderer->ApplyWorldSettings(ws, /*updateIBL=*/false);
 }
 
 } // namespace StellarAlia::Editor

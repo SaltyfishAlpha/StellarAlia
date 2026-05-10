@@ -89,9 +89,7 @@ int main() {
     rendDesc.cookCacheDir = cookDir.string();
     rendDesc.config.shadowEnabled  = true;
     rendDesc.config.shadowMapSize  = 2048;
-    rendDesc.config.bloomEnabled   = true;
     rendDesc.config.bloomMipCount  = 3;
-    rendDesc.config.builtinTonemap = true;
 
     if (!renderer.Init(rendDesc)) {
         SA_LOG_CRITICAL("Sandbox: renderer init failed");

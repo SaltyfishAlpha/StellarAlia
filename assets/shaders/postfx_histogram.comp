@@ -1,0 +1,43 @@
+#version 450
+
+// postfx_histogram.comp
+// 16×16 workgroup histogram: accumulates 256-bin log-luminance distribution from HDR buffer.
+// set=1, binding=0 = HDR texture (sampler2D)
+// set=1, binding=1 = histogram SSBO (256 × uint, cleared each frame by RG clearOnCreate)
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 1, binding = 0) uniform sampler2D u_hdr;
+
+layout(set = 1, binding = 1, std430) buffer HistoBuffer {
+    uint bins[256];
+} u_histo;
+
+layout(push_constant) uniform PC {
+    uint  width;
+    uint  height;
+    float evMin;
+    float evMax;
+} pc;
+
+shared uint s_bins[256];
+
+void main() {
+    uint lid = gl_LocalInvocationIndex;
+    if (lid < 256u) s_bins[lid] = 0u;
+    barrier();
+
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x < int(pc.width) && coord.y < int(pc.height)) {
+        vec3  hdr    = texelFetch(u_hdr, coord, 0).rgb;
+        float lum    = dot(hdr, vec3(0.2126, 0.7152, 0.0722));
+        float logLum = (log2(max(lum, 0.0001)) - pc.evMin) / (pc.evMax - pc.evMin);
+        logLum       = clamp(logLum, 0.0, 1.0);
+        uint  bin    = uint(logLum * 255.0);
+        atomicAdd(s_bins[bin], 1u);
+    }
+
+    barrier();
+    if (lid < 256u)
+        atomicAdd(u_histo.bins[lid], s_bins[lid]);
+}

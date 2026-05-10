@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -9,6 +10,7 @@
 namespace StellarAlia::Editor { class EditorDiagnostics; }
 
 struct GLFWwindow;
+struct ImFont;
 
 // Full definition required: vector<unique_ptr<IEditorWindow>> needs the
 // complete type for destruction when EditorUI is destroyed.
@@ -42,7 +44,12 @@ public:
 
     // Initialise ImGui + GLFW/Vulkan backends.
     // Call once after VulkanDevice and the GLFW window are ready.
-    bool Init(GLFWwindow* window, RHI::VulkanDevice* device);
+    // engineAssetsDir is used to locate fonts/fa-solid-900.otf for the icon font.
+    bool Init(GLFWwindow* window, RHI::VulkanDevice* device,
+              const std::filesystem::path& engineAssetsDir = {});
+
+    // Returns the loaded Font Awesome 6 icon font, or nullptr if not loaded.
+    [[nodiscard]] ImFont* GetIconFont() const { return m_iconFont; }
 
     // Destroy ImGui resources. Must be called before VulkanDevice::Shutdown().
     void Shutdown();
@@ -65,6 +72,10 @@ public:
 
     // Notify backend when swapchain is recreated (pass new min image count).
     void OnSwapchainResize(uint32_t minImageCount);
+
+    // Temporarily hide / restore all registered panels without changing isOpen.
+    void TogglePanelsHidden();
+    bool ArePanelsHidden() const;
 
     // File menu callbacks — set before DrawPanels() is first called.
     struct FileCallbacks {
@@ -93,8 +104,8 @@ private:
     FileCallbacks                               m_fileCallbacks;
     AssetCallbacks                              m_assetCallbacks;
     EditorDiagnostics*                          m_diagnostics   = nullptr;
-    // ImGui manages its own descriptor pool (DescriptorPoolSize path).
-    // No VkDescriptorPool member needed in this header.
+    bool                                        m_panelsHidden  = false;
+    ImFont*                                     m_iconFont      = nullptr;
 };
 
 } // namespace StellarAlia::Editor

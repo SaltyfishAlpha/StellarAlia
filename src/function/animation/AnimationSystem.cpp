@@ -2,17 +2,39 @@
 
 #include "function/scene/Components.hpp"
 #include "resource/ResourceManager.hpp"
-#include "resource/cook/CookedMesh.hpp"
 #include "resource/cook/CookedAnim.hpp"
 #include "resource/cook/CookedSkeleton.hpp"
 #include "core/logs/Log.hpp"
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
-#include <cstring>
 #include <algorithm>
 
 namespace StellarAlia {
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Init / Shutdown
+// ─────────────────────────────────────────────────────────────────────────────
+void AnimationSystem::Init(RHI::IRHIDevice* /*device*/,
+                            RHI::RHIDescLayoutHandle skinDescLayout) {
+    m_skinDescLayout = skinDescLayout;
+}
+
+void AnimationSystem::Shutdown(RHI::IRHIDevice* device, entt::registry& registry) {
+    for (auto& [entId, entry] : m_entries) {
+        auto* meshComp = registry.try_get<SkinnedMeshComponent>(entry.entity);
+        if (meshComp) {
+            if (meshComp->skinDescSet.IsValid())
+                device->FreeDescriptorSet(meshComp->skinDescSet);
+            if (meshComp->skinMatricesBuffer.IsValid())
+                device->DestroyBuffer(meshComp->skinMatricesBuffer);
+            meshComp->skinDescSet        = {};
+            meshComp->skinMatricesBuffer = {};
+            meshComp->ready              = false;
+        }
+    }
+    m_entries.clear();
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PrepareEntity
@@ -25,10 +47,8 @@ void AnimationSystem::PrepareEntity(entt::entity entity,
     if (!meshComp || !meshComp->meshAsset.IsValid()) return;
     if (meshComp->ready) return;
 
-    // Skeleton UUID is always derived from the mesh asset (skin index 0).
     const AssetID skelID = Resource::DeriveSkinID(meshComp->meshAsset, 0);
 
-    // ── Load skeleton (required) ──────────────────────────────────────────────
     const Resource::CookedSkeleton* skel = resMgr.LoadSkeleton(skelID);
     if (!skel) {
         SA_LOG_ERROR("AnimationSystem: skeleton {} not found (derived from mesh {})",
@@ -36,7 +56,6 @@ void AnimationSystem::PrepareEntity(entt::entity entity,
         return;
     }
 
-    // ── Load animation clip (optional — bind pose used when absent) ───────────
     const auto* animComp = registry.try_get<AnimatorComponent>(entity);
     const Resource::CookedAnim* cookedAnim = nullptr;
     if (animComp && animComp->clipAsset.IsValid()) {
@@ -46,79 +65,60 @@ void AnimationSystem::PrepareEntity(entt::entity entity,
                         animComp->clipAsset.ToString());
     }
 
-    // ── Load mesh data (CPU side) for rest-pose vertices + skin data ──────────
-    const Resource::CookedMesh* mesh = resMgr.LoadMeshData(meshComp->meshAsset);
-    if (!mesh || !mesh->IsSkinned()) {
+    const Resource::GPUMesh* gpuMesh = resMgr.LoadMesh(meshComp->meshAsset);
+    if (!gpuMesh || !gpuMesh->IsSkinned()) {
         SA_LOG_ERROR("AnimationSystem: mesh {} not found or not skinned",
                      meshComp->meshAsset.ToString());
         return;
     }
 
-    const uint32_t vertCount = mesh->vertexCount;
+    const uint32_t boneCount = static_cast<uint32_t>(skel->bones.size());
+
+    // ── Bone matrices buffer (updated each frame) ─────────────────────────────
+    {
+        const uint64_t matBufSize = static_cast<uint64_t>(boneCount) * sizeof(glm::mat4);
+        RHI::RHIBufferDesc d{};
+        d.size       = matBufSize;
+        d.usage      = RHI::RHIBufferUsage::Storage;
+        d.cpuVisible = true;
+        d.debugName  = "SkinMatricesBuffer";
+        meshComp->skinMatricesBuffer = device->CreateBuffer(d);
+        if (!meshComp->skinMatricesBuffer.IsValid()) {
+            SA_LOG_ERROR("AnimationSystem: failed to allocate skinMatricesBuffer");
+            return;
+        }
+        std::vector<glm::mat4> identity(boneCount, glm::mat4(1.f));
+        device->UploadBufferData(meshComp->skinMatricesBuffer,
+                                 identity.data(),
+                                 static_cast<uint64_t>(boneCount) * sizeof(glm::mat4), 0);
+    }
+
+    // ── Allocate descriptor set for set=2 ─────────────────────────────────────
+    // binding=0 → skinMatricesBuffer (per-entity), binding=1 → GPUMesh::skinDataBuffer (shared)
+    if (m_skinDescLayout.IsValid()) {
+        meshComp->skinDescSet = device->AllocateDescriptorSet(m_skinDescLayout);
+        if (!meshComp->skinDescSet.IsValid()) {
+            SA_LOG_ERROR("AnimationSystem: failed to allocate skinDescSet");
+            return;
+        }
+        device->WriteDescriptorBuffer(meshComp->skinDescSet, 0, meshComp->skinMatricesBuffer);
+        device->WriteDescriptorBuffer(meshComp->skinDescSet, 1, gpuMesh->skinDataBuffer);
+    } else {
+        SA_LOG_WARN("AnimationSystem: no skinDescLayout — skinDescSet not allocated");
+    }
+
+    meshComp->boneCount = boneCount;
 
     // ── Build SkinEntry ───────────────────────────────────────────────────────
     SkinEntry entry;
-    entry.entity     = entity;
-    entry.skeleton   = skel->bones;
-    entry.cachedClip = cookedAnim ? &cookedAnim->clip : nullptr;
-    entry.restPos.resize(vertCount);
-    entry.restNorm.resize(vertCount);
-    entry.restTang.resize(vertCount);
-    entry.restUV.resize(vertCount);
-    entry.skinData.resize(vertCount);
-    entry.deformedVerts.resize(vertCount * 48u);
-
-    const uint8_t* vbPtr = mesh->vertexData.data();
-    for (uint32_t vi = 0; vi < vertCount; ++vi) {
-        const uint8_t* v = vbPtr + vi * 48u;
-        memcpy(&entry.restPos[vi],  v,      12);
-        memcpy(&entry.restNorm[vi], v + 12, 12);
-        memcpy(&entry.restTang[vi], v + 24, 16);
-        memcpy(&entry.restUV[vi],   v + 40,  8);
-    }
-    memcpy(entry.skinData.data(), mesh->skinData.data(),
-           vertCount * sizeof(Resource::SkinVertex));
-
-    // ── Populate SkinnedMeshComponent draw metadata ───────────────────────────
-    meshComp->vertexCount = vertCount;
-    meshComp->subMeshes.clear();
-    meshComp->subMeshes.reserve(mesh->subMeshes.size());
-    for (const auto& sm : mesh->subMeshes) {
-        SkinnedSubMeshInfo info;
-        info.firstIndex      = sm.indexOffset;
-        info.indexCount      = sm.indexCount;
-        info.vertexOffset    = static_cast<int32_t>(sm.vertexOffset);
-        info.materialAssetID = sm.defaultMaterialID;
-        meshComp->subMeshes.push_back(info);
-    }
-
-    // ── Allocate CPU-visible dynamic vertex buffer ────────────────────────────
-    RHI::RHIBufferDesc vbDesc{};
-    vbDesc.size       = static_cast<uint64_t>(vertCount) * 48u;
-    vbDesc.usage      = RHI::RHIBufferUsage::Vertex;
-    vbDesc.cpuVisible = true;
-    vbDesc.debugName  = "SkinnedVB";
-    meshComp->dynVertexBuffer = device->CreateBuffer(vbDesc);
-    if (!meshComp->dynVertexBuffer.IsValid()) {
-        SA_LOG_ERROR("AnimationSystem: failed to allocate dynVertexBuffer");
-        return;
-    }
-
-    // ── Reuse static index buffer from GPU mesh ───────────────────────────────
-    const Resource::GPUMesh* gpuMesh = resMgr.LoadMesh(meshComp->meshAsset);
-    if (!gpuMesh) {
-        SA_LOG_ERROR("AnimationSystem: failed to load GPU mesh for index buffer");
-        return;
-    }
-    meshComp->indexBuffer = gpuMesh->indexBuffer;
-
-    // ── Upload bind-pose as initial frame content ─────────────────────────────
-    const uint32_t boneCount = static_cast<uint32_t>(skel->bones.size());
-    std::vector<glm::mat4> identity(boneCount, glm::mat4(1.f));
-    SkinVertices(entry, identity);
-    device->UploadBufferData(meshComp->dynVertexBuffer,
-                             entry.deformedVerts.data(),
-                             entry.deformedVerts.size(), 0);
+    entry.entity       = entity;
+    entry.skeleton     = skel->bones;
+    entry.cachedClip   = cookedAnim ? &cookedAnim->clip : nullptr;
+    entry.workLocalT.assign(boneCount, glm::vec3{0.f, 0.f, 0.f});
+    entry.workLocalR.assign(boneCount, glm::quat{1.f, 0.f, 0.f, 0.f});
+    entry.workLocalS.assign(boneCount, glm::vec3{1.f, 1.f, 1.f});
+    entry.workGlobalPose.resize(boneCount);
+    entry.workSkinMats.resize(boneCount);
 
     if (animComp) entry.currentClipAsset = animComp->clipAsset;
     meshComp->ready = true;
@@ -126,23 +126,22 @@ void AnimationSystem::PrepareEntity(entt::entity entity,
     const uint32_t entId = static_cast<uint32_t>(entt::to_integral(entity));
     m_entries[entId] = std::move(entry);
 
-    SA_LOG_INFO("AnimationSystem: prepared entity {} ({} verts, {} bones, clip='{}')",
-                entId, vertCount, boneCount,
+    SA_LOG_INFO("AnimationSystem: prepared entity {} ({} bones, clip='{}')",
+                entId, boneCount,
                 cookedAnim ? cookedAnim->clip.name : "(bind pose)");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// EvaluateAll — one-shot evaluation at explicit time t (ignores playing flag)
+// EvaluateAll
 // ─────────────────────────────────────────────────────────────────────────────
 void AnimationSystem::EvaluateAll(float t,
                                    entt::registry& registry,
                                    Resource::ResourceManager& resMgr,
                                    RHI::IRHIDevice* device) {
     for (auto& [entId, entry] : m_entries) {
-        const auto* meshComp = registry.try_get<SkinnedMeshComponent>(entry.entity);
+        auto* meshComp = registry.try_get<SkinnedMeshComponent>(entry.entity);
         if (!meshComp || !meshComp->ready || entry.skeleton.empty()) continue;
 
-        // Hot-swap clip if changed in inspector while in editor mode.
         const auto* animComp = registry.try_get<AnimatorComponent>(entry.entity);
         if (animComp && animComp->clipAsset.IsValid() &&
             !(animComp->clipAsset == entry.currentClipAsset))
@@ -152,45 +151,46 @@ void AnimationSystem::EvaluateAll(float t,
                 entry.cachedClip       = &newAnim->clip;
                 entry.currentClipAsset = animComp->clipAsset;
             } else {
-                entry.currentClipAsset = animComp->clipAsset; // don't retry every call
+                entry.currentClipAsset = animComp->clipAsset;
             }
         }
 
         if (!entry.cachedClip) continue;
 
-        const Resource::AnimClip& clip    = *entry.cachedClip;
-        const uint32_t            nBones  = static_cast<uint32_t>(entry.skeleton.size());
-        const float               evalT   = std::clamp(t, 0.f, clip.duration);
+        const Resource::AnimClip& clip   = *entry.cachedClip;
+        const uint32_t            nBones = static_cast<uint32_t>(entry.skeleton.size());
+        const float               evalT  = std::clamp(t, 0.f, clip.duration);
 
-        std::vector<glm::vec3> localT(nBones, {0.f, 0.f, 0.f});
-        std::vector<glm::quat> localR(nBones, glm::quat(1.f, 0.f, 0.f, 0.f));
-        std::vector<glm::vec3> localS(nBones, {1.f, 1.f, 1.f});
+        auto& localT     = entry.workLocalT;
+        auto& localR     = entry.workLocalR;
+        auto& localS     = entry.workLocalS;
+        auto& globalPose = entry.workGlobalPose;
+        auto& skinMats   = entry.workSkinMats;
+        std::fill(localT.begin(), localT.end(), glm::vec3{0.f, 0.f, 0.f});
+        std::fill(localR.begin(), localR.end(), glm::quat{1.f, 0.f, 0.f, 0.f});
+        std::fill(localS.begin(), localS.end(), glm::vec3{1.f, 1.f, 1.f});
 
         for (const auto& ch : clip.channels) {
             if (ch.boneIndex < 0 || ch.boneIndex >= (int32_t)nBones) continue;
             SampleChannel(ch, evalT, localT[ch.boneIndex], localR[ch.boneIndex], localS[ch.boneIndex]);
         }
 
-        std::vector<glm::mat4> globalPose(nBones);
         for (uint32_t bi = 0; bi < nBones; ++bi) {
-            const glm::mat4 localMat =
-                glm::translate(glm::mat4(1.f), localT[bi]) *
-                glm::mat4_cast(glm::normalize(localR[bi])) *
-                glm::scale(glm::mat4(1.f), localS[bi]);
+            glm::mat4 localMat = glm::mat4_cast(glm::normalize(localR[bi]));
+            localMat[0] *= localS[bi].x;
+            localMat[1] *= localS[bi].y;
+            localMat[2] *= localS[bi].z;
+            localMat[3]  = glm::vec4(localT[bi], 1.f);
             const int32_t parent = entry.skeleton[bi].parentIndex;
             globalPose[bi] = (parent >= 0) ? (globalPose[parent] * localMat) : localMat;
         }
 
-        std::vector<glm::mat4> skinMats(nBones);
         for (uint32_t bi = 0; bi < nBones; ++bi)
             skinMats[bi] = globalPose[bi] * entry.skeleton[bi].inverseBindMatrix;
 
-        entry.lastGlobalPose = globalPose;
-
-        SkinVertices(entry, skinMats);
-        device->UploadBufferData(meshComp->dynVertexBuffer,
-                                 entry.deformedVerts.data(),
-                                 entry.deformedVerts.size(), 0);
+        device->UploadBufferData(meshComp->skinMatricesBuffer,
+                                 skinMats.data(),
+                                 static_cast<uint64_t>(nBones) * sizeof(glm::mat4), 0);
     }
 }
 
@@ -226,7 +226,7 @@ void AnimationSystem::Update(float dt,
             } else {
                 SA_LOG_WARN("AnimationSystem: clip {} not found — keeping previous",
                             animComp.clipAsset.ToString());
-                entry.currentClipAsset = animComp.clipAsset; // don't retry every frame
+                entry.currentClipAsset = animComp.clipAsset;
             }
         }
 
@@ -234,7 +234,6 @@ void AnimationSystem::Update(float dt,
 
         const Resource::AnimClip& clip = *entry.cachedClip;
 
-        // ── Advance time ──────────────────────────────────────────────────────
         animComp.time += dt * animComp.speed;
         if (animComp.looping && clip.duration > 0.f)
             animComp.time = std::fmod(animComp.time, clip.duration);
@@ -244,10 +243,14 @@ void AnimationSystem::Update(float dt,
         const float    t      = animComp.time;
         const uint32_t nBones = static_cast<uint32_t>(entry.skeleton.size());
 
-        // ── Sample keyframes → local TRS per bone ─────────────────────────────
-        std::vector<glm::vec3> localT(nBones, {0.f,0.f,0.f});
-        std::vector<glm::quat> localR(nBones, glm::quat(1.f,0.f,0.f,0.f));
-        std::vector<glm::vec3> localS(nBones, {1.f,1.f,1.f});
+        auto& localT     = entry.workLocalT;
+        auto& localR     = entry.workLocalR;
+        auto& localS     = entry.workLocalS;
+        auto& globalPose = entry.workGlobalPose;
+        auto& skinMats   = entry.workSkinMats;
+        std::fill(localT.begin(), localT.end(), glm::vec3{0.f, 0.f, 0.f});
+        std::fill(localR.begin(), localR.end(), glm::quat{1.f, 0.f, 0.f, 0.f});
+        std::fill(localS.begin(), localS.end(), glm::vec3{1.f, 1.f, 1.f});
 
         for (const auto& ch : clip.channels) {
             if (ch.boneIndex < 0 || ch.boneIndex >= (int32_t)nBones) continue;
@@ -257,32 +260,24 @@ void AnimationSystem::Update(float dt,
                           localS[ch.boneIndex]);
         }
 
-        // ── FK: global pose per bone ──────────────────────────────────────────
-        std::vector<glm::mat4> globalPose(nBones);
         for (uint32_t bi = 0; bi < nBones; ++bi) {
-            const glm::mat4 localMat =
-                glm::translate(glm::mat4(1.f), localT[bi]) *
-                glm::mat4_cast(glm::normalize(localR[bi])) *
-                glm::scale(glm::mat4(1.f), localS[bi]);
-
+            glm::mat4 localMat = glm::mat4_cast(glm::normalize(localR[bi]));
+            localMat[0] *= localS[bi].x;
+            localMat[1] *= localS[bi].y;
+            localMat[2] *= localS[bi].z;
+            localMat[3]  = glm::vec4(localT[bi], 1.f);
             const int32_t parent = entry.skeleton[bi].parentIndex;
             globalPose[bi] = (parent >= 0)
                            ? (globalPose[parent] * localMat)
                            : localMat;
         }
 
-        // ── Skin matrices = globalPose × inverseBindMatrix ────────────────────
-        std::vector<glm::mat4> skinMats(nBones);
         for (uint32_t bi = 0; bi < nBones; ++bi)
             skinMats[bi] = globalPose[bi] * entry.skeleton[bi].inverseBindMatrix;
 
-        entry.lastGlobalPose = globalPose;
-
-        // ── Deform and upload ─────────────────────────────────────────────────
-        SkinVertices(entry, skinMats);
-        device->UploadBufferData(meshComp.dynVertexBuffer,
-                                 entry.deformedVerts.data(),
-                                 entry.deformedVerts.size(), 0);
+        device->UploadBufferData(meshComp.skinMatricesBuffer,
+                                 skinMats.data(),
+                                 static_cast<uint64_t>(nBones) * sizeof(glm::mat4), 0);
     }
 }
 
@@ -336,57 +331,13 @@ void AnimationSystem::SampleChannel(const Resource::AnimChannel& ch, float t,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SkinVertices
-// ─────────────────────────────────────────────────────────────────────────────
-void AnimationSystem::SkinVertices(SkinEntry& e,
-                                    const std::vector<glm::mat4>& skinMats) {
-    const uint32_t vertCount = static_cast<uint32_t>(e.restPos.size());
-    const uint32_t boneCount = static_cast<uint32_t>(skinMats.size());
-    uint8_t* out = e.deformedVerts.data();
-
-    for (uint32_t vi = 0; vi < vertCount; ++vi) {
-        const Resource::SkinVertex& sv = e.skinData[vi];
-        const glm::vec3& rp = e.restPos[vi];
-        const glm::vec3& rn = e.restNorm[vi];
-        const glm::vec4& rt = e.restTang[vi];
-
-        glm::vec3 dPos  = {0.f,0.f,0.f};
-        glm::vec3 dNorm = {0.f,0.f,0.f};
-        glm::vec3 dTang = {0.f,0.f,0.f};
-
-        for (int j = 0; j < 4; ++j) {
-            const float    w  = sv.weights[j];
-            const uint32_t bi = sv.joints[j];
-            if (w < 1e-6f || bi >= boneCount) continue;
-            const glm::mat4& sm = skinMats[bi];
-            dPos  += w * glm::vec3(sm * glm::vec4(rp, 1.f));
-            const glm::mat3 m3(sm);
-            dNorm += w * (m3 * rn);
-            dTang += w * (m3 * glm::vec3(rt));
-        }
-
-        const float dNormLen = glm::length(dNorm);
-        const float dTangLen = glm::length(dTang);
-        if (dNormLen > 1e-6f) dNorm /= dNormLen;
-        if (dTangLen > 1e-6f) dTang /= dTangLen;
-
-        uint8_t* v = out + vi * 48u;
-        memcpy(v,      &dPos,         12);
-        memcpy(v + 12, &dNorm,        12);
-        memcpy(v + 24, &dTang,        12);
-        memcpy(v + 36, &rt.w,          4);  // handedness unchanged
-        memcpy(v + 40, &e.restUV[vi],  8);
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Bone pose accessors
 // ─────────────────────────────────────────────────────────────────────────────
 
 std::span<const glm::mat4> AnimationSystem::GetBoneGlobalPoses(entt::entity entity) const {
     const auto it = m_entries.find(static_cast<uint32_t>(entt::to_integral(entity)));
     if (it == m_entries.end()) return {};
-    return it->second.lastGlobalPose;
+    return it->second.workGlobalPose;
 }
 
 std::span<const Resource::BoneInfo> AnimationSystem::GetBoneSkeleton(entt::entity entity) const {

@@ -37,15 +37,21 @@ struct GPUSubMesh {
 
     // v4: UUID of the .samat asset for this submesh (invalid when no material)
     AssetID   defaultMaterialID;
+
+    // Mesh-local AABB computed from vertex positions at load time.
+    glm::vec3 boundsMin = glm::vec3( 1e30f);
+    glm::vec3 boundsMax = glm::vec3(-1e30f);
 };
 
 struct GPUMesh {
     RHI::RHIBufferHandle        vertexBuffer;
     RHI::RHIBufferHandle        indexBuffer;
+    RHI::RHIBufferHandle        skinDataBuffer;  // joints+weights SSBO; invalid for static meshes
     std::vector<GPUSubMesh>     subMeshes;
     uint32_t                    vertexCount = 0;
     uint32_t                    indexCount  = 0;
-    bool IsValid() const { return vertexBuffer.IsValid() && indexBuffer.IsValid(); }
+    bool IsValid()   const { return vertexBuffer.IsValid() && indexBuffer.IsValid(); }
+    bool IsSkinned() const { return skinDataBuffer.IsValid(); }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -70,6 +76,11 @@ public:
     // Update the active project's cook cache. Call when the user switches projects.
     // VFS will check this path before the engine cache when resolving assets.
     void SetProjectCookCache(const std::filesystem::path& projectCookCacheDir);
+
+    // Release all project-specific GPU and CPU caches without destroying builtins.
+    // Calls WaitIdle internally — safe to call mid-frame during a project switch.
+    // Preserves m_white1x1 and m_fileTextures (engine/editor-level resources).
+    void ClearProjectAssets();
 
     // Destroy all GPU resources. Call before the device is destroyed.
     void Shutdown();

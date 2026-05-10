@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <span>
+#include <string_view>
 
 #include "platform/rhi/RHITypes.hpp"
 #include "platform/rhi/ShaderReflection.hpp"
@@ -63,6 +64,19 @@ struct RHIComputePipelineDesc {
     uint32_t            pushConstantSize   = 0;
 
     const char*         debugName          = nullptr;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GPU memory statistics — filled by IRHIDevice::GetMemoryStats().
+// gpuUsedBytes / gpuBudgetBytes come from the allocator's heap-level view
+// (includes alignment overhead; 0 budget = extension unavailable).
+// gpuTextureBytes / gpuBufferBytes are logical sums from the device's tables.
+// ─────────────────────────────────────────────────────────────────────────────
+struct RHIMemoryStats {
+    uint64_t gpuTextureBytes = 0; // sum of all live non-swapchain textures (logical)
+    uint64_t gpuBufferBytes  = 0; // sum of all live buffers (logical)
+    uint64_t gpuUsedBytes    = 0; // actual VRAM usage per allocator (incl. alignment)
+    uint64_t gpuBudgetBytes  = 0; // estimated VRAM budget (0 if unavailable)
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -150,6 +164,14 @@ public:
                                   uint64_t        size,
                                   uint64_t        offset = 0) = 0;
 
+    // Read back data from a CPU-visible buffer (persistent VMA mapping).
+    // Must only be called for buffers created with cpuVisible=true.
+    // Safe to call after the GPU fence has been waited (e.g. after BeginFrame).
+    virtual void ReadBufferData(RHIBufferHandle buffer,
+                                void*           data,
+                                uint64_t        size,
+                                uint64_t        offset = 0) = 0;
+
     // Upload initial pixel data to a GPU-only texture via an internal staging buffer.
     // Allocs staging → memcpy → one-shot submit → transitions layout to ShaderRead → frees staging.
     // Only uploads mip level 0. For multi-mip textures use UploadTextureMips.
@@ -180,6 +202,14 @@ public:
     // Returns nullptr for invalid handles.
     [[nodiscard]] virtual const RHITextureDesc* GetTextureDesc(
         RHITextureHandle handle) const = 0;
+
+    // Returns a snapshot of GPU memory usage.
+    // Cheap to call (heap-level query + table iteration); safe every frame.
+    [[nodiscard]] virtual RHIMemoryStats GetMemoryStats() const = 0;
+
+    // Returns the selected GPU's device name (e.g. "NVIDIA GeForce RTX 3070").
+    // Valid for the lifetime of the device object.
+    [[nodiscard]] virtual std::string_view GetDeviceName() const = 0;
 
     // ── Resource Destruction ──────────────────────────────────────────────────
     // Safe to call with an invalid handle (no-op).

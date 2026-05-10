@@ -378,3 +378,45 @@ else()
     message(WARNING "ImGuizmo not found at third_party/ImGuizmo/ — transform gizmo unavailable")
 endif()
 # Target available: imguizmo (alias: imguizmo::imguizmo)
+
+# ============================================================================
+# Tracy — frame profiler (CPU + Vulkan GPU timeline)
+# Preferred: git submodule at third_party/tracy/
+#   git submodule add https://github.com/wolfpld/tracy.git third_party/tracy
+# Tracy is enabled in Debug and RelWithDebInfo builds via TRACY_ENABLE.
+# In Release/MinSizeRel all macros are no-ops (zero overhead).
+# ============================================================================
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tracy/public/TracyClient.cpp)
+    add_library(TracyClient STATIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/tracy/public/TracyClient.cpp
+    )
+    target_compile_features(TracyClient PUBLIC cxx_std_11)
+    target_include_directories(TracyClient PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/tracy/public
+    )
+    find_package(Threads REQUIRED)
+    target_link_libraries(TracyClient PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
+
+    # MinGW on Windows needs these for Tracy's socket + symbol resolution + user name
+    if(WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_link_libraries(TracyClient PUBLIC ws2_32 dbghelp secur32)
+    endif()
+
+    # Enable profiling only for Debug / RelWithDebInfo; Release builds compile
+    # Tracy's headers but the macros expand to nothing (TRACY_ENABLE absent).
+    # TRACY_ON_DEMAND: only records when the Tracy viewer is connected.
+    # Without a connected viewer, overhead is near-zero even in Debug builds.
+    target_compile_definitions(TracyClient PUBLIC
+        $<$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>:TRACY_ENABLE>
+        $<$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>:TRACY_ON_DEMAND>
+    )
+
+    add_library(Tracy::TracyClient ALIAS TracyClient)
+    message(STATUS "Tracy: Using local submodule — profiling ON in Debug/RelWithDebInfo")
+else()
+    # Provide a do-nothing stub so the rest of CMake can always link Tracy::TracyClient
+    add_library(TracyClient INTERFACE)
+    add_library(Tracy::TracyClient ALIAS TracyClient)
+    message(STATUS "Tracy: submodule not found at third_party/tracy/ — profiling disabled")
+endif()
+# Target available: Tracy::TracyClient

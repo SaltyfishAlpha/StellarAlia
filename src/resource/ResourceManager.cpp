@@ -53,12 +53,39 @@ void ResourceManager::Shutdown() {
     m_fileTextures.clear();
 
     for (auto& [hash, mesh] : m_meshes) {
-        if (mesh.vertexBuffer.IsValid()) m_device->DestroyBuffer(mesh.vertexBuffer);
-        if (mesh.indexBuffer.IsValid())  m_device->DestroyBuffer(mesh.indexBuffer);
+        if (mesh.vertexBuffer.IsValid())   m_device->DestroyBuffer(mesh.vertexBuffer);
+        if (mesh.indexBuffer.IsValid())    m_device->DestroyBuffer(mesh.indexBuffer);
+        if (mesh.skinDataBuffer.IsValid()) m_device->DestroyBuffer(mesh.skinDataBuffer);
     }
     m_meshes.clear();
 
     m_device = nullptr;
+}
+
+void ResourceManager::ClearProjectAssets() {
+    if (!m_device) return;
+    m_device->WaitIdle();
+
+    const size_t nTex  = m_textures.size();
+    const size_t nMesh = m_meshes.size();
+
+    for (auto& [hash, handle] : m_textures)
+        if (handle.IsValid()) m_device->DestroyTexture(handle);
+    m_textures.clear();
+
+    for (auto& [hash, mesh] : m_meshes) {
+        if (mesh.vertexBuffer.IsValid())   m_device->DestroyBuffer(mesh.vertexBuffer);
+        if (mesh.indexBuffer.IsValid())    m_device->DestroyBuffer(mesh.indexBuffer);
+        if (mesh.skinDataBuffer.IsValid()) m_device->DestroyBuffer(mesh.skinDataBuffer);
+    }
+    m_meshes.clear();
+
+    m_skeletons.clear();
+    m_animClips.clear();
+    m_cookedMeshes.clear();
+
+    SA_LOG_INFO("ResourceManager: cleared {} texture(s) and {} mesh(es) from project cache",
+                nTex, nMesh);
 }
 
 // ─── LoadTexture ─────────────────────────────────────────────────────────────
@@ -230,12 +257,31 @@ const GPUMesh* ResourceManager::LoadMesh(const AssetID& id) {
     m_device->UploadBufferData(ib, cooked.indexData.data(),
                                cooked.indexData.size(), 0);
 
+    // Upload skin data buffer (GPU-only SSBO) for skinned meshes
+    RHI::RHIBufferHandle skb{};
+    if (cooked.IsSkinned()) {
+        RHI::RHIBufferDesc skDesc{};
+        skDesc.size       = cooked.skinData.size();
+        skDesc.usage      = RHI::RHIBufferUsage::Storage;
+        skDesc.cpuVisible = false;
+        skDesc.debugName  = "SkinDataBuffer";
+        skb = m_device->CreateBuffer(skDesc);
+        if (!skb.IsValid()) {
+            m_device->DestroyBuffer(vb);
+            m_device->DestroyBuffer(ib);
+            SA_LOG_ERROR("ResourceManager::LoadMesh — CreateBuffer(SkinData) failed");
+            return nullptr;
+        }
+        m_device->UploadBufferData(skb, cooked.skinData.data(), cooked.skinData.size(), 0);
+    }
+
     // Build GPUMesh
     GPUMesh gpu;
-    gpu.vertexBuffer = vb;
-    gpu.indexBuffer  = ib;
-    gpu.vertexCount  = cooked.vertexCount;
-    gpu.indexCount   = cooked.indexCount;
+    gpu.vertexBuffer   = vb;
+    gpu.indexBuffer    = ib;
+    gpu.skinDataBuffer = skb;
+    gpu.vertexCount    = cooked.vertexCount;
+    gpu.indexCount     = cooked.indexCount;
     gpu.subMeshes.reserve(cooked.subMeshes.size());
     for (const auto& sm : cooked.subMeshes) {
         GPUSubMesh gsm;
@@ -245,6 +291,17 @@ const GPUMesh* ResourceManager::LoadMesh(const AssetID& id) {
         gsm.materialIndex      = sm.materialIndex;
         gsm.localTransform     = sm.localTransform;
         gsm.defaultMaterialID  = sm.defaultMaterialID;
+
+        // Compute mesh-local AABB from vertex positions before GPU upload.
+        // Vertex layout: 48 bytes/vertex, first 12 bytes = vec3 position.
+        constexpr uint32_t kStride = 48;
+        for (uint32_t vi = sm.vertexOffset; vi < sm.vertexOffset + sm.vertexCount; ++vi) {
+            const glm::vec3 p = *reinterpret_cast<const glm::vec3*>(
+                cooked.vertexData.data() + vi * kStride);
+            gsm.boundsMin = glm::min(gsm.boundsMin, p);
+            gsm.boundsMax = glm::max(gsm.boundsMax, p);
+        }
+
         gpu.subMeshes.push_back(gsm);
     }
 

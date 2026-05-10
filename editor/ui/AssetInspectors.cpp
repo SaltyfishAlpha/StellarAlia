@@ -1,4 +1,5 @@
 #include "ui/AssetInspectors.hpp"
+#include "ui/EditorIconCache.hpp"
 
 #include <imgui.h>
 #include <nlohmann/json.hpp>
@@ -214,7 +215,25 @@ void ImageAssetInspector::Draw(const fs::path& path) {
     DrawFileHeader(path, "Image");
     ImGui::Separator();
     DrawFileSize(path);
-    ImGui::TextDisabled("Thumbnail: not yet supported");
+
+    if (!m_iconCache) return;
+
+    ImTextureID thumb = m_iconCache->GetThumbnailForPath(path);
+    if (!thumb) {
+        ImGui::TextDisabled("(preview unavailable)");
+        return;
+    }
+
+    uint32_t imgW = 0, imgH = 0;
+    m_iconCache->GetImageSize(path, imgW, imgH);
+    if (imgW && imgH)
+        ImGui::Text("%u \xc3\x97 %u", imgW, imgH);  // UTF-8 "×"
+
+    const float panelW = ImGui::GetContentRegionAvail().x;
+    const float dispH  = (imgW > 0)
+        ? panelW * (static_cast<float>(imgH) / static_cast<float>(imgW))
+        : panelW;
+    ImGui::Image(thumb, {panelW, dispH});
 }
 
 } // namespace StellarAlia::Editor

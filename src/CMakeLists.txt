@@ -120,6 +120,7 @@ target_link_libraries(StellarAliaRuntime
         tinygltf
         EnTT::EnTT
         nlohmann_json::nlohmann_json
+        Tracy::TracyClient
 )
 
 # Link stb (header-only) if available

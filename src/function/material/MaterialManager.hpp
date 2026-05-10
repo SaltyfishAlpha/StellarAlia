@@ -52,6 +52,15 @@ public:
     // and destroyed separately; here we unload the ShaderPrograms).
     void Shutdown();
 
+    // Release all cached MaterialInstances loaded from the active project.
+    // Call after ResourceManager::ClearProjectAssets() (GPU must be idle).
+    // Preserves registered MaterialTypes (engine-level, not project-specific).
+    void ClearProjectInstances();
+
+    // Unload and remove all MaterialTypes where isProjectType=true.
+    // Call after ClearProjectInstances() when switching projects.
+    void ClearProjectTypes();
+
     // Register a fully configured MaterialType.
     // The manager takes ownership. Returns a raw pointer for immediate use.
     MaterialType* RegisterType(std::unique_ptr<MaterialType> type);
@@ -61,11 +70,23 @@ public:
     // This is the preferred path from RenderFeature::OnInit.
     bool RegisterTypeFromShaders(const MaterialTypeDesc& desc, const FeatureInitContext& ctx);
 
+    // Load a ShaderProgram directly from shader stems (without registering a MaterialType).
+    // Use for internal passes that need a ShaderProgram but not a full MaterialType, e.g. GPU skinning.
+    // vertStem / fragStem follow the same naming convention as MaterialTypeDesc::vertShader / fragShader.
+    // Returns false on any shader load or compile failure.
+    bool LoadShaderProgram(ShaderProgram& prog,
+                           const std::string& vertStem,
+                           const std::string& fragStem,
+                           const FeatureInitContext& ctx);
+
     // Scan shaderDir for *.gbuffer.frag.refl files that carry a shadingModel field
     // (written by ShaderCookTool for .saglsl-compiled shaders) and auto-register
     // each as a MaterialType. Already-registered types are silently skipped.
-    // Call once from GBufferFeature::OnInit after registering builtin types.
-    void RegisterTypesFromShaderDir(const std::string& shaderDir, const FeatureInitContext& ctx);
+    // Set isProjectType=true when registering project-specific shading models
+    // so ClearProjectTypes() can remove them on project switch.
+    void RegisterTypesFromShaderDir(const std::string& shaderDir,
+                                     const FeatureInitContext& ctx,
+                                     bool isProjectType = false);
 
     // Find a registered type by name. Returns nullptr if not found.
     [[nodiscard]] MaterialType* GetType(const std::string& name) const;

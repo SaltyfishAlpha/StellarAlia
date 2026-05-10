@@ -13,18 +13,24 @@ struct alignas(16) FrameUniforms {
     glm::mat4 proj;         //  64..127
     glm::mat4 viewProj;     // 128..191
     glm::mat4 invViewProj;  // 192..255
-    glm::vec3 cameraPos;    // 256..268
-    float     time;         // 269..272  (completes vec4)
-    glm::vec2 resolution;   // 272..280
-    float     deltaTime;    // 280..284
-    float     shadowBias;   // 284..288  (depth bias for directional shadow)
+    glm::mat4 invProj;      // 256..319  — view-space reconstruction (no view mul needed)
+    glm::vec3 cameraPos;    // 320..331
+    float     time;         // 332..335  (completes vec4)
+    glm::vec2 resolution;   // 336..343
+    float     deltaTime;    // 344..347
+    float     shadowBias;   // 348..351  (depth bias for directional shadow)
     // L0+L1+L2 SH coefficients for diffuse irradiance, Lambertian-convolved.
     // std140: vec3 → vec4; .w is unused padding.
-    glm::vec4 irrSH[9];         // 288..432
+    glm::vec4 irrSH[9];         // 352..495
     // Orthographic light view-projection for the directional shadow map.
-    glm::mat4 lightSpaceMatrix; // 432..496
+    glm::mat4 lightSpaceMatrix; // 496..559
+    // TAA temporal data.
+    glm::mat4 prevViewProj;     // 560..623  previous frame unjittered viewProj for reprojection
+    glm::vec2 jitter;           // 624..631  current Halton jitter in pixel space [-0.5, 0.5]
+    uint32_t  frameIndex;       // 632..635  frame counter mod 256
+    float     _fpad;            // 636..639  alignment
 };
-static_assert(sizeof(FrameUniforms) == 496,
+static_assert(sizeof(FrameUniforms) == 640,
     "FrameUniforms size mismatch with frame_uniforms.glsl set=0 binding=0");
 
 // ─────────────────────────────────────────────────────────────────────────────

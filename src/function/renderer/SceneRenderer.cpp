@@ -1,6 +1,7 @@
 #include "function/renderer/SceneRenderer.hpp"
 
 #include "core/logs/Log.hpp"
+#include "core/Profiler.hpp"
 #include "function/material/AttachmentKey.hpp"
 #include "function/material/MaterialType.hpp"
 #include "function/scene/Components.hpp"
@@ -13,9 +14,44 @@
 #include <glm/ext/matrix_clip_space.hpp>
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <span>
+#include <unordered_set>
 
 namespace StellarAlia {
+
+static std::vector<uint8_t> LoadComputeSpv(const std::string& path) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) { SA_LOG_ERROR("SceneRenderer: cannot open shader '{}'", path); return {}; }
+    const auto sz = static_cast<size_t>(f.tellg());
+    f.seekg(0);
+    std::vector<uint8_t> data(sz);
+    f.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(sz));
+    return data;
+}
+
+static RHI::ShaderReflection LoadComputeRefl(const std::string& path) {
+    RHI::ShaderReflection r;
+    if (!RHI::ShaderReflectionIO::LoadFromFile(path, r))
+        SA_LOG_ERROR("SceneRenderer: cannot load reflection '{}'", path);
+    return r;
+}
+
+// Arvo AABB transformation: transforms a local AABB by a matrix using 3 column
+// operations instead of transforming 8 corners. O(3) vec3 muls.
+static void ArvoAABB(const glm::vec3& lMin, const glm::vec3& lMax,
+                     const glm::mat4& M,
+                     glm::vec3& outMin, glm::vec3& outMax) {
+    outMin = outMax = glm::vec3(M[3]);
+    for (int i = 0; i < 3; ++i) {
+        const glm::vec3 col = glm::vec3(M[i]);
+        outMin += glm::min(col * lMin[i], col * lMax[i]);
+        outMax += glm::max(col * lMin[i], col * lMax[i]);
+    }
+}
 
 // ── Init / Shutdown ───────────────────────────────────────────────────────────
 
@@ -39,8 +75,11 @@ bool SceneRenderer::Init(const Desc& desc) {
         SA_LOG_WARN("SceneRenderer: GpuIblBake init failed — IBL bake unavailable");
     } else {
         // Pre-bake the BRDF LUT immediately (no HDR needed).
-        // Cached so ApplyWorldSettings can use it even before a Skybox is ever loaded.
-        m_cachedBrdfLut = m_iblBake.BakeBrdfLut(desc.device);
+        // m_bakeBrdfLut is the authoritative copy — it lives outside ResourceManager
+        // and is never destroyed by ClearProjectAssets.  m_cachedBrdfLut is restored
+        // to it by ResetProjectIBL() after each project switch.
+        m_bakeBrdfLut   = m_iblBake.BakeBrdfLut(desc.device);
+        m_cachedBrdfLut = m_bakeBrdfLut;
     }
 
     // LTC LUT upload — always succeeds if device is valid; data is embedded.
@@ -79,7 +118,7 @@ bool SceneRenderer::Init(const Desc& desc) {
         m_gbRT0      = makeRT(RHI::RHIFormat::RGBA8_UNORM, "GBuffer_RT0");
         m_gbRT1      = makeRT(RHI::RHIFormat::RGBA16F,     "GBuffer_RT1");
         m_gbRT2      = makeRT(RHI::RHIFormat::RGBA16F,     "GBuffer_RT2");
-        m_hdrTex     = makeRT(RHI::RHIFormat::RGBA16F,     "HDR_Color");
+        // HDR_Color is now a transient RG texture — no persistent handle needed.
         // Bloom placeholders — only allocate for active mip levels.
         for (int i = 0; i < m_bloomMipCount; ++i) {
             const std::string name = "Bloom" + std::to_string(i);
@@ -103,6 +142,7 @@ bool SceneRenderer::Init(const Desc& desc) {
         };
         m_selectionMask  = makeR8("SelectionMask");
         m_dilateH        = makeR8("DilateH");
+        m_ssaoTex        = makeR8("SSAO_Result");
         m_selectionMaskW = 1;
         m_selectionMaskH = 1;
     }
@@ -123,20 +163,51 @@ bool SceneRenderer::Init(const Desc& desc) {
 
     // ── Pre-register built-in passes as features ───────────────────────────────
     // Insert at front in reverse execution order so final order is:
-    //   [Shadow?, Skybox, GBuffer, DeferredLighting, SelectionMask, Bloom?, Tonemap?,
+    //   [Shadow?, Skybox, GBuffer, SSAO, DeferredLighting, SelectionMask, TAA, Bloom, Tonemap,
     //    ...user features, SelectionOutline, DebugOverlay]
-    if (m_config.builtinTonemap) {
+    {
         auto tf = std::make_unique<TonemapFeature>();
         m_tonemapFeature = tf.get();
         m_features.insert(m_features.begin(), std::move(tf));
     }
-    if (m_config.bloomEnabled)
-        m_features.insert(m_features.begin(), std::make_unique<BloomFeature>(m_bloomMipCount));
-    m_features.insert(m_features.begin(), std::make_unique<DeferredLightingFeature>());
+    {
+        auto bf = std::make_unique<BloomFeature>(m_bloomMipCount);
+        m_bloomFeature = bf.get();
+        m_features.insert(m_features.begin(), std::move(bf));
+    }
+    {
+        // TAA runs before Bloom: writes to history (pre-bloom), exposes handle via
+        // m_outputHandle for BloomThreshold to read. BloomComposite then rewrites
+        // handles.hdr (transient HDR_Color) so Tonemap reads bloom+anti-aliased from there.
+        auto taaF = std::make_unique<TAAFeature>();
+        m_taaFeature = taaF.get();
+        m_features.insert(m_features.begin(), std::move(taaF));
+    }
+    {
+        // AutoExposure runs between TAA and Bloom: reads raw HDR, writes to persistent
+        // exposure SSBO; CPU reads back the result at the start of the next frame.
+        auto aeF = std::make_unique<AutoExposureFeature>();
+        m_aeFeature = aeF.get();
+        m_features.insert(m_features.begin() + 1, std::move(aeF));
+    }
+    {
+        auto dlF = std::make_unique<DeferredLightingFeature>();
+        m_deferredLightingFeature = dlF.get();
+        m_features.insert(m_features.begin(), std::move(dlF));
+    }
     // SelectionMask runs immediately after DeferredLighting (depth is populated,
     // already transitioned back to depth-attachment by this WriteDepth declaration).
     m_features.insert(m_features.begin() + 1, std::make_unique<SelectionMaskFeature>(this));
-    m_features.insert(m_features.begin(), std::make_unique<GBufferFeature>(this));
+    {
+        auto ssaoF = std::make_unique<SSAOFeature>();
+        m_ssaoFeature = ssaoF.get();
+        m_features.insert(m_features.begin(), std::move(ssaoF));
+    }
+    {
+        auto gf = std::make_unique<GBufferFeature>(this);
+        m_gbufferFeature = gf.get();
+        m_features.insert(m_features.begin(), std::move(gf));
+    }
     {
         auto sf = std::make_unique<SkyboxFeature>();
         m_skyboxFeature = sf.get();
@@ -171,12 +242,12 @@ void SceneRenderer::Shutdown() {
     if (m_gbRT0.IsValid())       m_device->DestroyTexture(m_gbRT0);
     if (m_gbRT1.IsValid())       m_device->DestroyTexture(m_gbRT1);
     if (m_gbRT2.IsValid())       m_device->DestroyTexture(m_gbRT2);
-    if (m_hdrTex.IsValid())      m_device->DestroyTexture(m_hdrTex);
     for (int i = 0; i < m_bloomMipCount; ++i)
         if (m_bloomMip[i].IsValid()) m_device->DestroyTexture(m_bloomMip[i]);
 
     if (m_selectionMask.IsValid()) m_device->DestroyTexture(m_selectionMask);
     if (m_dilateH.IsValid())       m_device->DestroyTexture(m_dilateH);
+    if (m_ssaoTex.IsValid())       m_device->DestroyTexture(m_ssaoTex);
 
     if (m_iblBake.IsInitialized())
         m_iblBake.Shutdown(m_device);
@@ -319,10 +390,60 @@ bool SceneRenderer::SetIBL(WorldSettings& ws)
 
 void SceneRenderer::ApplyWorldSettings(WorldSettings& ws, bool updateIBL)
 {
+    const PostProcessSettings& pp = ws.pp;
+
     // Update skybox background mode + color immediately (no GPU work needed).
     if (m_skyboxFeature) {
         m_skyboxFeature->m_backgroundMode  = ws.backgroundMode;
         m_skyboxFeature->m_backgroundColor = ws.backgroundColor;
+    }
+
+    // Bloom — update runtime parameters.
+    if (m_bloomFeature) {
+        m_bloomFeature->m_enabled   = pp.bloomEnabled;
+        m_bloomFeature->m_threshold = pp.bloomThreshold;
+        m_bloomFeature->m_strength  = pp.bloomStrength;
+        m_bloomFeature->m_radius    = pp.bloomRadius;
+
+        const int newMipLevels = std::clamp(pp.bloomMipLevels, 2, kMaxBloomMips);
+        if (newMipLevels != m_bloomMipCount && newMipLevels != m_pendingBloomMipCount) {
+            // Defer the actual GPU rebuild to the start of the next RenderFrame where
+            // WaitIdle is safe (here we're between Execute and EndFrame — use-after-free risk).
+            m_pendingBloomMipCount = newMipLevels;
+            m_depthWidth = m_depthHeight = 0;  // trigger resize block next frame
+        }
+    }
+
+    // SSAO (GTAO) — update runtime parameters.
+    if (m_ssaoFeature) {
+        m_ssaoFeature->m_enabled       = pp.ssaoEnabled;
+        m_ssaoFeature->m_radius        = pp.ssaoRadius;
+        m_ssaoFeature->m_strength      = pp.ssaoStrength;
+        m_ssaoFeature->m_bias          = pp.ssaoBias;
+        m_ssaoFeature->m_directions    = pp.ssaoDirections;
+        m_ssaoFeature->m_steps         = pp.ssaoSteps;
+        m_ssaoFeature->m_blurSharpness = pp.ssaoBlurSharpness;
+    }
+
+    // Auto Exposure — update runtime parameters.
+    if (m_aeFeature) {
+        m_aeFeature->m_enabled    = pp.autoExposureEnabled;
+        m_aeFeature->m_evMin      = pp.aeEvMin;
+        m_aeFeature->m_evMax      = pp.aeEvMax;
+        m_aeFeature->m_adaptSpeed = pp.aeAdaptSpeed;
+        m_aeFeature->m_lowPct     = pp.aeLowPercent;
+        m_aeFeature->m_highPct    = pp.aeHighPercent;
+    }
+
+    // TAA — update runtime parameters; reset history on enable/disable toggle.
+    if (m_taaFeature) {
+        const bool wasEnabled = m_taaFeature->m_enabled;
+        m_taaFeature->m_enabled      = pp.taaEnabled;
+        m_taaFeature->m_blendStatic  = pp.taaBlendStatic;
+        m_taaFeature->m_blendMotion  = pp.taaBlendMotion;
+        m_taaFeature->m_antiGhosting = pp.taaAntiGhosting;
+        if (wasEnabled != pp.taaEnabled)
+            m_taaFeature->m_historyValid = false;  // discard stale history on toggle
     }
 
     // IBL — solid-color mode encodes backgroundColor as constant ambient (SH L0);
@@ -351,50 +472,50 @@ void SceneRenderer::ApplyWorldSettings(WorldSettings& ws, bool updateIBL)
     const FeatureInitContext ctx{m_device, m_matMgr, m_resMgr,
                                   m_frameUniforms.GetLayout(), m_shaderDir};
 
-    if (ws.tonemapMode == WorldSettings::TonemapMode::Builtin) {
+    if (pp.tonemapMode == PostProcessSettings::TonemapMode::Builtin) {
         if (auto* tf = dynamic_cast<TonemapFeature*>(m_tonemapFeature)) {
-            tf->m_exposure = ws.exposure;
-            tf->m_gamma    = ws.gamma;
+            tf->m_exposure = pp.exposure;
+            tf->SetColorGrading(pp.colorGrading);
         } else {
             // Replace LUT → Builtin
             m_device->WaitIdle();
             auto newFeature = std::make_unique<TonemapFeature>();
-            newFeature->m_exposure = ws.exposure;
-            newFeature->m_gamma    = ws.gamma;
+            newFeature->m_exposure = pp.exposure;
             ReplaceTonemapFeature(std::move(newFeature), ctx);
+            static_cast<TonemapFeature*>(m_tonemapFeature)->SetColorGrading(pp.colorGrading);
         }
     } else {
         // LUT tonemap — requires a valid, loaded texture.
         // If no LUT is set, fall back to the builtin ACES pipeline instead.
         RHI::RHITextureHandle lutTex;
-        if (ws.tonemapLut.IsValid())
-            lutTex = m_resMgr->LoadTexture(ws.tonemapLut);
+        if (pp.tonemapLut.IsValid())
+            lutTex = m_resMgr->LoadTexture(pp.tonemapLut);
 
         if (!lutTex.IsValid()) {
             SA_LOG_WARN("SceneRenderer: LUT mode requested but no valid LUT texture — falling back to builtin tonemap");
             if (!dynamic_cast<TonemapFeature*>(m_tonemapFeature)) {
                 m_device->WaitIdle();
                 auto newFeature = std::make_unique<TonemapFeature>();
-                newFeature->m_exposure = ws.exposure;
-                newFeature->m_gamma    = ws.gamma;
+                newFeature->m_exposure = pp.exposure;
                 ReplaceTonemapFeature(std::move(newFeature), ctx);
+                static_cast<TonemapFeature*>(m_tonemapFeature)->SetColorGrading(pp.colorGrading);
             } else if (auto* tf = dynamic_cast<TonemapFeature*>(m_tonemapFeature)) {
-                tf->m_exposure = ws.exposure;
-                tf->m_gamma    = ws.gamma;
+                tf->m_exposure = pp.exposure;
+                tf->SetColorGrading(pp.colorGrading);
             }
             return;
         }
 
         if (auto* lf = dynamic_cast<LutTonemapFeature*>(m_tonemapFeature)) {
-            lf->m_exposure    = ws.exposure;
-            lf->m_lutStrength = ws.lutStrength;
+            lf->m_exposure    = pp.exposure;
+            lf->m_lutStrength = pp.lutStrength;
             lf->SetLutTexture(m_device, lutTex);
         } else {
             // Replace Builtin → LUT
             m_device->WaitIdle();
             auto newFeature = std::make_unique<LutTonemapFeature>();
-            newFeature->m_exposure    = ws.exposure;
-            newFeature->m_lutStrength = ws.lutStrength;
+            newFeature->m_exposure    = pp.exposure;
+            newFeature->m_lutStrength = pp.lutStrength;
             ReplaceTonemapFeature(std::move(newFeature), ctx);
             static_cast<LutTonemapFeature*>(m_tonemapFeature)->SetLutTexture(m_device, lutTex);
         }
@@ -448,6 +569,14 @@ void SceneRenderer::UpdateSolidAmbientCube(glm::vec3 color)
     m_solidAmbientColor = color;
 }
 
+void SceneRenderer::ResetProjectIBL()
+{
+    // Restore the BRDF LUT to the one baked at Init time.  Called after
+    // ClearProjectAssets() so the next ApplyWorldSettings(SolidColor) writes a
+    // valid VkImageView instead of a dangling handle from the previous project.
+    m_cachedBrdfLut = m_bakeBrdfLut;
+}
+
 // Finds the current m_tonemapFeature slot in m_features, shuts it down, replaces it,
 // and updates m_tonemapFeature.  Called only from ApplyWorldSettings.
 void SceneRenderer::ReplaceTonemapFeature(std::unique_ptr<RenderFeature> newFeature,
@@ -468,7 +597,9 @@ void SceneRenderer::ReplaceTonemapFeature(std::unique_ptr<RenderFeature> newFeat
 // ── BuildDrawList ─────────────────────────────────────────────────────────────
 
 void SceneRenderer::BuildDrawList(Scene& scene) {
+    SA_PROFILE_SCOPE_N("BuildDrawList");
     m_drawItems.clear();
+    m_bvh.Clear();
 
     if (!m_defaultMaterial) {
         SA_LOG_ERROR("SceneRenderer::BuildDrawList: no default material (Init failed?)");
@@ -489,7 +620,7 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
     scene.View<StaticMeshComponent, WorldTransformComponent>().each(
         [&](entt::entity e,
             const StaticMeshComponent&     meshComp,
-            const WorldTransformComponent& /*wt*/)
+            const WorldTransformComponent& wt)
     {
         if (!meshComp.meshAsset.IsValid()) return;
 
@@ -502,6 +633,10 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
 
         const auto* matOverride  = reg.try_get<MaterialOverrideComponent>(e);
         const auto* meshRenderer = reg.try_get<MeshRendererComponent>(e);
+
+        // Entity-level world AABB = union of all submesh world AABBs.
+        glm::vec3 entityWorldMin( 1e30f);
+        glm::vec3 entityWorldMax(-1e30f);
 
         for (size_t si = 0; si < gpuMesh->subMeshes.size(); ++si) {
             const auto& sub = gpuMesh->subMeshes[si];
@@ -535,6 +670,15 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
             item.indexCount        = sub.indexCount;
             item.vertexOffset      = sub.vertexOffset;
 
+            ArvoAABB(sub.boundsMin, sub.boundsMax, sub.localTransform,
+                     item.localAABBMin, item.localAABBMax);
+
+            // Accumulate entity-level world AABB (union of all submeshes).
+            ArvoAABB(sub.boundsMin, sub.boundsMax, wt.matrix * sub.localTransform,
+                     item.worldAABBMin, item.worldAABBMax);
+            entityWorldMin = glm::min(entityWorldMin, item.worldAABBMin);
+            entityWorldMax = glm::max(entityWorldMax, item.worldAABBMax);
+
             if (matOverride && (!matOverride->scalars.empty() || !matOverride->textures.empty())) {
                 auto clone = m_matMgr->CloneInstance(base);
                 if (!clone) { item.material = base; }
@@ -551,31 +695,35 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
                 item.material = base;
             }
 
-            // Each material type owns its own G-Buffer pipeline.
-            // The attachment key (3 MRT + depth) is the same for all types;
-            // the pipeline is keyed per-type so different set=1 layouts are safe.
             item.pipeline         = item.material->GetType()->GetOrCreatePipeline(m_device, gbKey);
             item.pushConstantSize = static_cast<uint32_t>(sizeof(glm::mat4));
 
             m_drawItems.push_back(std::move(item));
         }
+
+        // One BVH leaf per entity.
+        if (entityWorldMin.x < 1e29f)
+            m_bvh.Insert(entityWorldMin, entityWorldMax, e);
     });
 
     // ── Skinned meshes ────────────────────────────────────────────────────────
-    // SkinnedMeshComponent::dynVertexBuffer is updated each frame by AnimationSystem.
-    // We build draw items once (like static meshes) — same buffer handle, new contents.
+    // Shared geometry (vertexBuffer, indexBuffer, subMeshes) comes from GPUMesh.
+    // Per-entity skinDescSet (skinMatricesBuffer + skinDataBuffer) from SkinnedMeshComponent.
     scene.View<SkinnedMeshComponent, WorldTransformComponent>().each(
         [&](entt::entity e,
             const SkinnedMeshComponent&    meshComp,
-            const WorldTransformComponent& /*wt*/)
+            const WorldTransformComponent& wt)
     {
-        if (!meshComp.ready || !meshComp.dynVertexBuffer.IsValid()) return;
+        if (!meshComp.ready) return;
+
+        const Resource::GPUMesh* gpuMesh = m_resMgr->LoadMesh(meshComp.meshAsset);
+        if (!gpuMesh) return;
 
         const auto* matOverride  = reg.try_get<MaterialOverrideComponent>(e);
         const auto* meshRenderer = reg.try_get<MeshRendererComponent>(e);
 
-        for (size_t si = 0; si < meshComp.subMeshes.size(); ++si) {
-            const auto& sub = meshComp.subMeshes[si];
+        for (size_t si = 0; si < gpuMesh->subMeshes.size(); ++si) {
+            const auto& sub = gpuMesh->subMeshes[si];
 
             MaterialInstance* base = m_defaultMaterial.get();
 
@@ -584,9 +732,9 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
                 MaterialInstance* loaded = m_matMgr->LoadMaterial(
                     meshRenderer->materialSlots[si], *m_resMgr);
                 if (loaded) base = loaded;
-            } else if (sub.materialAssetID.IsValid()) {
+            } else if (sub.defaultMaterialID.IsValid()) {
                 MaterialInstance* loaded = m_matMgr->LoadMaterial(
-                    sub.materialAssetID, *m_resMgr);
+                    sub.defaultMaterialID, *m_resMgr);
                 if (loaded) base = loaded;
             }
 
@@ -600,11 +748,17 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
             DrawItem item{};
             item.entity            = e;
             item.subLocalTransform = glm::mat4(1.f);  // skeleton drives transforms
-            item.vertexBuffer      = meshComp.dynVertexBuffer;
-            item.indexBuffer       = meshComp.indexBuffer;
+            item.vertexBuffer      = gpuMesh->vertexBuffer;
+            item.indexBuffer       = gpuMesh->indexBuffer;
             item.firstIndex        = sub.firstIndex;
             item.indexCount        = sub.indexCount;
             item.vertexOffset      = sub.vertexOffset;
+            item.skipCull          = true; // animated AABB not computed; always render
+            item.isSkinned         = true;
+            item.skinDescSet       = meshComp.skinDescSet;
+            // Approximate world AABB from bind-pose bounds × world transform.
+            ArvoAABB(sub.boundsMin, sub.boundsMax, wt.matrix,
+                     item.worldAABBMin, item.worldAABBMax);
 
             if (matOverride && (!matOverride->scalars.empty() || !matOverride->textures.empty())) {
                 auto clone = m_matMgr->CloneInstance(base);
@@ -622,6 +776,8 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
                 item.material = base;
             }
 
+            // pipeline is the material's standard pipeline — used for sorting and as
+            // a fallback; GBufferFeature overrides with skinnedPipeline at draw time.
             item.pipeline         = item.material->GetType()->GetOrCreatePipeline(m_device, gbKey);
             item.pushConstantSize = static_cast<uint32_t>(sizeof(glm::mat4));
 
@@ -629,7 +785,46 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
         }
     });
 
+    // Sort by pipeline first (minimises vkCmdBindPipeline), then vertex buffer
+    // (minimises vkCmdBindVertexBuffers).  Both are expensive Vulkan calls that
+    // the driver cannot elide without explicit deduplication on the CPU side.
+    std::sort(m_drawItems.begin(), m_drawItems.end(),
+        [](const DrawItem& a, const DrawItem& b) {
+            if (a.pipeline.index != b.pipeline.index)
+                return a.pipeline.index < b.pipeline.index;
+            return a.vertexBuffer.index < b.vertexBuffer.index;
+        });
+
+    m_bvh.Build();
+
     SA_LOG_INFO("SceneRenderer: built {} draw item(s)", m_drawItems.size());
+}
+
+// ── RaycastScene / GetSkinDescLayout ─────────────────────────────────────────
+
+entt::entity SceneRenderer::RaycastScene(const Core::Ray& ray, float maxDist) const {
+    float        bestT   = maxDist;
+    entt::entity best    = entt::null;
+
+    // Phase A: BVH for static meshes.
+    m_bvh.Raycast(ray, maxDist, bestT, best);
+
+    // Phase B: brute-force slab test for skinned meshes (skipCull items not in BVH).
+    for (const DrawItem& item : m_drawItems) {
+        if (!item.skipCull) continue;
+        float t;
+        if (Core::BVHTree<entt::entity>::RayAABB(ray, item.worldAABBMin, item.worldAABBMax, bestT, t)) {
+            bestT = t;
+            best  = item.entity;
+        }
+    }
+
+    return best;
+}
+
+RHI::RHIDescLayoutHandle SceneRenderer::GetSkinDescLayout() const {
+    if (!m_gbufferFeature) return {};
+    return m_gbufferFeature->m_skinDescLayout;
 }
 
 // ── GatherLights ──────────────────────────────────────────────────────────────
@@ -734,15 +929,46 @@ static glm::mat4 RigidBodyInverse(const glm::mat4& v) {
     return result;
 }
 
-void SceneRenderer::ApplyCameraToUniforms(const CameraData& cam, FrameUniforms& fu) {
+static float HaltonSeq(uint32_t i, uint32_t base) {
+    float result = 0.f, f = 1.f;
+    while (i > 0) { f /= float(base); result += f * float(i % base); i /= base; }
+    return result;
+}
+
+void SceneRenderer::ApplyCameraToUniforms(const CameraData& cam, FrameUniforms& fu,
+                                           uint32_t w, uint32_t h)
+{
+    const glm::mat4 unjitteredProj = cam.proj;
+    const glm::mat4 invUnjitteredProj = glm::inverse(unjitteredProj);
+
     fu.view        = cam.view;
-    fu.proj        = cam.proj;
-    fu.viewProj    = cam.proj * cam.view;
-    // (P·V)⁻¹ = V⁻¹·P⁻¹.  Compute V⁻¹ analytically (rigid body — exact),
-    // then multiply by P⁻¹ (single perspective matrix — well conditioned).
-    // Avoids inverting the ill-conditioned composed matrix directly.
-    fu.invViewProj = RigidBodyInverse(cam.view) * glm::inverse(cam.proj);
     fu.cameraPos   = cam.worldPosition;
+    // Inverse matrices use the unjittered projection so that world-space reconstruction
+    // (depth → world pos in TAA, SSAO, deferred lighting) is correct.
+    fu.invProj     = invUnjitteredProj;
+    fu.invViewProj = RigidBodyInverse(cam.view) * invUnjitteredProj;
+
+    // Previous-frame unjittered VP for TAA reprojection.
+    fu.prevViewProj          = m_prevUnjitteredViewProj;
+    m_prevUnjitteredViewProj = unjitteredProj * cam.view;
+
+    // Sub-pixel Halton(2,3) jitter — only applied when TAA is active.
+    glm::mat4 proj = unjitteredProj;
+    glm::vec2 jitterPx{0.f};
+    if (m_taaFeature && m_taaFeature->m_enabled && w > 0 && h > 0) {
+        const uint32_t si = (m_haltonIndex % 16) + 1;  // samples 1..16 avoid (0,0)
+        jitterPx.x = HaltonSeq(si, 2) - 0.5f;
+        jitterPx.y = HaltonSeq(si, 3) - 0.5f;
+        proj[2][0] += 2.f * jitterPx.x / float(w);
+        proj[2][1] += 2.f * jitterPx.y / float(h);
+    }
+    fu.proj      = proj;
+    fu.viewProj  = proj * cam.view;
+    fu.jitter    = jitterPx;
+    fu.frameIndex = m_frameIndex;
+
+    m_haltonIndex = (m_haltonIndex + 1) & 0xFF;
+    m_frameIndex  = (m_frameIndex  + 1) & 0xFF;
 }
 
 // ── AddFeature ────────────────────────────────────────────────────────────────
@@ -766,9 +992,22 @@ void SceneRenderer::RenderFrame(Scene& scene, uint32_t w, uint32_t h) {
 void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
                                  uint32_t w, uint32_t h, UIPassFn uiPass)
 {
+    SA_PROFILE_SCOPE_N("RenderFrame");
     // ── Resize G-Buffer + depth if viewport changed ────────────────────────────
     if (w != m_depthWidth || h != m_depthHeight) {
         m_device->WaitIdle();
+        m_rg.InvalidateSlots(*m_device);
+
+        // Pending bloom mip count change deferred from ApplyWorldSettings.
+        // WaitIdle above makes GPU work safe here.
+        if (m_pendingBloomMipCount != -1) {
+            for (int i = 0; i < m_bloomMipCount; ++i) {
+                if (m_bloomMip[i].IsValid()) { m_device->DestroyTexture(m_bloomMip[i]); m_bloomMip[i] = {}; }
+            }
+            m_bloomMipCount = m_pendingBloomMipCount;
+            m_pendingBloomMipCount = -1;
+            if (m_bloomFeature) m_bloomFeature->RebuildDescSets(m_bloomMipCount, m_device);
+        }
 
         auto recreateRT = [&](RHI::RHITextureHandle& tex,
                                RHI::RHIFormat fmt, const char* name) {
@@ -786,7 +1025,8 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
         recreateRT(m_gbRT0,       RHI::RHIFormat::RGBA8_UNORM, "GBuffer_RT0");
         recreateRT(m_gbRT1,       RHI::RHIFormat::RGBA16F,     "GBuffer_RT1");
         recreateRT(m_gbRT2,       RHI::RHIFormat::RGBA16F,     "GBuffer_RT2");
-        recreateRT(m_hdrTex,      RHI::RHIFormat::RGBA16F,     "HDR_Color");
+        // HDR_Color is transient — InvalidateSlots above already freed the slot;
+        // AllocateSlots will create a new RGBA16F slot at the new resolution.
         m_gbWidth  = w;
         m_gbHeight = h;
 
@@ -837,6 +1077,20 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
             recreateR8(m_dilateH,       "DilateH");
             m_selectionMaskW = w;
             m_selectionMaskH = h;
+
+            // SSAO result at half resolution — all three SSAO passes run at (w/2)×(h/2).
+            // DeferredLighting reads it via bilinear sampler and auto-upsamples.
+            {
+                if (m_ssaoTex.IsValid()) m_device->DestroyTexture(m_ssaoTex);
+                RHI::RHITextureDesc d{};
+                d.width     = std::max(1u, w / 2);
+                d.height    = std::max(1u, h / 2);
+                d.format    = RHI::RHIFormat::R8_UNORM;
+                d.usage     = RHI::RHITextureUsage::RenderTarget
+                            | RHI::RHITextureUsage::Sampled;
+                d.debugName = "SSAO_Result";
+                m_ssaoTex = m_device->CreateTexture(d);
+            }
         }
     }
 
@@ -845,7 +1099,7 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
     fu.resolution = {static_cast<float>(w), static_cast<float>(h)};
     fu.time       = static_cast<float>(m_frameCount) / 60.f;
     std::copy(std::begin(m_shCoeffs), std::end(m_shCoeffs), std::begin(fu.irrSH));
-    ApplyCameraToUniforms(camera, fu);
+    ApplyCameraToUniforms(camera, fu, w, h);
     m_currentViewProj = fu.viewProj;
     const LightUniforms lu = GatherLights(scene);
 
@@ -868,12 +1122,45 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
     }
 
     // ── Phase 2: GPU work ─────────────────────────────────────────────────────
-    m_cmd = m_device->BeginFrame();
+    { SA_PROFILE_SCOPE_N("GPU::BeginFrame"); m_cmd = m_device->BeginFrame(); }
     if (!m_cmd) return;
+
+    // Auto Exposure CPU readback: the previous frame's GPU-computed exposure value
+    // is now visible on the CPU (fence was waited in BeginFrame).  Update tonemap.
+    if (m_aeFeature && m_aeFeature->m_enabled) {
+        m_aeFeature->ReadbackExposure(m_device);
+        const float ae = m_aeFeature->m_currentExposure;
+        if (auto* tf = dynamic_cast<TonemapFeature*>(m_tonemapFeature))
+            tf->m_exposure = ae;
+        else if (auto* lf = dynamic_cast<LutTonemapFeature*>(m_tonemapFeature))
+            lf->m_exposure = ae;
+    }
 
     // Rebuild draw-list after BeginFrame so the fence-wait has already retired
     // any GPU work that held references to the previous draw-items.
     if (scene.IsAndClearMaterialDirty()) BuildDrawList(scene);
+
+    // ── CPU frustum cull ─────────────────────────────────────────────────────
+    {
+        SA_PROFILE_SCOPE_N("FrustumCull");
+        const Core::Frustum frustum = Core::Frustum::Extract(m_currentViewProj);
+
+        m_visibleEntities.clear();
+        m_bvh.Query(frustum, m_visibleEntities);
+
+        std::unordered_set<uint32_t> visSet;
+        visSet.reserve(m_visibleEntities.size());
+        for (const auto e : m_visibleEntities)
+            visSet.insert(static_cast<uint32_t>(e));
+
+        m_visibleDrawItems.clear();
+        m_visibleDrawItems.reserve(m_drawItems.size());
+        for (const auto& item : m_drawItems) {
+            if (item.skipCull || visSet.count(static_cast<uint32_t>(item.entity)))
+                m_visibleDrawItems.push_back(&item);
+        }
+        SA_PROFILE_PLOT("VisibleDrawItems", static_cast<double>(m_visibleDrawItems.size()));
+    }
 
     const uint32_t fi = m_device->GetCurrentFrameIndex();
     m_frameUniforms.Upload(fi, fu, lu);
@@ -895,8 +1182,15 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
         RHI::RHIResourceState::Undefined, RHI::RHIResourceState::Undefined);
     m_rgGbRT2 = m_rg.ImportTexture("GBuffer_RT2", m_gbRT2,
         RHI::RHIResourceState::Undefined, RHI::RHIResourceState::Undefined);
-    m_rgHdr = m_rg.ImportTexture("HDR_Color", m_hdrTex,
-        RHI::RHIResourceState::Undefined, RHI::RHIResourceState::Undefined);
+    {
+        RHI::RHITextureDesc d{};
+        d.width     = w;
+        d.height    = h;
+        d.format    = RHI::RHIFormat::RGBA16F;
+        d.usage     = RHI::RHITextureUsage::RenderTarget | RHI::RHITextureUsage::Sampled;
+        d.debugName = "HDR_Color";
+        m_rgHdr = m_rg.CreateTexture("HDR_Color", d);
+    }
     m_rgShadowMap = m_rg.ImportTexture("ShadowMap", m_shadowMap,
         RHI::RHIResourceState::Undefined, RHI::RHIResourceState::Undefined);
     for (int i = 0; i < m_bloomMipCount; ++i) {
@@ -908,10 +1202,13 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
         RHI::RHIResourceState::Undefined, RHI::RHIResourceState::Undefined);
     m_rgDilateH = m_rg.ImportTexture("DilateH", m_dilateH,
         RHI::RHIResourceState::Undefined, RHI::RHIResourceState::Undefined);
+    m_rgSsaoTex = m_rg.ImportTexture("SSAO_Result", m_ssaoTex,
+        RHI::RHIResourceState::Undefined, RHI::RHIResourceState::Undefined);
 
     // ── Build RendererHandles (RG handles for all built-in render targets) ───────
     RendererHandles handles{};
     handles.hdr           = m_rgHdr;
+    handles.taaResolved   = m_rgHdr;  // default when TAA disabled; overridden below after TAAFeature runs
     handles.swapchain     = m_rgSwapchain;
     handles.depth         = m_rgDepth;
     handles.gbufferRT0    = m_rgGbRT0;
@@ -920,67 +1217,76 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
     handles.shadowMap     = m_rgShadowMap;
     handles.selectionMask = m_rgSelectionMask;
     handles.dilateH       = m_rgDilateH;
+    handles.ssaoTex       = m_rgSsaoTex;
     handles.bloomMipCount = m_bloomMipCount;
     for (int i = 0; i < m_bloomMipCount; ++i)
         handles.bloomMip[i] = m_rgBloomMip[i];
-
-    // ── Build RHI lookup table for FrameContext::BindTexture ──────────────────
-    // Indexed by RGTextureHandle.index (assigned sequentially by ImportTexture).
-    // We build a flat array: index → RHITextureHandle.
-    // RG assigns indices starting from 0; the table size = highest index + 1.
-    // We pre-fill with the known mapping here; unknown indices resolve to {}.
-    // 7 non-bloom + kMaxBloomMips bloom + SelectionMask + DilateH = 9 + kMaxBloomMips slots.
-    const uint32_t tableSize = 9 + static_cast<uint32_t>(kMaxBloomMips);
-    std::vector<RHI::RHITextureHandle> rhiTable(tableSize);
-    auto fillEntry = [&](RGTextureHandle rg, RHI::RHITextureHandle rhi) {
-        if (rg.IsValid() && rg.index < tableSize) rhiTable[rg.index] = rhi;
-    };
-    fillEntry(m_rgSwapchain,  m_device->GetSwapchainTexture());
-    fillEntry(m_rgDepth,      m_depthTex);
-    fillEntry(m_rgGbRT0,      m_gbRT0);
-    fillEntry(m_rgGbRT1,      m_gbRT1);
-    fillEntry(m_rgGbRT2,      m_gbRT2);
-    fillEntry(m_rgHdr,        m_hdrTex);
-    fillEntry(m_rgShadowMap,  m_shadowMap);
-    for (int i = 0; i < m_bloomMipCount; ++i)
-        fillEntry(m_rgBloomMip[i], m_bloomMip[i]);
-    fillEntry(m_rgSelectionMask, m_selectionMask);
-    fillEntry(m_rgDilateH,       m_dilateH);
 
     FrameContext ctx{};
     ctx.rg       = &m_rg;
     ctx.frameSet = m_frameDescSet;
     ctx.device   = m_device;
-    ctx.m_rhiTable = rhiTable.data();
-    ctx.m_tableSize = tableSize;
 
-    // ── All passes: [Shadow, Skybox, GBuffer, DeferredLighting, Bloom, Tonemap] ─
-    for (auto& f : m_features)
+    // ── All passes: [Shadow, Skybox, GBuffer, SSAO, DeferredLighting, SelectionMask, TAA, Bloom, Tonemap, ...] ─
+    // After TAAFeature runs, redirect handles.taaResolved to the TAA history output so that
+    // BloomThreshold reads the anti-aliased (pre-bloom) frame.
+    // handles.hdr stays as m_rgHdr throughout: BloomComposite rewrites it with bloom+anti-aliased,
+    // and Tonemap reads from it directly — no extra RT needed.
+    for (auto& f : m_features) {
         f->AddPasses(*this, ctx, handles, scene.Registry(), w, h);
+        if (m_taaFeature && f.get() == m_taaFeature && m_taaFeature->m_outputHandle.IsValid())
+            handles.taaResolved = m_taaFeature->m_outputHandle;
+    }
 
     // ── Compile + Execute + Present ───────────────────────────────────────────
-    m_rg.Compile();
-    m_rg.Execute(*m_device, *m_cmd);
+    { SA_PROFILE_SCOPE_N("RG::Compile");  m_rg.Compile(); }
+    // AllocateSlots before FlushBindings: transient slot handles must be valid
+    // when we call WriteDescriptorTexture, which must happen before Execute()
+    // records vkCmdBindDescriptorSets (descriptor sets must be valid at record time).
+    m_rg.AllocateSlots(*m_device);
+    ctx.FlushBindings();  // write all queued descriptor updates; AllocateSlots ensures transient handles are valid
+    { SA_PROFILE_SCOPE_N("RG::Execute");  m_rg.Execute(*m_device, *m_cmd); }  // AllocateSlots inside Execute is a no-op
 
     if (uiPass)
         uiPass(m_cmd);
 
-    m_device->EndFrame();
-    m_device->Present();
+    { SA_PROFILE_SCOPE_N("GPU::Present"); m_device->EndFrame(); m_device->Present(); }
 
     m_cmd = nullptr;
     ++m_frameCount;
 }
 
-// ── FrameContext::BindTexture ─────────────────────────────────────────────────
+// ── FrameContext::BindTexture / BindBuffer / FlushBindings ────────────────────
 
 void FrameContext::BindTexture(RHI::RHIDescSetHandle set, uint32_t binding,
                                RGTextureHandle handle) const
 {
-    if (!handle.IsValid() || handle.index >= m_tableSize) return;
-    const RHI::RHITextureHandle rhi = m_rhiTable[handle.index];
-    if (!rhi.IsValid()) return;
-    device->WriteDescriptorTexture(set, binding, rhi);
+    if (!handle.IsValid() || !set.IsValid()) return;
+    m_pendingBindings.push_back({set, binding, handle});
+}
+
+void FrameContext::BindBuffer(RHI::RHIDescSetHandle set, uint32_t binding,
+                              RGBufferHandle handle) const
+{
+    if (!handle.IsValid() || !set.IsValid()) return;
+    m_pendingBufferBindings.push_back({set, binding, handle});
+}
+
+void FrameContext::FlushBindings() const
+{
+    for (const auto& b : m_pendingBindings) {
+        const RHI::RHITextureHandle rhi = rg->GetResolvedHandle(b.handle);
+        if (rhi.IsValid())
+            device->WriteDescriptorTexture(b.set, b.binding, rhi);
+    }
+    m_pendingBindings.clear();
+
+    for (const auto& b : m_pendingBufferBindings) {
+        const RHI::RHIBufferHandle rhi = rg->GetResolvedBufferHandle(b.handle);
+        if (rhi.IsValid())
+            device->WriteDescriptorBuffer(b.set, b.binding, rhi);
+    }
+    m_pendingBufferBindings.clear();
 }
 
 // ── ShadowFeature ─────────────────────────────────────────────────────────────
@@ -992,6 +1298,9 @@ void SceneRenderer::ShadowFeature::OnInit(const FeatureInitContext& ctx)
          RHI::RHICullMode::Front, RHI::RHIBlendMode::Opaque, RHI::RHITopology::TriangleList, true, true, false}, ctx);
     m_type = ctx.matMgr->GetType("Shadow");
     if (!m_type) SA_LOG_WARN("ShadowFeature: shader load failed — shadows disabled");
+
+    if (!ctx.matMgr->LoadShaderProgram(m_skinnedShadowProgram, "shadow_skinned", "shadow", ctx))
+        SA_LOG_WARN("ShadowFeature: skinned shadow shader not found — skinned shadows disabled");
 }
 
 void SceneRenderer::ShadowFeature::AddPasses(SceneRenderer& renderer,
@@ -1000,6 +1309,7 @@ void SceneRenderer::ShadowFeature::AddPasses(SceneRenderer& renderer,
                                               const entt::registry& reg,
                                               uint32_t /*w*/, uint32_t /*h*/)
 {
+    SA_PROFILE_SCOPE_N("Shadow::AddPasses");
     if (!m_type) return;
 
     AttachmentKey shadowKey{};
@@ -1009,15 +1319,22 @@ void SceneRenderer::ShadowFeature::AddPasses(SceneRenderer& renderer,
     const RHI::RHIPipelineHandle pipeline = m_type->GetOrCreatePipeline(ctx.device, shadowKey);
     if (!pipeline.IsValid()) return;
 
+    RHI::RHIPipelineHandle skinnedShadowPipeline{};
+    if (m_skinnedShadowProgram.IsLoaded())
+        skinnedShadowPipeline = m_skinnedShadowProgram.GetOrCreatePipeline(ctx.device, shadowKey,
+                                    RHI::RHICullMode::Front);
+
     const RHI::RHIDescSetHandle frameSet    = ctx.frameSet;
     const RGTextureHandle       rgShadowMap = handles.shadowMap;
     constexpr uint32_t          kSize       = 2048;
 
     ctx.rg->AddPass("Shadow",
         [rgShadowMap](RGPassBuilder& b) { b.WriteDepth(rgShadowMap); },
-        [&drawItems = renderer.m_drawItems, &reg, pipeline, frameSet, rgShadowMap]
+        [&drawItems = renderer.m_drawItems, &reg, pipeline, skinnedShadowPipeline,
+         frameSet, rgShadowMap]
         (RHI::IRHICommandList& cmd, const RGResources& res)
         {
+            SA_PROFILE_SCOPE_N("Shadow::Execute");
             RHI::RHIRenderPassDesc rpDesc{};
             rpDesc.colorAttachmentCount        = 0;
             rpDesc.depthAttachment.texture     = res.Get(rgShadowMap);
@@ -1030,17 +1347,35 @@ void SceneRenderer::ShadowFeature::AddPasses(SceneRenderer& renderer,
             cmd.BeginRenderPass(rpDesc);
             cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(kSize), float(kSize)});
             cmd.SetScissor(RHI::RHIScissor{0, 0, kSize, kSize});
+            cmd.SetDescriptorSet(0, frameSet);
 
+            RHI::RHIPipelineHandle currentPipeline{};
+            RHI::RHIBufferHandle   currentVB{};
+            RHI::RHIBufferHandle   currentIB{};
             for (const auto& item : drawItems) {
                 if (!item.pipeline.IsValid()) continue;
+                const RHI::RHIPipelineHandle effectivePipeline =
+                    (item.isSkinned && skinnedShadowPipeline.IsValid())
+                        ? skinnedShadowPipeline : pipeline;
+
                 const auto* wt = reg.try_get<WorldTransformComponent>(item.entity);
                 if (!wt) continue;
                 const glm::mat4 world = wt->matrix * item.subLocalTransform;
 
-                cmd.SetPipeline(pipeline);
-                cmd.SetDescriptorSet(0, frameSet);
-                cmd.SetVertexBuffer(0, item.vertexBuffer);
-                cmd.SetIndexBuffer(item.indexBuffer);
+                if (effectivePipeline.index != currentPipeline.index) {
+                    cmd.SetPipeline(effectivePipeline);
+                    currentPipeline = effectivePipeline;
+                }
+                if (item.isSkinned && item.skinDescSet.IsValid())
+                    cmd.SetDescriptorSet(2, item.skinDescSet);
+                if (item.vertexBuffer.index != currentVB.index) {
+                    cmd.SetVertexBuffer(0, item.vertexBuffer);
+                    currentVB = item.vertexBuffer;
+                }
+                if (item.indexBuffer.index != currentIB.index) {
+                    cmd.SetIndexBuffer(item.indexBuffer);
+                    currentIB = item.indexBuffer;
+                }
                 cmd.SetPushConstants(&world, sizeof(glm::mat4),
                                      RHI::RHIShaderStage::Vertex);
                 cmd.DrawIndexed(item.indexCount, 1, item.firstIndex,
@@ -1147,6 +1482,13 @@ void SceneRenderer::GBufferFeature::OnInit(const FeatureInitContext& ctx)
         m_owner->m_defaultMaterial->SetVec3 ("emissiveFactor",   {0.0f, 0.0f, 0.0f});
     }
 
+    // GPU skinning: load the skinned geometry variant (skinned vert + same frag).
+    if (ctx.matMgr->LoadShaderProgram(m_skinnedProgram,
+                                       "deferred_geometry_skinned", "deferred_geometry", ctx))
+        m_skinDescLayout = m_skinnedProgram.GetSet2Layout();
+    else
+        SA_LOG_WARN("GBufferFeature: skinned shader not found — GPU skinning unavailable");
+
     // Auto-register project material types compiled from .saglsl files.
     // ShaderCookTool embeds shadingModel + vertShader into *.gbuffer.frag.refl (v5+).
     ctx.matMgr->RegisterTypesFromShaderDir(ctx.shaderDir, ctx);
@@ -1158,12 +1500,25 @@ void SceneRenderer::GBufferFeature::AddPasses(SceneRenderer& renderer,
                                                const entt::registry& reg,
                                                uint32_t w, uint32_t h)
 {
+    SA_PROFILE_SCOPE_N("GBuffer::AddPasses");
     const RGTextureHandle rgRT0   = handles.gbufferRT0;
     const RGTextureHandle rgRT1   = handles.gbufferRT1;
     const RGTextureHandle rgRT2   = handles.gbufferRT2;
     const RGTextureHandle rgDepth = handles.depth;
     const RHI::RHIDescSetHandle frameSet = ctx.frameSet;
     const entt::registry* regPtr = &reg;
+
+    // Pre-build skinned pipeline (same attachment formats, same state as PBR).
+    AttachmentKey gbKey{};
+    gbKey.colorCount      = 3;
+    gbKey.colorFormats[0] = RHI::RHIFormat::RGBA8_UNORM;
+    gbKey.colorFormats[1] = RHI::RHIFormat::RGBA16F;
+    gbKey.colorFormats[2] = RHI::RHIFormat::RGBA16F;
+    gbKey.depthFormat     = RHI::RHIFormat::D32F;
+
+    RHI::RHIPipelineHandle skinnedPipeline{};
+    if (m_skinnedProgram.IsLoaded())
+        skinnedPipeline = m_skinnedProgram.GetOrCreatePipeline(ctx.device, gbKey);
 
     ctx.rg->AddPass("GBuffer",
         [rgRT0, rgRT1, rgRT2, rgDepth](RGPassBuilder& b) {
@@ -1172,10 +1527,11 @@ void SceneRenderer::GBufferFeature::AddPasses(SceneRenderer& renderer,
             b.Write(rgRT2);
             b.WriteDepth(rgDepth);
         },
-        [&drawItems = renderer.m_drawItems, regPtr, frameSet, w, h,
+        [&drawItems = renderer.m_visibleDrawItems, regPtr, frameSet, skinnedPipeline, w, h,
          rgRT0, rgRT1, rgRT2, rgDepth]
         (RHI::IRHICommandList& cmd, const RGResources& res)
         {
+            SA_PROFILE_SCOPE_N("GBuffer::Execute");
             RHI::RHIRenderPassDesc rpDesc{};
             rpDesc.colorAttachmentCount = 3;
             rpDesc.colorAttachments[0].texture     = res.Get(rgRT0);
@@ -1195,17 +1551,39 @@ void SceneRenderer::GBufferFeature::AddPasses(SceneRenderer& renderer,
             cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
             cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
 
-            for (const auto& item : drawItems) {
-                if (!item.pipeline.IsValid()) continue;
+            // set=0 (frame uniforms) never changes within a pass — bind once.
+            cmd.SetDescriptorSet(0, frameSet);
+
+            RHI::RHIPipelineHandle currentPipeline{};
+            RHI::RHIBufferHandle   currentVB{};
+            RHI::RHIBufferHandle   currentIB{};
+
+            for (const DrawItem* itemPtr : drawItems) {
+                const auto& item = *itemPtr;
+
+                const RHI::RHIPipelineHandle effectivePipeline =
+                    (item.isSkinned && skinnedPipeline.IsValid()) ? skinnedPipeline : item.pipeline;
+                if (!effectivePipeline.IsValid()) continue;
+
                 const auto* wt = regPtr->try_get<WorldTransformComponent>(item.entity);
                 if (!wt) continue;
                 const glm::mat4 world = wt->matrix * item.subLocalTransform;
 
-                cmd.SetPipeline(item.pipeline);
-                cmd.SetDescriptorSet(0, frameSet);
-                item.material->Bind(&cmd);
-                cmd.SetVertexBuffer(0, item.vertexBuffer);
-                cmd.SetIndexBuffer(item.indexBuffer);
+                if (effectivePipeline.index != currentPipeline.index) {
+                    cmd.SetPipeline(effectivePipeline);
+                    currentPipeline = effectivePipeline;
+                }
+                item.material->Bind(&cmd);  // set=1 per-material descriptors, always needed
+                if (item.isSkinned && item.skinDescSet.IsValid())
+                    cmd.SetDescriptorSet(2, item.skinDescSet);
+                if (item.vertexBuffer.index != currentVB.index) {
+                    cmd.SetVertexBuffer(0, item.vertexBuffer);
+                    currentVB = item.vertexBuffer;
+                }
+                if (item.indexBuffer.index != currentIB.index) {
+                    cmd.SetIndexBuffer(item.indexBuffer);
+                    currentIB = item.indexBuffer;
+                }
                 if (item.pushConstantSize > 0)
                     cmd.SetPushConstants(&world, item.pushConstantSize,
                                          RHI::RHIShaderStage::Vertex);
@@ -1228,24 +1606,21 @@ void SceneRenderer::DeferredLightingFeature::OnInit(const FeatureInitContext& ct
     m_gbDescSet = ctx.device->AllocateDescriptorSet(m_type->shader.GetMaterialLayout());
 }
 
-void SceneRenderer::DeferredLightingFeature::AddPasses(SceneRenderer& renderer,
+void SceneRenderer::DeferredLightingFeature::AddPasses([[maybe_unused]] SceneRenderer& renderer,
                                                         const FrameContext& ctx,
                                                         const RendererHandles& handles,
                                                         const entt::registry& /*reg*/,
                                                         uint32_t w, uint32_t h)
 {
+    SA_PROFILE_SCOPE_N("DeferredLighting::AddPasses");
     if (!m_type || !m_gbDescSet.IsValid()) return;
 
-    // Re-bind G-Buffer textures whenever the viewport (and thus textures) change.
-    if (w != m_trackedW || h != m_trackedH) {
-        ctx.BindTexture(m_gbDescSet, 0, handles.gbufferRT0);
-        ctx.BindTexture(m_gbDescSet, 1, handles.gbufferRT1);
-        ctx.BindTexture(m_gbDescSet, 2, handles.gbufferRT2);
-        ctx.BindTexture(m_gbDescSet, 3, handles.depth);
-        ctx.BindTexture(m_gbDescSet, 4, handles.shadowMap);
-        m_trackedW = w;
-        m_trackedH = h;
-    }
+    ctx.BindTexture(m_gbDescSet, 0, handles.gbufferRT0);
+    ctx.BindTexture(m_gbDescSet, 1, handles.gbufferRT1);
+    ctx.BindTexture(m_gbDescSet, 2, handles.gbufferRT2);
+    ctx.BindTexture(m_gbDescSet, 3, handles.depth);
+    ctx.BindTexture(m_gbDescSet, 4, handles.shadowMap);
+    ctx.BindTexture(m_gbDescSet, 5, handles.ssaoTex);
 
     AttachmentKey hdrKey{};
     hdrKey.colorCount      = 1;
@@ -1263,14 +1638,16 @@ void SceneRenderer::DeferredLightingFeature::AddPasses(SceneRenderer& renderer,
     const RGTextureHandle rgDepth    = handles.depth;
     const RGTextureHandle rgHdr      = handles.hdr;
     const RGTextureHandle rgShadowMap = handles.shadowMap;
+    const RGTextureHandle rgSsaoTex  = handles.ssaoTex;
 
     ctx.rg->AddPass("DeferredLighting",
-        [rgRT0, rgRT1, rgRT2, rgDepth, rgHdr, rgShadowMap](RGPassBuilder& b) {
+        [rgRT0, rgRT1, rgRT2, rgDepth, rgHdr, rgShadowMap, rgSsaoTex](RGPassBuilder& b) {
             b.Read(rgRT0);
             b.Read(rgRT1);
             b.Read(rgRT2);
             b.Read(rgDepth);
             b.Read(rgShadowMap);  // triggers layout transition DEPTH_ATTACHMENT → SHADER_READ_ONLY
+            b.Read(rgSsaoTex);
             b.Write(rgHdr);       // Skybox → DeferredLighting edge now comes from RG Compile
         },
         [pipeline, frameSet, gbDescSet, rgHdr, w, h]
@@ -1294,6 +1671,534 @@ void SceneRenderer::DeferredLightingFeature::AddPasses(SceneRenderer& renderer,
         });
 }
 
+void SceneRenderer::DeferredLightingFeature::ReloadShaders(
+    RHI::IRHIDevice*             device,
+    std::span<const uint8_t>     fragSpv,
+    const RHI::ShaderReflection& fragRefl)
+{
+    if (!m_type) return;
+    if (!m_type->shader.ReloadFragShader(device, fragSpv, fragRefl))
+        SA_LOG_ERROR("DeferredLightingFeature: frag shader reload failed");
+    else
+        SA_LOG_INFO("DeferredLightingFeature: dispatch hot-swapped");
+}
+
+// ── SceneRenderer::ApplyProjectShaderTypes ────────────────────────────────────
+
+void SceneRenderer::ApplyProjectShaderTypes(const std::string& cookedShaderDir) {
+    // Remove old project-specific MaterialTypes (instances already cleared by caller).
+    m_matMgr->ClearProjectTypes();
+
+    if (cookedShaderDir.empty()) return;
+
+    namespace fs = std::filesystem;
+
+    // Hot-swap deferred_lighting.frag when a project-specific SPV was produced.
+    const std::string newSpvPath = cookedShaderDir + "/deferred_lighting.frag.spv";
+    if (m_deferredLightingFeature && fs::exists(newSpvPath)) {
+        auto fragSpv = LoadComputeSpv(newSpvPath);
+
+        // Reuse the original .refl — binding layout does not change between dispatches.
+        const std::string reflPath = m_shaderDir + "/deferred_lighting.frag.refl";
+        RHI::ShaderReflection fragRefl;
+        RHI::ShaderReflectionIO::LoadFromFile(reflPath, fragRefl);
+
+        if (!fragSpv.empty())
+            m_deferredLightingFeature->ReloadShaders(m_device, fragSpv, fragRefl);
+    }
+
+    // Register new project material types.
+    FeatureInitContext ctx;
+    ctx.device      = m_device;
+    ctx.matMgr      = m_matMgr;
+    ctx.resMgr      = m_resMgr;
+    ctx.frameLayout = m_frameUniforms.GetLayout();
+    ctx.shaderDir   = cookedShaderDir;
+    m_matMgr->RegisterTypesFromShaderDir(cookedShaderDir, ctx, /*isProjectType=*/true);
+
+    SA_LOG_INFO("SceneRenderer: project shader types applied from '{}'", cookedShaderDir);
+}
+
+// ── SSAOFeature ───────────────────────────────────────────────────────────────
+
+void SceneRenderer::SSAOFeature::OnInit(const FeatureInitContext& ctx)
+{
+    ctx.matMgr->RegisterTypeFromShaders(
+        {"SSAO", "fullscreen_tri", "ssao",
+         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque, RHI::RHITopology::TriangleList, false, false, true}, ctx);
+    ctx.matMgr->RegisterTypeFromShaders(
+        {"SSAOBlur", "fullscreen_tri", "ssao_blur",
+         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque, RHI::RHITopology::TriangleList, false, false, true}, ctx);
+
+    m_gtaoType = ctx.matMgr->GetType("SSAO");
+    m_blurType = ctx.matMgr->GetType("SSAOBlur");
+    if (!m_gtaoType || !m_blurType) {
+        SA_LOG_WARN("SSAOFeature: shader load failed — SSAO disabled");
+        return;
+    }
+
+    m_gtaoDescSet  = ctx.device->AllocateDescriptorSet(m_gtaoType->shader.GetMaterialLayout());
+    m_blurHDescSet = ctx.device->AllocateDescriptorSet(m_blurType->shader.GetMaterialLayout());
+    m_blurVDescSet = ctx.device->AllocateDescriptorSet(m_blurType->shader.GetMaterialLayout());
+}
+
+void SceneRenderer::SSAOFeature::OnShutdown(RHI::IRHIDevice* /*device*/)
+{
+    m_gtaoDescSet  = {};
+    m_blurHDescSet = {};
+    m_blurVDescSet = {};
+    m_gtaoType     = nullptr;
+    m_blurType     = nullptr;
+}
+
+void SceneRenderer::SSAOFeature::AddPasses(SceneRenderer& /*renderer*/,
+                                            const FrameContext& ctx,
+                                            const RendererHandles& handles,
+                                            const entt::registry& /*reg*/,
+                                            uint32_t w, uint32_t h)
+{
+    SA_PROFILE_SCOPE_N("SSAO::AddPasses");
+    if (!m_gtaoType || !m_gtaoDescSet.IsValid()) return;
+
+    // All three SSAO passes run at half resolution; ssaoTex is also half-res.
+    // DeferredLighting bilinear-upsamples the result — AO is low-frequency, loss is imperceptible.
+    const uint32_t hw = std::max(1u, w / 2);
+    const uint32_t hh = std::max(1u, h / 2);
+
+    // GTAO reads depth + gbufferRT1 — both are imported every frame, rebind unconditionally.
+    ctx.BindTexture(m_gtaoDescSet, 0, handles.depth);
+    ctx.BindTexture(m_gtaoDescSet, 1, handles.gbufferRT1);
+    // Blur passes: binding=1 (depth) is imported — bind now.
+    // binding=0 (AO input) is a transient — written inside execute lambdas via res.Get().
+    ctx.BindTexture(m_blurHDescSet, 1, handles.depth);
+    ctx.BindTexture(m_blurVDescSet, 1, handles.depth);
+
+    // ── Create transient intermediates (aliased by the RG) ───────────────────
+    RHI::RHITextureDesc r8Desc{};
+    r8Desc.width     = hw;
+    r8Desc.height    = hh;
+    r8Desc.format    = RHI::RHIFormat::R8_UNORM;
+    r8Desc.usage     = RHI::RHITextureUsage::RenderTarget | RHI::RHITextureUsage::Sampled;
+    r8Desc.debugName = "AO_Raw";
+    const RGTextureHandle rgRawAO = ctx.rg->CreateTexture("AO_Raw",   r8Desc);
+    r8Desc.debugName = "AO_BlurH";
+    const RGTextureHandle rgBlurH = ctx.rg->CreateTexture("AO_BlurH", r8Desc);
+
+    // Transient bindings — resolved by FlushBindings() after AllocateSlots().
+    ctx.BindTexture(m_blurHDescSet, 0, rgRawAO);
+    ctx.BindTexture(m_blurVDescSet, 0, rgBlurH);
+
+    const RGTextureHandle rgDepth  = handles.depth;
+    const RGTextureHandle rgNormal = handles.gbufferRT1;
+    const RGTextureHandle rgSsao   = handles.ssaoTex;
+
+    // ── Attachment key for R8 single-channel output ───────────────────────────
+    AttachmentKey r8Key{};
+    r8Key.colorCount      = 1;
+    r8Key.colorFormats[0] = RHI::RHIFormat::R8_UNORM;
+    r8Key.depthFormat     = RHI::RHIFormat::Undefined;
+
+    const RHI::RHIPipelineHandle gtaoPipeline = m_gtaoType->GetOrCreatePipeline(ctx.device, r8Key);
+    const RHI::RHIPipelineHandle blurPipeline = m_blurType->GetOrCreatePipeline(ctx.device, r8Key);
+
+    // ── Pass 1: GTAO (or disabled fill: push enabled=0.0 → writes 1.0) ───────
+    struct GTAOPC {
+        float enabled;
+        float radius;
+        float strength;
+        float bias;
+        int   directions;
+        int   steps;
+        float _pad0;
+        float _pad1;
+    };
+    const GTAOPC gtaoPC{
+        m_enabled ? 1.f : 0.f,
+        m_radius, m_strength, m_bias,
+        m_directions, m_steps, 0.f, 0.f
+    };
+
+    {
+        const RHI::RHIDescSetHandle gtaoDescSet = m_gtaoDescSet;
+        const RHI::RHIDescSetHandle frameSet    = ctx.frameSet;
+        ctx.rg->AddPass("GTAO",
+            [rgDepth, rgNormal, rgRawAO](RGPassBuilder& b) {
+                b.Read(rgDepth);
+                b.Read(rgNormal);
+                b.Write(rgRawAO);
+            },
+            [gtaoPipeline, frameSet, gtaoDescSet, gtaoPC, rgRawAO, hw, hh]
+            (RHI::IRHICommandList& cmd, const RGResources& res)
+            {
+                RHI::RHIRenderPassDesc rp{};
+                rp.colorAttachmentCount            = 1;
+                rp.colorAttachments[0].texture     = res.Get(rgRawAO);
+                rp.colorAttachments[0].clearOnLoad = true;
+                rp.width  = hw;
+                rp.height = hh;
+                cmd.BeginRenderPass(rp);
+                cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(hw), float(hh)});
+                cmd.SetScissor(RHI::RHIScissor{0, 0, hw, hh});
+                cmd.SetPipeline(gtaoPipeline);
+                cmd.SetDescriptorSet(0, frameSet);
+                cmd.SetDescriptorSet(1, gtaoDescSet);
+                cmd.SetPushConstants(&gtaoPC, sizeof(gtaoPC), RHI::RHIShaderStage::Fragment);
+                cmd.Draw(3, 1, 0, 0);
+                cmd.EndRenderPass();
+            });
+    }
+
+    // ── Pass 2: bilateral blur H ──────────────────────────────────────────────
+    {
+        const RHI::RHIDescSetHandle blurHDescSet = m_blurHDescSet;
+        const RHI::RHIDescSetHandle frameSet     = ctx.frameSet;
+        struct BlurPC { float sx; float sy; float sharpness; float _pad; };
+        const BlurPC blurHPC{1.f / float(hw), 0.f, m_blurSharpness, 0.f};
+
+        ctx.rg->AddPass("SSAO_BlurH",
+            [rgRawAO, rgDepth, rgBlurH](RGPassBuilder& b) {
+                b.Read(rgRawAO);
+                b.Read(rgDepth);
+                b.Write(rgBlurH);
+            },
+            [blurPipeline, frameSet, blurHDescSet, blurHPC, rgBlurH, hw, hh]
+            (RHI::IRHICommandList& cmd, const RGResources& res)
+            {
+                RHI::RHIRenderPassDesc rp{};
+                rp.colorAttachmentCount            = 1;
+                rp.colorAttachments[0].texture     = res.Get(rgBlurH);
+                rp.colorAttachments[0].clearOnLoad = true;
+                rp.width  = hw;
+                rp.height = hh;
+                cmd.BeginRenderPass(rp);
+                cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(hw), float(hh)});
+                cmd.SetScissor(RHI::RHIScissor{0, 0, hw, hh});
+                cmd.SetPipeline(blurPipeline);
+                cmd.SetDescriptorSet(0, frameSet);
+                cmd.SetDescriptorSet(1, blurHDescSet);
+                cmd.SetPushConstants(&blurHPC, sizeof(blurHPC), RHI::RHIShaderStage::Fragment);
+                cmd.Draw(3, 1, 0, 0);
+                cmd.EndRenderPass();
+            });
+    }
+
+    // ── Pass 3: bilateral blur V → ssaoTex (half-res, imported in RendererHandles) ──
+    {
+        const RHI::RHIDescSetHandle blurVDescSet = m_blurVDescSet;
+        const RHI::RHIDescSetHandle frameSet     = ctx.frameSet;
+        struct BlurPC { float sx; float sy; float sharpness; float _pad; };
+        const BlurPC blurVPC{0.f, 1.f / float(hh), m_blurSharpness, 0.f};
+
+        ctx.rg->AddPass("SSAO_BlurV",
+            [rgBlurH, rgDepth, rgSsao](RGPassBuilder& b) {
+                b.Read(rgBlurH);
+                b.Read(rgDepth);
+                b.Write(rgSsao);
+            },
+            [blurPipeline, frameSet, blurVDescSet, blurVPC, rgSsao, hw, hh]
+            (RHI::IRHICommandList& cmd, const RGResources& res)
+            {
+                RHI::RHIRenderPassDesc rp{};
+                rp.colorAttachmentCount            = 1;
+                rp.colorAttachments[0].texture     = res.Get(rgSsao);
+                rp.colorAttachments[0].clearOnLoad = true;
+                rp.width  = hw;
+                rp.height = hh;
+                cmd.BeginRenderPass(rp);
+                cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(hw), float(hh)});
+                cmd.SetScissor(RHI::RHIScissor{0, 0, hw, hh});
+                cmd.SetPipeline(blurPipeline);
+                cmd.SetDescriptorSet(0, frameSet);
+                cmd.SetDescriptorSet(1, blurVDescSet);
+                cmd.SetPushConstants(&blurVPC, sizeof(blurVPC), RHI::RHIShaderStage::Fragment);
+                cmd.Draw(3, 1, 0, 0);
+                cmd.EndRenderPass();
+            });
+    }
+}
+
+// ── TAAFeature ────────────────────────────────────────────────────────────────
+
+void SceneRenderer::TAAFeature::OnInit(const FeatureInitContext& ctx)
+{
+    ctx.matMgr->RegisterTypeFromShaders(
+        {"TAA", "fullscreen_tri", "taa_resolve",
+         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque, RHI::RHITopology::TriangleList, false, false, true}, ctx);
+
+    m_taaType = ctx.matMgr->GetType("TAA");
+    if (!m_taaType) {
+        SA_LOG_WARN("TAAFeature: shader load failed — TAA disabled");
+        return;
+    }
+    m_resolveSet = ctx.device->AllocateDescriptorSet(m_taaType->shader.GetMaterialLayout());
+}
+
+void SceneRenderer::TAAFeature::OnShutdown(RHI::IRHIDevice* device)
+{
+    m_resolveSet = {};
+    m_taaType    = nullptr;
+    for (int i = 0; i < 2; ++i) {
+        if (m_historyTex[i].IsValid()) device->DestroyTexture(m_historyTex[i]);
+        m_historyTex[i] = {};
+    }
+}
+
+void SceneRenderer::TAAFeature::AddPasses(SceneRenderer& /*renderer*/,
+                                           const FrameContext& ctx,
+                                           const RendererHandles& handles,
+                                           const entt::registry& /*reg*/,
+                                           uint32_t w, uint32_t h)
+{
+    SA_PROFILE_SCOPE_N("TAA::AddPasses");
+    if (!m_enabled || !m_taaType || !m_resolveSet.IsValid()) {
+        m_outputHandle = {};  // invalid → feature loop leaves handles.taaResolved = handles.hdr
+        return;
+    }
+
+    // ── Resize / first init ───────────────────────────────────────────────────
+    if (w != m_trackedW || h != m_trackedH) {
+        for (int i = 0; i < 2; ++i) {
+            if (m_historyTex[i].IsValid()) ctx.device->DestroyTexture(m_historyTex[i]);
+            RHI::RHITextureDesc d{};
+            d.width     = w;
+            d.height    = h;
+            d.format    = RHI::RHIFormat::RGBA16F;
+            d.usage     = RHI::RHITextureUsage::RenderTarget | RHI::RHITextureUsage::Sampled;
+            d.debugName = (i == 0) ? "TAA_History0" : "TAA_History1";
+            m_historyTex[i] = ctx.device->CreateTexture(d);
+        }
+        m_trackedW     = w;
+        m_trackedH     = h;
+        m_historyValid = false;
+    }
+
+    const int prevIndex = m_historyIndex;
+    const int currIndex = 1 - prevIndex;
+
+    // Import ping-pong textures: prevTex is read, currTex is written (becomes new history).
+    const RGTextureHandle rgHistoryRead = ctx.rg->ImportTexture("TAA_HistoryRead",
+        m_historyTex[prevIndex],
+        RHI::RHIResourceState::Undefined, RHI::RHIResourceState::Undefined);
+    const RGTextureHandle rgHistoryWrite = ctx.rg->ImportTexture("TAA_HistoryWrite",
+        m_historyTex[currIndex],
+        RHI::RHIResourceState::Undefined, RHI::RHIResourceState::Undefined);
+
+    ctx.BindTexture(m_resolveSet, 0, handles.hdr);
+    ctx.BindTexture(m_resolveSet, 1, rgHistoryRead);
+    ctx.BindTexture(m_resolveSet, 2, handles.depth);
+
+    AttachmentKey hdrKey{};
+    hdrKey.colorCount      = 1;
+    hdrKey.colorFormats[0] = RHI::RHIFormat::RGBA16F;
+    hdrKey.depthFormat     = RHI::RHIFormat::Undefined;
+    const RHI::RHIPipelineHandle taaPipeline = m_taaType->GetOrCreatePipeline(ctx.device, hdrKey);
+
+    struct TAAPC {
+        float blendStatic;
+        float blendMotion;
+        float historyValid;
+        float antiGhosting;
+    };
+    const TAAPC taaPC{ m_blendStatic, m_blendMotion, m_historyValid ? 1.f : 0.f, m_antiGhosting ? 1.f : 0.f };
+
+    const RGTextureHandle rgCurrent  = handles.hdr;
+    const RGTextureHandle rgDepth    = handles.depth;
+    const RHI::RHIDescSetHandle resolveSet = m_resolveSet;
+    const RHI::RHIDescSetHandle frameSet   = ctx.frameSet;
+
+    ctx.rg->AddPass("TAA_Resolve",
+        [rgCurrent, rgDepth, rgHistoryRead, rgHistoryWrite](RGPassBuilder& b) {
+            b.Read(rgCurrent);
+            b.Read(rgDepth);
+            b.Read(rgHistoryRead);
+            b.Write(rgHistoryWrite);
+        },
+        [taaPipeline, frameSet, resolveSet, taaPC, rgHistoryWrite, w, h]
+        (RHI::IRHICommandList& cmd, const RGResources& res)
+        {
+            RHI::RHIRenderPassDesc rp{};
+            rp.colorAttachmentCount            = 1;
+            rp.colorAttachments[0].texture     = res.Get(rgHistoryWrite);
+            rp.colorAttachments[0].clearOnLoad = false;
+            rp.width  = w;
+            rp.height = h;
+            cmd.BeginRenderPass(rp);
+            cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
+            cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
+            cmd.SetPipeline(taaPipeline);
+            cmd.SetDescriptorSet(0, frameSet);
+            cmd.SetDescriptorSet(1, resolveSet);
+            cmd.SetPushConstants(&taaPC, sizeof(taaPC), RHI::RHIShaderStage::Fragment);
+            cmd.Draw(3, 1, 0, 0);
+            cmd.EndRenderPass();
+        });
+
+    m_outputHandle = rgHistoryWrite;
+    m_historyIndex = currIndex;
+    m_historyValid = true;
+}
+
+// ── AutoExposureFeature ───────────────────────────────────────────────────────
+
+void SceneRenderer::AutoExposureFeature::OnInit(const FeatureInitContext& ctx)
+{
+    const std::string histoSpvPath  = ctx.shaderDir + "/postfx_histogram.comp.spv";
+    const std::string histoReflPath = ctx.shaderDir + "/postfx_histogram.comp.refl";
+    const std::string adaptSpvPath  = ctx.shaderDir + "/postfx_exposure_adapt.comp.spv";
+    const std::string adaptReflPath = ctx.shaderDir + "/postfx_exposure_adapt.comp.refl";
+
+    const auto histoSpv = LoadComputeSpv(histoSpvPath);
+    const auto adaptSpv = LoadComputeSpv(adaptSpvPath);
+    if (histoSpv.empty() || adaptSpv.empty()) {
+        SA_LOG_WARN("AutoExposureFeature: compute shader(s) not found — feature disabled");
+        return;
+    }
+
+    if (!m_histoProg.Load(ctx.device, {histoSpv, LoadComputeRefl(histoReflPath)}) ||
+        !m_adaptProg.Load(ctx.device, {adaptSpv, LoadComputeRefl(adaptReflPath)})) {
+        SA_LOG_WARN("AutoExposureFeature: ComputeProgram::Load failed — feature disabled");
+        return;
+    }
+
+    // Persistent exposure SSBO (1 × float, device-local, Storage|CopySrc)
+    RHI::RHIBufferDesc expDesc{};
+    expDesc.size      = sizeof(float);
+    expDesc.usage     = RHI::RHIBufferUsage::Storage | RHI::RHIBufferUsage::CopySrc;
+    expDesc.debugName = "AE_Exposure";
+    m_exposureSsbo = ctx.device->CreateBuffer(expDesc);
+
+    // CPU-visible staging buffer for per-frame readback (1 × float, CopyDst)
+    RHI::RHIBufferDesc stgDesc{};
+    stgDesc.size       = sizeof(float);
+    stgDesc.usage      = RHI::RHIBufferUsage::CopyDst;
+    stgDesc.cpuVisible = true;
+    stgDesc.debugName  = "AE_ExposureStaging";
+    m_exposureStaging = ctx.device->CreateBuffer(stgDesc);
+
+    // Seed initial exposure value = 1.0 in both buffers so first frame is stable.
+    const float initVal = 1.0f;
+    ctx.device->UploadBufferData(m_exposureSsbo,    &initVal, sizeof(float));
+    ctx.device->UploadBufferData(m_exposureStaging, &initVal, sizeof(float));
+
+    // Allocate descriptor sets from per-pass set=1 layouts.
+    const RHI::RHIDescLayoutHandle histoLayout = m_histoProg.GetLayout(1);
+    const RHI::RHIDescLayoutHandle adaptLayout = m_adaptProg.GetLayout(1);
+    if (!histoLayout.IsValid() || !adaptLayout.IsValid()) {
+        SA_LOG_WARN("AutoExposureFeature: missing set=1 layouts — feature disabled");
+        return;
+    }
+    m_histoSet = ctx.device->AllocateDescriptorSet(histoLayout);
+    m_adaptSet = ctx.device->AllocateDescriptorSet(adaptLayout);
+
+    // Pre-bind the persistent exposure SSBO to m_adaptSet binding=1.
+    // (histo binding=1 and adaptSet binding=0 are transient → deferred via BindBuffer)
+    ctx.device->WriteDescriptorBuffer(m_adaptSet, 1, m_exposureSsbo);
+}
+
+void SceneRenderer::AutoExposureFeature::OnShutdown(RHI::IRHIDevice* device)
+{
+    m_histoProg.Unload(device);
+    m_adaptProg.Unload(device);
+    if (m_exposureSsbo.IsValid())    device->DestroyBuffer(m_exposureSsbo);
+    if (m_exposureStaging.IsValid()) device->DestroyBuffer(m_exposureStaging);
+    m_exposureSsbo    = {};
+    m_exposureStaging = {};
+    m_histoSet = {};
+    m_adaptSet = {};
+}
+
+void SceneRenderer::AutoExposureFeature::AddPasses(SceneRenderer& /*renderer*/,
+                                                    const FrameContext& ctx,
+                                                    const RendererHandles& handles,
+                                                    const entt::registry& /*reg*/,
+                                                    uint32_t w, uint32_t h)
+{
+    if (!m_enabled || !m_histoProg.IsLoaded() || !m_adaptProg.IsLoaded()) return;
+    if (!m_histoSet.IsValid() || !m_adaptSet.IsValid()) return;
+
+    // Per-frame delta time from steady_clock.
+    const auto now = std::chrono::steady_clock::now();
+    const float dt = m_timerInit
+        ? std::chrono::duration<float>(now - m_lastTime).count()
+        : (1.f / 60.f);
+    m_lastTime  = now;
+    m_timerInit = true;
+
+    // Transient 256-bin histogram SSBO — cleared each frame by RG (clearOnCreate).
+    RGBufferDesc histoDesc{};
+    histoDesc.size          = 256 * sizeof(uint32_t);
+    histoDesc.usage         = RHI::RHIBufferUsage::Storage | RHI::RHIBufferUsage::CopyDst;
+    histoDesc.clearOnCreate = true;
+    histoDesc.debugName     = "AE_Histo";
+    const RGBufferHandle hHisto = ctx.rg->CreateBuffer("AE_Histo", histoDesc);
+
+    // Import the persistent exposure SSBO so the RG tracks its state.
+    const RGBufferHandle hExposure = ctx.rg->ImportBuffer(
+        "AE_Exposure", m_exposureSsbo, RHI::RHIBufferState::StorageWrite);
+
+    // Deferred texture/buffer bindings — resolved by FlushBindings after AllocateSlots.
+    ctx.BindTexture(m_histoSet, 0, handles.hdr);
+    ctx.BindBuffer (m_histoSet, 1, hHisto);
+    ctx.BindBuffer (m_adaptSet, 0, hHisto);
+
+    const RHI::RHIPipelineHandle histoPipeline = m_histoProg.GetPipeline(ctx.device);
+    const RHI::RHIPipelineHandle adaptPipeline = m_adaptProg.GetPipeline(ctx.device);
+    const RHI::RHIDescSetHandle  histoSet   = m_histoSet;
+    const RHI::RHIDescSetHandle  adaptSet   = m_adaptSet;
+    const RHI::RHIBufferHandle   expStaging = m_exposureStaging;
+
+    struct HistoPC { uint32_t w; uint32_t h; float evMin; float evMax; };
+    const HistoPC histoPC { w, h, m_evMin, m_evMax };
+
+    struct AdaptPC { float dt; float adaptSpeed; float evMin; float evMax;
+                     float lowPct; float highPct; };
+    const AdaptPC adaptPC { dt, m_adaptSpeed, m_evMin, m_evMax, m_lowPct, m_highPct };
+
+    ctx.rg->AddPass("AE_Histogram",
+        [hHisto, handles](RGPassBuilder& b) {
+            b.Read(handles.hdr);
+            b.WriteBuffer(hHisto);
+        },
+        [histoPipeline, histoSet, histoPC, w, h]
+        (RHI::IRHICommandList& cmd, const RGResources& /*res*/) {
+            cmd.SetComputePipeline(histoPipeline);
+            cmd.SetDescriptorSet(1, histoSet);
+            cmd.SetPushConstants(&histoPC, sizeof(histoPC), RHI::RHIShaderStage::Compute);
+            cmd.Dispatch((w + 15u) / 16u, (h + 15u) / 16u, 1u);
+        });
+
+    ctx.rg->AddPass("AE_Adapt",
+        [hHisto, hExposure](RGPassBuilder& b) {
+            b.ReadBuffer(hHisto);
+            b.WriteBuffer(hExposure);
+        },
+        [adaptPipeline, adaptSet, adaptPC, hExposure, expStaging]
+        (RHI::IRHICommandList& cmd, const RGResources& res) {
+            cmd.SetComputePipeline(adaptPipeline);
+            cmd.SetDescriptorSet(1, adaptSet);
+            cmd.SetPushConstants(&adaptPC, sizeof(adaptPC), RHI::RHIShaderStage::Compute);
+            cmd.Dispatch(1u, 1u, 1u);
+            // Copy updated exposure to staging buffer for CPU readback next frame.
+            // Manual barriers: StorageWrite→CopySrc for the copy, then CopySrc→StorageWrite
+            // to leave the buffer in the state declared by next frame's ImportBuffer.
+            const RHI::RHIBufferHandle expBuf = res.GetBuffer(hExposure);
+            cmd.BufferBarrier(expBuf,
+                RHI::RHIBufferState::StorageWrite, RHI::RHIBufferState::CopySrc);
+            cmd.CopyBuffer(expBuf, expStaging, 0, 0, sizeof(float));
+            cmd.BufferBarrier(expBuf,
+                RHI::RHIBufferState::CopySrc, RHI::RHIBufferState::StorageWrite);
+        });
+}
+
+void SceneRenderer::AutoExposureFeature::ReadbackExposure(RHI::IRHIDevice* device)
+{
+    if (!m_exposureStaging.IsValid()) return;
+    float value = 1.0f;
+    device->ReadBufferData(m_exposureStaging, &value, sizeof(float));
+    if (std::isfinite(value) && value > 0.f)
+        m_currentExposure = value;
+}
+
 // ── TonemapFeature ────────────────────────────────────────────────────────────
 
 void SceneRenderer::TonemapFeature::OnInit(const FeatureInitContext& ctx)
@@ -1304,6 +2209,97 @@ void SceneRenderer::TonemapFeature::OnInit(const FeatureInitContext& ctx)
     m_type = ctx.matMgr->GetType("Tonemap");
     if (!m_type) { SA_LOG_WARN("TonemapFeature: shader load failed"); return; }
     m_hdrDescSet = ctx.device->AllocateDescriptorSet(m_type->shader.GetMaterialLayout());
+
+    // 32³ RGBA16F 3D LUT for parametric color grading
+    RHI::RHITextureDesc lutDesc{};
+    lutDesc.width     = 32;
+    lutDesc.height    = 32;
+    lutDesc.depth     = 32;
+    lutDesc.format    = RHI::RHIFormat::RGBA16F;
+    lutDesc.usage     = RHI::RHITextureUsage::UnorderedAccess
+                      | RHI::RHITextureUsage::Sampled;
+    lutDesc.debugName = "CG_LUT";
+    m_cgLutTex = ctx.device->CreateTexture(lutDesc);
+
+    const std::string spvPath  = ctx.shaderDir + "/postfx_cg_bake.comp.spv";
+    const std::string reflPath = ctx.shaderDir + "/postfx_cg_bake.comp.refl";
+    const auto spv = LoadComputeSpv(spvPath);
+    if (spv.empty()) {
+        SA_LOG_WARN("TonemapFeature: postfx_cg_bake.comp.spv not found — color grading disabled");
+        return;
+    }
+    if (!m_cgBakeProg.Load(ctx.device, {spv, LoadComputeRefl(reflPath)})) {
+        SA_LOG_WARN("TonemapFeature: ComputeProgram load failed — color grading disabled");
+        return;
+    }
+
+    m_cgBakeDs = ctx.device->AllocateDescriptorSet(m_cgBakeProg.GetLayout(0));
+    ctx.device->WriteDescriptorStorageImage(m_cgBakeDs, 0, m_cgLutTex);
+}
+
+void SceneRenderer::TonemapFeature::OnShutdown(RHI::IRHIDevice* device)
+{
+    m_cgBakeProg.Unload(device);
+    if (m_cgLutTex.IsValid()) device->DestroyTexture(m_cgLutTex);
+    m_cgLutTex    = {};
+    m_cgBakeDs    = {};
+    m_cgLutReady  = false;
+    m_hdrDescSet = {};
+    m_type       = nullptr;
+}
+
+void SceneRenderer::TonemapFeature::BakeColorGrading(RHI::IRHIDevice& device)
+{
+    if (!m_cgLutTex.IsValid() || !m_cgBakeProg.IsLoaded() || !m_cgBakeDs.IsValid()) return;
+
+    const auto pipeline = m_cgBakeProg.GetPipeline(&device);
+    if (!pipeline.IsValid()) return;
+
+    struct BakePC {
+        glm::vec3 lift;    float _p0;
+        glm::vec3 midtone; float _p1;
+        glm::vec3 gain;    float _p2;
+        float saturation;
+        float contrast;
+        float _p3; float _p4;
+    };
+    const BakePC pc{
+        m_cgSettings.lift,    0.f,
+        m_cgSettings.midtone, 0.f,
+        m_cgSettings.gain,    0.f,
+        m_cgSettings.saturation,
+        m_cgSettings.contrast,
+        0.f, 0.f
+    };
+
+    using RS = RHI::RHIResourceState;
+    const RS srcState = m_cgLutReady ? RS::ShaderRead : RS::Undefined;
+    device.ImmediateCompute([&](RHI::IRHICommandList* cmd) {
+        cmd->TransitionTexture(m_cgLutTex, srcState, RS::UnorderedAccess);
+        cmd->SetComputePipeline(pipeline);
+        cmd->SetDescriptorSet(0, m_cgBakeDs);
+        cmd->SetPushConstants(&pc, sizeof(pc), RHI::RHIShaderStage::Compute);
+        cmd->Dispatch(4, 4, 8);  // 32/8, 32/8, 32/4
+        cmd->TransitionTexture(m_cgLutTex, RS::UnorderedAccess, RS::ShaderRead);
+    });
+    m_cgLutReady = true;
+
+    if (m_hdrDescSet.IsValid())
+        device.WriteDescriptorTexture(m_hdrDescSet, 1, m_cgLutTex);
+}
+
+void SceneRenderer::TonemapFeature::SetColorGrading(const ColorGradingSettings& s)
+{
+    if (s.enabled    != m_cgSettings.enabled    ||
+        s.lift       != m_cgSettings.lift        ||
+        s.midtone    != m_cgSettings.midtone     ||
+        s.gain       != m_cgSettings.gain        ||
+        s.saturation != m_cgSettings.saturation  ||
+        s.contrast   != m_cgSettings.contrast)
+    {
+        m_cgDirty = true;
+    }
+    m_cgSettings = s;
 }
 
 void SceneRenderer::TonemapFeature::AddPasses(SceneRenderer& /*renderer*/,
@@ -1314,11 +2310,12 @@ void SceneRenderer::TonemapFeature::AddPasses(SceneRenderer& /*renderer*/,
 {
     if (!m_type || !m_hdrDescSet.IsValid()) return;
 
-    if (w != m_trackedW || h != m_trackedH) {
-        ctx.BindTexture(m_hdrDescSet, 0, handles.hdr);
-        m_trackedW = w;
-        m_trackedH = h;
+    if (m_cgDirty) {
+        BakeColorGrading(*ctx.device);
+        m_cgDirty = false;
     }
+
+    ctx.BindTexture(m_hdrDescSet, 0, handles.hdr);
 
     AttachmentKey swapKey{};
     swapKey.colorCount      = 1;
@@ -1332,8 +2329,9 @@ void SceneRenderer::TonemapFeature::AddPasses(SceneRenderer& /*renderer*/,
     const RGTextureHandle rgHdr       = handles.hdr;
     const RGTextureHandle rgSwapchain = handles.swapchain;
 
-    struct TonemapPC { float exposure; float gamma; float _pad0; float _pad1; };
-    const TonemapPC pc{m_exposure, m_gamma, 0.f, 0.f};
+    struct TonemapPC { float exposure; float cgEnabled; float _pad0; float _pad1; };
+    const float cgOn = (m_cgSettings.enabled && m_cgLutTex.IsValid() && m_cgBakeProg.IsLoaded()) ? 1.f : 0.f;
+    const TonemapPC pc{m_exposure, cgOn, 0.f, 0.f};
 
     ctx.rg->AddPass("Tonemap",
         [rgHdr, rgSwapchain](RGPassBuilder& b) {
@@ -1372,7 +2370,6 @@ void SceneRenderer::LutTonemapFeature::OnInit(const FeatureInitContext& ctx)
     m_type = ctx.matMgr->GetType("LutTonemap");
     if (!m_type) { SA_LOG_WARN("LutTonemapFeature: shader load failed"); return; }
     m_hdrLutDescSet = ctx.device->AllocateDescriptorSet(m_type->shader.GetMaterialLayout());
-    m_trackedW = m_trackedH = 0;
     // binding=1 (t_LUT) is written by SetLutTexture, called by ApplyWorldSettings
     // immediately after feature construction — never rendered before that.
 }
@@ -1399,11 +2396,7 @@ void SceneRenderer::LutTonemapFeature::AddPasses(SceneRenderer& /*renderer*/,
 {
     if (!m_type || !m_hdrLutDescSet.IsValid()) return;
 
-    if (w != m_trackedW || h != m_trackedH) {
-        ctx.BindTexture(m_hdrLutDescSet, 0, handles.hdr);
-        m_trackedW = w;
-        m_trackedH = h;
-    }
+    ctx.BindTexture(m_hdrLutDescSet, 0, handles.hdr);
 
     AttachmentKey swapKey{};
     swapKey.colorCount      = 1;
@@ -1482,28 +2475,42 @@ void SceneRenderer::BloomFeature::OnInit(const FeatureInitContext& ctx)
     m_compositeDescSet = ctx.device->AllocateDescriptorSet(layout);
 }
 
+void SceneRenderer::BloomFeature::RebuildDescSets(int newMipCount, RHI::IRHIDevice* device)
+{
+    device->FreeDescriptorSet(m_thresholdDescSet);
+    for (int i = 0; i < m_mipCount - 1; ++i) {
+        device->FreeDescriptorSet(m_downsampleDescSet[i]);
+        device->FreeDescriptorSet(m_upsampleDescSet[i]);
+    }
+    device->FreeDescriptorSet(m_compositeDescSet);
+
+    m_mipCount = newMipCount;
+    const auto layout = m_thresholdType->shader.GetMaterialLayout();
+    m_thresholdDescSet = device->AllocateDescriptorSet(layout);
+    for (int i = 0; i < m_mipCount - 1; ++i) {
+        m_downsampleDescSet[i] = device->AllocateDescriptorSet(layout);
+        m_upsampleDescSet[i]   = device->AllocateDescriptorSet(layout);
+    }
+    m_compositeDescSet = device->AllocateDescriptorSet(layout);
+}
+
 void SceneRenderer::BloomFeature::AddPasses(SceneRenderer& renderer,
                                              const FrameContext& ctx,
                                              const RendererHandles& handles,
                                              const entt::registry& /*reg*/,
                                              uint32_t w, uint32_t h)
 {
+    if (!m_enabled) return;
     if (!m_thresholdType || !m_downsampleType || !m_upsampleType || !m_compositeType) return;
     if (!m_thresholdDescSet.IsValid()) return;
 
-    // Re-bind input textures on viewport resize.
-    if (w != m_trackedW || h != m_trackedH) {
-        ctx.BindTexture(m_thresholdDescSet, 0, handles.hdr);
-        // downsampleDescSet[i] reads mip[i]
-        for (int i = 0; i < m_mipCount - 1; ++i)
-            ctx.BindTexture(m_downsampleDescSet[i], 0, handles.bloomMip[i]);
-        // upsampleDescSet[i] reads mip[m_mipCount-1-i]  (bottom → top order)
-        for (int i = 0; i < m_mipCount - 1; ++i)
-            ctx.BindTexture(m_upsampleDescSet[i], 0, handles.bloomMip[m_mipCount - 1 - i]);
-        ctx.BindTexture(m_compositeDescSet, 0, handles.bloomMip[0]);
-        m_trackedW = w;
-        m_trackedH = h;
-    }
+    // Threshold reads taaResolved: the anti-aliased pre-bloom frame (= hdr when TAA disabled).
+    ctx.BindTexture(m_thresholdDescSet, 0, handles.taaResolved);
+    for (int i = 0; i < m_mipCount - 1; ++i)
+        ctx.BindTexture(m_downsampleDescSet[i], 0, handles.bloomMip[i]);
+    for (int i = 0; i < m_mipCount - 1; ++i)
+        ctx.BindTexture(m_upsampleDescSet[i], 0, handles.bloomMip[m_mipCount - 1 - i]);
+    ctx.BindTexture(m_compositeDescSet, 0, handles.bloomMip[0]);
 
     AttachmentKey bloomKey{};
     bloomKey.colorCount      = 1;
@@ -1532,16 +2539,17 @@ void SceneRenderer::BloomFeature::AddPasses(SceneRenderer& renderer,
         dsSet[i] = m_downsampleDescSet[i];
         usSet[i] = m_upsampleDescSet[i];
     }
-    const RGTextureHandle rgHdr = handles.hdr;
+    const RGTextureHandle rgHdr      = handles.hdr;          // composite writes here
+    const RGTextureHandle rgTaaInput = handles.taaResolved;  // threshold reads here (= rgHdr when TAA off)
 
-    // ── Threshold: HDR → mip[0] ───────────────────────────────────────────────
+    // ── Threshold: taaResolved → mip[0] ──────────────────────────────────────
     struct ThresholdPC { float threshold; float knee; float p0; float p1; };
-    constexpr ThresholdPC threshPC{1.0f, 0.1f, 0.f, 0.f};
+    const ThresholdPC threshPC{m_threshold, m_threshold * 0.1f, 0.f, 0.f};
     {
         const RGTextureHandle dst = rgMip[0];
         const uint32_t tw = mipW[0], th = mipH[0];
         ctx.rg->AddPass("BloomThreshold",
-            [rgHdr, dst](RGPassBuilder& b) { b.Read(rgHdr); b.Write(dst); },
+            [rgTaaInput, dst](RGPassBuilder& b) { b.Read(rgTaaInput); b.Write(dst); },
             [pipeThreshold, frameSet, threshDescSet, threshPC, dst, tw, th]
             (RHI::IRHICommandList& cmd, const RGResources& res) {
                 RHI::RHIRenderPassDesc rp{};
@@ -1590,17 +2598,19 @@ void SceneRenderer::BloomFeature::AddPasses(SceneRenderer& renderer,
     // ── Upsample: mip[i+1] → mip[i], additive accumulation ──────────────────
     // Iterates i = m_mipCount-2 downto 0 (fine → coarse).
     // usSet[passIdx] was bound to mip[m_mipCount-1-passIdx], matching src each time.
-    // Per-layer radius: deepest mip gets widest spread, shallowest stays tight.
+    // Per-layer radius decays geometrically from m_radius: each level scales by 0.85.
     struct UpsamplePC { float radius; float p0, p1, p2; };
-    // Enough entries for kMaxBloomMips-1 passes; only [0..m_mipCount-2] are used.
-    constexpr float kUpsampleRadii[kMaxBloomMips - 1] = {1.00f, 0.85f, 0.70f, 0.60f, 0.55f, 0.50f, 0.45f};
+    float upsampleRadii[kMaxBloomMips - 1];
+    upsampleRadii[0] = m_radius;
+    for (int k = 1; k < m_mipCount - 1; ++k)
+        upsampleRadii[k] = upsampleRadii[k - 1] * 0.85f;
     for (int i = m_mipCount - 2; i >= 0; --i) {
         const int passIdx           = (m_mipCount - 2) - i;
         const RGTextureHandle src   = rgMip[i + 1];
         const RGTextureHandle dst   = rgMip[i];
         const uint32_t dw = mipW[i], dh = mipH[i];
         const RHI::RHIDescSetHandle us = usSet[passIdx];
-        const UpsamplePC upPC{kUpsampleRadii[passIdx], 0.f, 0.f, 0.f};
+        const UpsamplePC upPC{upsampleRadii[passIdx], 0.f, 0.f, 0.f};
         ctx.rg->AddPass("BloomUp" + std::to_string(i),
             [src, dst](RGPassBuilder& b) { b.Read(src); b.Write(dst); },
             [pipeUpsample, frameSet, us, upPC, dst, dw, dh]
@@ -1624,7 +2634,7 @@ void SceneRenderer::BloomFeature::AddPasses(SceneRenderer& renderer,
 
     // ── Composite: mip[0] → HDR (additive, preserves lighting) ──────────────
     struct CompositePC { float strength; float p0; float p1; float p2; };
-    constexpr CompositePC compPC{0.4f, 0.f, 0.f, 0.f};
+    const CompositePC compPC{m_strength, 0.f, 0.f, 0.f};
     {
         const RGTextureHandle src = rgMip[0];
         ctx.rg->AddPass("BloomComposite",
@@ -1818,6 +2828,10 @@ void SceneRenderer::SelectionMaskFeature::OnInit(const FeatureInitContext& ctx)
     }
     m_type = ctx.matMgr->GetType("SelectionMask");
     if (!m_type) SA_LOG_WARN("SelectionMaskFeature: type not found after register");
+
+    if (!ctx.matMgr->LoadShaderProgram(m_skinnedProgram,
+                                        "selection_mask_skinned", "selection_mask", ctx))
+        SA_LOG_WARN("SelectionMaskFeature: skinned shader not found — skinned outlines disabled");
 }
 
 void SceneRenderer::SelectionMaskFeature::AddPasses(
@@ -1838,10 +2852,12 @@ void SceneRenderer::SelectionMaskFeature::AddPasses(
     }
 
     struct DC {
-        RHI::RHIBufferHandle vb, ib;
-        uint32_t firstIndex, indexCount;
-        int32_t  vertexOffset;
-        glm::mat4 model;
+        RHI::RHIBufferHandle  vb, ib;
+        uint32_t              firstIndex, indexCount;
+        int32_t               vertexOffset;
+        glm::mat4             model;
+        bool                  isSkinned = false;
+        RHI::RHIDescSetHandle skinDescSet;
     };
     std::vector<DC> dcs;
     for (const auto& di : renderer.m_drawItems) {
@@ -1852,7 +2868,8 @@ void SceneRenderer::SelectionMaskFeature::AddPasses(
         if (!wt) continue;
         dcs.push_back({di.vertexBuffer, di.indexBuffer,
                        di.firstIndex, di.indexCount, di.vertexOffset,
-                       wt->matrix * di.subLocalTransform});
+                       wt->matrix * di.subLocalTransform,
+                       di.isSkinned, di.skinDescSet});
     }
     if (dcs.empty()) return;
 
@@ -1866,6 +2883,10 @@ void SceneRenderer::SelectionMaskFeature::AddPasses(
     const RHI::RHIPipelineHandle pipeline = m_type->GetOrCreatePipeline(ctx.device, maskKey);
     if (!pipeline.IsValid()) return;
 
+    RHI::RHIPipelineHandle skinnedPipeline{};
+    if (m_skinnedProgram.IsLoaded())
+        skinnedPipeline = m_skinnedProgram.GetOrCreatePipeline(ctx.device, maskKey);
+
     const RHI::RHIDescSetHandle frameSet = ctx.frameSet;
     const RGTextureHandle       rgMask   = handles.selectionMask;
 
@@ -1873,7 +2894,7 @@ void SceneRenderer::SelectionMaskFeature::AddPasses(
         [rgMask](RGPassBuilder& b) {
             b.Write(rgMask);
         },
-        [pipeline, frameSet, dcs = std::move(dcs), rgMask, w, h]
+        [pipeline, skinnedPipeline, frameSet, dcs = std::move(dcs), rgMask, w, h]
         (RHI::IRHICommandList& cmd, const RGResources& res)
         {
             RHI::RHIRenderPassDesc rpDesc{};
@@ -1887,9 +2908,18 @@ void SceneRenderer::SelectionMaskFeature::AddPasses(
             cmd.BeginRenderPass(rpDesc);
             cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
             cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
-            cmd.SetPipeline(pipeline);
             cmd.SetDescriptorSet(0, frameSet);
+
+            RHI::RHIPipelineHandle currentPipeline{};
             for (const auto& dc : dcs) {
+                const RHI::RHIPipelineHandle effectivePipeline =
+                    (dc.isSkinned && skinnedPipeline.IsValid()) ? skinnedPipeline : pipeline;
+                if (effectivePipeline.index != currentPipeline.index) {
+                    cmd.SetPipeline(effectivePipeline);
+                    currentPipeline = effectivePipeline;
+                }
+                if (dc.isSkinned && dc.skinDescSet.IsValid())
+                    cmd.SetDescriptorSet(2, dc.skinDescSet);
                 cmd.SetVertexBuffer(0, dc.vb);
                 cmd.SetIndexBuffer(dc.ib);
                 cmd.SetPushConstants(&dc.model, sizeof(glm::mat4),

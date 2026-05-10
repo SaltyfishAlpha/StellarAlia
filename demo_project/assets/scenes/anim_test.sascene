@@ -1,24 +1,173 @@
 {
   "entities": [
     {
-      "camera": {
-        "far": 500.0,
-        "fovY": 1.0471999645233154,
-        "near": 0.10000000149011612,
-        "priority": 1
+      "animator": {
+        "clip": "123cac7d-ff6c-4b00-8d0d-a2e77ebb95a0",
+        "looping": true,
+        "speed": 1.0
+      },
+      "collider": {
+        "extents": [
+          0.28999999165534973,
+          0.47999998927116394,
+          0.5
+        ],
+        "offset": [
+          0.0,
+          0.0,
+          0.7799999713897705
+        ],
+        "rotation": [
+          0.7071067690849304,
+          0.7071067690849304,
+          0.0,
+          0.0
+        ],
+        "shape": "capsule"
       },
       "id": 0,
+      "meshRenderer": {
+        "castShadow": true,
+        "materials": [],
+        "receiveShadow": true
+      },
       "parent": -1,
-      "tag": "Camera",
+      "rigidBody": {
+        "friction": 0.5,
+        "mass": 1.0,
+        "restitution": 0.0,
+        "type": "dynamic"
+      },
+      "skinnedMesh": {
+        "mesh": "7e5e8b53-f8d7-4a42-9c71-635059999f35"
+      },
+      "tag": "CesiumMan (Copy)",
+      "transform": {
+        "position": [
+          -1.7598536014556885,
+          0.10169147700071335,
+          1.1902973651885986
+        ],
+        "rotation": [
+          0.6248469948768616,
+          -0.6248430013656616,
+          -0.33101263642311096,
+          -0.3310107886791229
+        ],
+        "scale": [
+          0.999999463558197,
+          0.9999757409095764,
+          0.9999971389770508
+        ]
+      }
+    },
+    {
+      "collider": {
+        "extents": [
+          2.5,
+          0.0010000000474974513,
+          2.5
+        ],
+        "offset": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "shape": "box"
+      },
+      "id": 1,
+      "meshRenderer": {
+        "castShadow": true,
+        "materials": [],
+        "receiveShadow": true
+      },
+      "parent": -1,
+      "rigidBody": {
+        "friction": 0.5,
+        "mass": 1.0,
+        "restitution": 0.0,
+        "type": "static"
+      },
+      "staticMesh": {
+        "mesh": "c0be0000-0000-4000-0000-000000000002"
+      },
+      "tag": "Plane",
+      "transform": {
+        "position": [
+          -0.25898411870002747,
+          0.0,
+          0.018350690603256226
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          5.0,
+          5.0,
+          5.0
+        ]
+      }
+    },
+    {
+      "animator": {
+        "clip": "123cac7d-ff6c-4b00-8d0d-a2e77ebb95a0",
+        "looping": true,
+        "speed": 1.0
+      },
+      "collider": {
+        "extents": [
+          0.28999999165534973,
+          0.47999998927116394,
+          0.5
+        ],
+        "offset": [
+          0.0,
+          0.0,
+          0.7799999713897705
+        ],
+        "rotation": [
+          0.7071067690849304,
+          0.7071067690849304,
+          0.0,
+          0.0
+        ],
+        "shape": "capsule"
+      },
+      "id": 2,
+      "meshRenderer": {
+        "castShadow": true,
+        "materials": [],
+        "receiveShadow": true
+      },
+      "parent": -1,
+      "rigidBody": {
+        "friction": 0.5,
+        "mass": 1.0,
+        "restitution": 0.0,
+        "type": "dynamic"
+      },
+      "skinnedMesh": {
+        "mesh": "7e5e8b53-f8d7-4a42-9c71-635059999f35"
+      },
+      "tag": "CesiumMan",
       "transform": {
         "position": [
           0.0,
-          1.2000000476837158,
-          4.5
+          0.4000000059604645,
+          0.0
         ],
         "rotation": [
-          0.9914000034332275,
-          -0.13050000369548798,
+          0.7071068286895752,
+          -0.7071068286895752,
           0.0,
           0.0
         ],
@@ -39,7 +188,7 @@
         ],
         "intensity": 2.0
       },
-      "id": 1,
+      "id": 3,
       "parent": -1,
       "tag": "Sun",
       "transform": {
@@ -62,31 +211,24 @@
       }
     },
     {
-      "animator": {
-        "clip": "123cac7d-ff6c-4b00-8d0d-a2e77ebb95a0",
-        "looping": true,
-        "speed": 1.0
+      "camera": {
+        "far": 500.0,
+        "fovY": 1.0471999645233154,
+        "near": 0.10000000149011612,
+        "priority": 1
       },
-      "id": 2,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
+      "id": 4,
       "parent": -1,
-      "skinnedMesh": {
-        "mesh": "7e5e8b53-f8d7-4a42-9c71-635059999f35"
-      },
-      "tag": "CesiumMan",
+      "tag": "Camera",
       "transform": {
         "position": [
           0.0,
-          0.0,
-          0.0
+          1.2000000476837158,
+          4.5
         ],
         "rotation": [
-          0.7071068286895752,
-          -0.7071068286895752,
+          0.9914000034332275,
+          -0.13050000369548798,
           0.0,
           0.0
         ],
@@ -94,6 +236,118 @@
           1.0,
           1.0,
           1.0
+        ]
+      }
+    },
+    {
+      "animator": {
+        "clip": "123cac7d-ff6c-4b00-8d0d-a2e77ebb95a0",
+        "looping": true,
+        "speed": 1.0
+      },
+      "collider": {
+        "extents": [
+          0.28999999165534973,
+          0.47999998927116394,
+          0.5
+        ],
+        "offset": [
+          0.0,
+          0.0,
+          0.7799999713897705
+        ],
+        "rotation": [
+          0.7071067690849304,
+          0.7071067690849304,
+          0.0,
+          0.0
+        ],
+        "shape": "capsule"
+      },
+      "id": 5,
+      "parent": -1,
+      "rigidBody": {
+        "friction": 0.5,
+        "mass": 1.0,
+        "restitution": 0.0,
+        "type": "dynamic"
+      },
+      "skinnedMesh": {
+        "mesh": "7e5e8b53-f8d7-4a42-9c71-635059999f35"
+      },
+      "tag": "CesiumMan (Copy)",
+      "transform": {
+        "position": [
+          -1.0893161296844482,
+          1.0,
+          -1.1257054805755615
+        ],
+        "rotation": [
+          0.6896189451217651,
+          -0.6896182894706726,
+          -0.1562890261411667,
+          -0.15628890693187714
+        ],
+        "scale": [
+          1.0,
+          1.000019907951355,
+          1.0000197887420654
+        ]
+      }
+    },
+    {
+      "animator": {
+        "clip": "123cac7d-ff6c-4b00-8d0d-a2e77ebb95a0",
+        "looping": true,
+        "speed": 1.0
+      },
+      "collider": {
+        "extents": [
+          0.28999999165534973,
+          0.47999998927116394,
+          0.5
+        ],
+        "offset": [
+          0.0,
+          0.0,
+          0.7799999713897705
+        ],
+        "rotation": [
+          0.7071067690849304,
+          0.7071067690849304,
+          0.0,
+          0.0
+        ],
+        "shape": "capsule"
+      },
+      "id": 6,
+      "parent": -1,
+      "rigidBody": {
+        "friction": 0.5,
+        "mass": 1.0,
+        "restitution": 0.0,
+        "type": "dynamic"
+      },
+      "skinnedMesh": {
+        "mesh": "7e5e8b53-f8d7-4a42-9c71-635059999f35"
+      },
+      "tag": "CesiumMan (Copy) (Copy)",
+      "transform": {
+        "position": [
+          1.7205073833465576,
+          0.06347379088401794,
+          0.00456632673740387
+        ],
+        "rotation": [
+          0.461039662361145,
+          -0.46103811264038086,
+          -0.5361379384994507,
+          -0.5361365079879761
+        ],
+        "scale": [
+          0.9999993443489075,
+          1.0000174045562744,
+          1.0000184774398804
         ]
       }
     }
@@ -106,15 +360,29 @@
       0.07999999821186066,
       0.07999999821186066
     ],
-    "backgroundMode": "SolidColor",
+    "backgroundMode": "Skybox",
     "brdfLut": "c5b06992-5a8f-4dc9-9d11-406e12b969d4",
-    "exposure": 1.0,
-    "gamma": 2.200000047683716,
-    "lutStrength": 1.0,
+    "postProcess": {
+      "bloomEnabled": true,
+      "bloomMipLevels": 3,
+      "bloomRadius": 1.0,
+      "bloomStrength": 0.4000000059604645,
+      "bloomThreshold": 1.0,
+      "exposure": 0.6000000238418579,
+      "gamma": 2.200000047683716,
+      "lutStrength": 1.0,
+      "ssaoBias": 0.02500000037252903,
+      "ssaoBlurSharpness": 10.0,
+      "ssaoDirections": 4,
+      "ssaoEnabled": true,
+      "ssaoRadius": 32.0,
+      "ssaoSteps": 3,
+      "ssaoStrength": 1.0,
+      "tonemapMode": "Builtin"
+    },
     "prefilteredEnv": "78735f5c-b3c4-4363-b142-699c816fa64f",
     "sh9": "79735f5c-b3c4-4362-b342-699c816fa64e",
     "skyboxCubemap": "7e735f5c-b3c4-4365-b342-699c816fa649",
-    "skyboxHdr": "7a735f5c-b3c4-4361-b342-699c816fa64d",
-    "tonemapMode": "Builtin"
+    "skyboxHdr": "7a735f5c-b3c4-4361-b342-699c816fa64d"
   }
 }

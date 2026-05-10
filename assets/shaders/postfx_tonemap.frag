@@ -1,10 +1,11 @@
 #version 450
 
 layout(set = 1, binding = 0) uniform sampler2D t_HDR;
+layout(set = 1, binding = 1) uniform sampler3D t_CGLUT;  // 32³ color grading LUT
 
 layout(push_constant) uniform PushConstants {
     float exposure;
-    float gamma;
+    float cgEnabled;  // 0 = off, 1 = on
     float _pad0;
     float _pad1;
 } pc;
@@ -21,7 +22,7 @@ vec3 ACESFilmic(vec3 x) {
 void main() {
     vec3 hdr        = texture(t_HDR, v_UV).rgb * pc.exposure;
     vec3 tonemapped = ACESFilmic(hdr);
-    // No manual gamma: swapchain is VK_FORMAT_B8G8R8A8_SRGB,
-    // the driver applies linear→sRGB automatically.
+    if (pc.cgEnabled > 0.5)
+        tonemapped = texture(t_CGLUT, tonemapped).rgb;
     out_Color = vec4(tonemapped, 1.0);
 }

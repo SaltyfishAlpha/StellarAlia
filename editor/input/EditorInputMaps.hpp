@@ -130,6 +130,13 @@ inline std::vector<ActionMapDef> MakeViewportMaps() {
                     .bindings = { BindingDef::Direct("Keyboard/F2") },
                     .userConfigurable = true,
                 },
+                // ── Panel visibility ──────────────────────────────────────
+                {
+                    .name = "TogglePanels",
+                    .type = ActionType::Button,
+                    .bindings = { BindingDef::Direct("Keyboard/F8") },
+                    .userConfigurable = true,
+                },
             }
         },
         {

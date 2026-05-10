@@ -23,11 +23,21 @@ struct EditorOverlaySettings {
     // ── Camera ────────────────────────────────────────────────────────────────
     bool drawCameraFrustum = true;
 
+    // ── Light wireframes ──────────────────────────────────────────────────────
+    bool drawPointLightRange     = true;
+    bool drawSpotLightCone       = true;
+    bool drawAreaLightRect       = true;
+    bool drawDirectionalLightDir = true;
+
     // ── Selection collider ───────────────────────────────────────────────────
     bool drawSelectionCollider = true;  // draw collider wireframe on selected entity
 
     // ── Skeleton gizmo ───────────────────────────────────────────────────────
     bool drawSkeletonGizmo = true;  // joints (spheres) + bones (lines) on selected skinned mesh
+
+    // ── Entity icons (lights, cameras) ───────────────────────────────────────
+    bool  drawEntityIcons   = true;   // billboard icons for non-visible entities
+    float billboardIconSize = 32.f;   // rendered size in screen pixels [16, 64]
 
     // ── Selection outline ─────────────────────────────────────────────────────
     bool  drawSelectionAABB = true;   // enables screen-space silhouette outline

@@ -2,6 +2,8 @@
 
 #include <functional>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 #include <span>
@@ -60,6 +62,8 @@ public:
 
     void UploadBufferData(RHIBufferHandle buffer, const void* data,
                           uint64_t size, uint64_t offset = 0) override;
+    void ReadBufferData(RHIBufferHandle buffer, void* data,
+                        uint64_t size, uint64_t offset = 0) override;
     void UploadTextureData(RHITextureHandle handle,
                            const void* data, uint64_t size) override;
     void UploadTextureMips(RHITextureHandle           handle,
@@ -68,6 +72,8 @@ public:
                              std::span<MipReadback> mips) override;
     [[nodiscard]] const RHITextureDesc* GetTextureDesc(
         RHITextureHandle handle) const override;
+    [[nodiscard]] RHIMemoryStats   GetMemoryStats()  const override;
+    [[nodiscard]] std::string_view GetDeviceName()  const override { return m_gpuName; }
 
     void DestroyTexture(RHITextureHandle  handle) override;
     void DestroyBuffer(RHIBufferHandle   handle) override;
@@ -100,6 +106,10 @@ public:
         uint32_t         swapchainMinImageCount; // VkSurfaceCapabilitiesKHR::minImageCount
     };
     [[nodiscard]] ImGuiVulkanContext GetImGuiContext() const;
+
+    // Editor-only helpers for ImGui texture binding (ImGui_ImplVulkan_AddTexture).
+    [[nodiscard]] VkImageView GetTextureImageView(RHITextureHandle handle) const { return GetVkImageView(handle); }
+    [[nodiscard]] VkSampler   GetLinearSampler()                           const { return m_samplerLinearRepeat; }
 
     // ── Internal helpers (used by VulkanCommandList) ──────────────────────────
     VkImage          GetVkImage         (RHITextureHandle  handle) const;
@@ -144,6 +154,7 @@ private:
     void ImmediateSubmit(std::function<void(VkCommandBuffer)>&& fn);
 
     // ── Vulkan core ───────────────────────────────────────────────────────────
+    std::string              m_gpuName;
     VkInstance               m_instance        = VK_NULL_HANDLE;
     VkPhysicalDevice         m_physDevice      = VK_NULL_HANDLE;
     VkDevice                 m_device          = VK_NULL_HANDLE;
@@ -176,7 +187,7 @@ private:
         bool           swapchain  = false;
         // Per-mip image views, lazily created by WriteDescriptorStorageImageMip.
         // mipViews[m] is a single-level view for mip m only.
-        std::vector<VkImageView> mipViews;
+        std::vector<VkImageView> mipViews = {};
     };
     std::vector<TextureEntry> m_textures;
 
@@ -224,8 +235,11 @@ private:
     VkDescriptorPool          m_descPool = VK_NULL_HANDLE;
 
     // ── Default samplers ──────────────────────────────────────────────────────
-    VkSampler m_samplerLinearRepeat  = VK_NULL_HANDLE;
-    VkSampler m_samplerNearestRepeat = VK_NULL_HANDLE;
+    VkSampler             m_samplerLinearRepeat  = VK_NULL_HANDLE;
+    VkSampler             m_samplerNearestRepeat = VK_NULL_HANDLE;
+    // Empty layout (0 bindings) used to fill gaps in pipeline layout slot arrays,
+    // so that valid layouts land at the correct set index in pSetLayouts[].
+    VkDescriptorSetLayout m_emptyDescLayout      = VK_NULL_HANDLE;
 
     // ── Immediate submit infrastructure ──────────────────────────────────────
     VkCommandPool   m_immCmdPool = VK_NULL_HANDLE;

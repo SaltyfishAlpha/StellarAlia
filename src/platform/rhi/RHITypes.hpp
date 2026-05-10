@@ -62,6 +62,17 @@ enum class RHIResourceState : uint32_t {
     Present,            // Ready for swapchain presentation
 };
 
+// Buffer-specific pipeline states (no layout concept, only access masks).
+enum class RHIBufferState : uint32_t {
+    Undefined    = 0,   // Before first use in RG
+    StorageRead  = 1,   // SSBO read-only  (compute / fragment)
+    StorageWrite = 2,   // SSBO read+write (compute)
+    IndirectRead = 3,   // Indirect draw / dispatch argument
+    CopySrc      = 4,   // Transfer source
+    CopyDst      = 5,   // Transfer destination (also used internally for clearOnCreate)
+    VertexRead   = 6,   // Vertex buffer input
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Usage Flags
 // ─────────────────────────────────────────────────────────────────────────────

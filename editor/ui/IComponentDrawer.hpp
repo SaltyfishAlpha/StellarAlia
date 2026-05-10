@@ -2,6 +2,8 @@
 
 #include <entt/entt.hpp>
 
+struct ImFont;
+
 namespace StellarAlia { class Scene; }
 
 namespace StellarAlia::Editor {
@@ -25,6 +27,11 @@ public:
 
     // Returns true if the component was present on the entity.
     virtual bool TryDraw(entt::registry& reg, entt::entity entity, Scene& scene) = 0;
+
+    void SetIconFont(ImFont* f) { m_iconFont = f; }
+
+protected:
+    ImFont* m_iconFont = nullptr;
 };
 
 } // namespace StellarAlia::Editor

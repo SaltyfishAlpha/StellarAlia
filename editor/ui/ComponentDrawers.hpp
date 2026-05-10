@@ -8,6 +8,7 @@
 #include "resource/AssetRegistry.hpp"
 
 #include <imgui.h>
+#include "ui/IconsFontAwesome6.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -180,12 +181,24 @@ public:
             const float btnSz = ImGui::GetFrameHeight();
 
             ImGui::PushID("##scale_lock");
-            if (m_scaleLocked)
+            const bool wasLocked = m_scaleLocked;
+            if (wasLocked)
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.55f, 0.90f, 1.f));
-            if (ImGui::Button(m_scaleLocked ? "=" : "/", ImVec2(btnSz, btnSz)))
+            const ImVec2 btnPos = ImGui::GetCursorScreenPos();
+            if (ImGui::Button("##btn", ImVec2(btnSz, btnSz)))
                 m_scaleLocked = !m_scaleLocked;
-            if (m_scaleLocked)
+            if (wasLocked)
                 ImGui::PopStyleColor();
+            if (m_iconFont) {
+                const char*  icon   = wasLocked ? ICON_FA_LINK : ICON_FA_LINK_SLASH;
+                const float  iconPx = btnSz - 2.f * ImGui::GetStyle().FramePadding.y;
+                const ImVec2 tsz    = m_iconFont->CalcTextSizeA(iconPx, FLT_MAX, 0.f, icon);
+                ImGui::GetWindowDrawList()->AddText(
+                    m_iconFont, iconPx,
+                    ImVec2(btnPos.x + (btnSz - tsz.x) * 0.5f,
+                           btnPos.y + (btnSz - tsz.y) * 0.5f),
+                    IM_COL32_WHITE, icon);
+            }
             ImGui::PopID();
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("%s", m_scaleLocked
@@ -382,14 +395,11 @@ public:
         ImGui::PushID("SkinnedMesh");
         // When mesh changes, clear runtime state and signal Application to re-prepare.
         if (DrawAssetIDField("Mesh Asset", sm->meshAsset, "Mesh", m_registry)) {
-            sm->ready       = false;
-            sm->vertexCount = 0;
-            sm->subMeshes.clear();
+            sm->ready = false;
             scene.MarkSkinnedMeshDirty();
         }
-        ImGui::LabelText("Vertices",   "%u",  sm->vertexCount);
-        ImGui::LabelText("Sub Meshes", "%zu", sm->subMeshes.size());
-        ImGui::LabelText("Status",     "%s",  sm->ready ? "Ready" : "Pending");
+        ImGui::LabelText("Bones",  "%u", sm->boneCount);
+        ImGui::LabelText("Status", "%s", sm->ready ? "Ready" : "Pending");
         ImGui::PopID();
         return true;
     }

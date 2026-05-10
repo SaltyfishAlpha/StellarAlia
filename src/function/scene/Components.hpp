@@ -156,25 +156,18 @@ struct AnimatorComponent {
     bool    playing  = true;
 };
 
-// Per-sub-mesh draw call descriptor for a skinned mesh entity.
-struct SkinnedSubMeshInfo {
-    uint32_t firstIndex   = 0;
-    uint32_t indexCount   = 0;
-    int32_t  vertexOffset = 0;
-    AssetID  materialAssetID;   // .samat uuid; invalid → use default material
-};
-
-// Holds the GPU-side skinned mesh data.
-//   dynVertexBuffer: CPU-visible, written each frame by AnimationSystem (deformed poses).
-//   indexBuffer:     Static GPU buffer; shared from LoadMesh().
-//   ready:           Set true by AnimationSystem::PrepareEntity(); BuildDrawList skips if false.
+// Holds the GPU-side per-entity skinning state.
+//   skinMatricesBuffer:  Per-bone 4×4 matrices, CPU-visible, uploaded each frame by AnimationSystem.
+//   skinDescSet:         set=2 descriptor (binding0=skinMats, binding1=GPUMesh::skinDataBuffer).
+//   boneCount:           Number of bones; determines skinMatricesBuffer size.
+//   ready:               Set true by AnimationSystem::PrepareEntity(); BuildDrawList skips if false.
+// Shared mesh data (vertexBuffer, indexBuffer, subMeshes, skinDataBuffer) lives in GPUMesh.
 struct SkinnedMeshComponent {
-    AssetID                         meshAsset;
-    RHI::RHIBufferHandle            dynVertexBuffer;
-    RHI::RHIBufferHandle            indexBuffer;
-    uint32_t                        vertexCount = 0;
-    std::vector<SkinnedSubMeshInfo> subMeshes;
-    bool                            ready = false;
+    AssetID               meshAsset;
+    RHI::RHIBufferHandle  skinMatricesBuffer;
+    RHI::RHIDescSetHandle skinDescSet;
+    uint32_t              boneCount = 0;
+    bool                  ready     = false;
 };
 
 // ── Physics ───────────────────────────────────────────────────────────────────

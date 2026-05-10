@@ -1,20 +1,38 @@
 {
   "entities": [
     {
-      "areaLight": {
-        "color": [
-          0.20000000298023224,
-          0.550000011920929,
-          1.0
-        ],
-        "emissiveScale": 2.0,
-        "height": 3.0,
-        "intensity": 68.0,
-        "twoSided": false,
-        "width": 2.0
+      "camera": {
+        "far": 500.0,
+        "fovY": 1.0471999645233154,
+        "near": 0.10000000149011612,
+        "priority": 1
       },
       "id": 0,
+      "parent": -1,
+      "tag": "MainCamera",
+      "transform": {
+        "position": [
+          0.0,
+          3.0,
+          8.0
+        ],
+        "rotation": [
+          0.9890000224113464,
+          -0.1509999930858612,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "id": 1,
       "materialOverride": {
+        "materialAsset": "d3f4abb0-0000-4000-0000-000000000001",
         "scalars": {
           "baseColorFactor": [
             0.0,
@@ -22,43 +40,267 @@
             0.0,
             1.0
           ],
-          "emissiveFactor": [
-            0.1813725233078003,
-            0.46789246797561646,
-            1.0
-          ],
-          "emissiveIntensity": 9.75,
-          "metallicFactor": 0.0,
-          "roughnessFactor": 1.0
+          "metallicFactor": 1.0,
+          "roughnessFactor": 0.4449999928474426
         },
         "textures": {}
       },
       "meshRenderer": {
         "castShadow": false,
         "materials": [],
-        "receiveShadow": false
+        "receiveShadow": true
       },
       "parent": -1,
+      "staticGeometry": true,
       "staticMesh": {
         "mesh": "c0be0000-0000-4000-0000-000000000002"
       },
-      "tag": "AreaRight",
+      "tag": "GroundPlane",
       "transform": {
         "position": [
-          6.0,
-          2.0,
+          0.0,
+          -0.009999999776482582,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          10.0,
+          1.0,
+          8.0
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "materialOverride": {
+        "materialAsset": "5ec599b2-0f1a-49cf-87ff-971e687d1da3",
+        "scalars": {
+          "roughnessFactor": 1.0
+        },
+        "textures": {}
+      },
+      "meshRenderer": {
+        "castShadow": true,
+        "materials": [],
+        "receiveShadow": true
+      },
+      "parent": -1,
+      "staticMesh": {
+        "mesh": "c0be0000-0000-4000-0000-000000000001"
+      },
+      "tag": "CubeGray",
+      "transform": {
+        "position": [
+          -3.0,
+          0.5,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "materialOverride": {
+        "scalars": {
+          "baseColorFactor": [
+            0.10392635315656662,
+            0.3165302872657776,
+            0.8480392098426819,
+            1.0
+          ],
+          "metallicFactor": 0.8500000238418579,
+          "roughnessFactor": 0.25
+        },
+        "textures": {}
+      },
+      "meshRenderer": {
+        "castShadow": true,
+        "materials": [],
+        "receiveShadow": true
+      },
+      "parent": -1,
+      "staticMesh": {
+        "mesh": "c0be0000-0000-4000-0000-000000000001"
+      },
+      "tag": "CubeBlue",
+      "transform": {
+        "position": [
+          0.0,
+          0.5,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "materialOverride": {
+        "materialAsset": "d3f4abb0-0000-4000-0000-000000000001",
+        "scalars": {
+          "baseColorFactor": [
+            0.15000000596046448,
+            0.15000000596046448,
+            0.30000001192092896,
+            1.0
+          ],
+          "emissiveFactor": [
+            1.0,
+            0.6278652548789978,
+            0.039215683937072754
+          ],
+          "emissiveIntensity": 21.5
+        },
+        "textures": {}
+      },
+      "meshRenderer": {
+        "castShadow": true,
+        "materials": [],
+        "receiveShadow": true
+      },
+      "parent": -1,
+      "staticMesh": {
+        "mesh": "c0be0000-0000-4000-0000-000000000001"
+      },
+      "tag": "CubeEmissive",
+      "transform": {
+        "position": [
+          3.0,
+          0.5,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "id": 5,
+      "parent": -1,
+      "pointLight": {
+        "color": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "intensity": 4.0,
+        "range": 7.0
+      },
+      "tag": "PointBetween",
+      "transform": {
+        "position": [
+          -1.5,
+          1.5,
+          1.5
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "directionalLight": {
+        "castShadow": true,
+        "color": [
+          1.0,
+          0.949999988079071,
+          0.800000011920929
+        ],
+        "intensity": 12.949999809265137
+      },
+      "id": 6,
+      "parent": -1,
+      "tag": "Sun",
+      "transform": {
+        "position": [
+          2.5,
+          3.0,
+          0.0
+        ],
+        "rotation": [
+          0.7010116577148438,
+          -0.5610591173171997,
+          -0.4304511547088623,
+          -0.09223394095897675
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "id": 7,
+      "parent": -1,
+      "spotLight": {
+        "color": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "innerAngle": 0.39962801337242126,
+        "intensity": 72.0,
+        "outerAngle": 0.5199999809265137,
+        "range": 13.800000190734863
+      },
+      "tag": "SpotTop",
+      "transform": {
+        "position": [
+          0.0,
+          5.0,
           0.0
         ],
         "rotation": [
           0.7070000171661377,
+          -0.7070000171661377,
           0.0,
-          0.0,
-          0.7070000171661377
+          0.0
         ],
         "scale": [
-          2.0,
-          0.05000000074505806,
-          3.0
+          1.0,
+          1.0,
+          1.0
         ]
       }
     },
@@ -75,7 +317,7 @@
         "twoSided": false,
         "width": 2.0
       },
-      "id": 1,
+      "id": 8,
       "materialOverride": {
         "scalars": {
           "baseColorFactor": [
@@ -125,311 +367,64 @@
       }
     },
     {
-      "id": 2,
-      "parent": -1,
-      "spotLight": {
+      "areaLight": {
         "color": [
-          0.0,
-          1.0,
-          0.0
-        ],
-        "innerAngle": 0.39962801337242126,
-        "intensity": 72.0,
-        "outerAngle": 0.5199999809265137,
-        "range": 13.800000190734863
-      },
-      "tag": "SpotTop",
-      "transform": {
-        "position": [
-          0.0,
-          5.0,
-          0.0
-        ],
-        "rotation": [
-          0.7070000171661377,
-          -0.7070000171661377,
-          0.0,
-          0.0
-        ],
-        "scale": [
-          1.0,
-          1.0,
+          0.20000000298023224,
+          0.550000011920929,
           1.0
-        ]
-      }
-    },
-    {
-      "directionalLight": {
-        "castShadow": true,
-        "color": [
-          1.0,
-          0.949999988079071,
-          0.800000011920929
         ],
-        "intensity": 12.949999809265137
+        "emissiveScale": 2.0,
+        "height": 3.0,
+        "intensity": 68.0,
+        "twoSided": false,
+        "width": 2.0
       },
-      "id": 3,
-      "parent": -1,
-      "tag": "Sun",
-      "transform": {
-        "position": [
-          2.5,
-          3.0,
-          0.0
-        ],
-        "rotation": [
-          0.7010116577148438,
-          -0.5610591173171997,
-          -0.4304511547088623,
-          -0.09223394095897675
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 4,
-      "parent": -1,
-      "pointLight": {
-        "color": [
-          1.0,
-          0.0,
-          0.0
-        ],
-        "intensity": 4.0,
-        "range": 7.0
-      },
-      "tag": "PointBetween",
-      "transform": {
-        "position": [
-          -1.5,
-          1.5,
-          1.5
-        ],
-        "rotation": [
-          1.0,
-          0.0,
-          0.0,
-          0.0
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 5,
+      "id": 9,
       "materialOverride": {
-        "materialAsset": "d3f4abb0-0000-4000-0000-000000000001",
         "scalars": {
           "baseColorFactor": [
-            0.15000000596046448,
-            0.15000000596046448,
-            0.30000001192092896,
+            0.0,
+            0.0,
+            0.0,
             1.0
           ],
           "emissiveFactor": [
-            1.0,
-            0.6278652548789978,
-            0.039215683937072754
-          ],
-          "emissiveIntensity": 21.5
-        },
-        "textures": {}
-      },
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "CubeEmissive",
-      "transform": {
-        "position": [
-          3.0,
-          0.5,
-          0.0
-        ],
-        "rotation": [
-          1.0,
-          0.0,
-          0.0,
-          0.0
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 6,
-      "materialOverride": {
-        "scalars": {
-          "baseColorFactor": [
-            0.10392635315656662,
-            0.3165302872657776,
-            0.8480392098426819,
+            0.1813725233078003,
+            0.46789246797561646,
             1.0
           ],
-          "metallicFactor": 0.8500000238418579,
-          "roughnessFactor": 0.25
-        },
-        "textures": {}
-      },
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "CubeBlue",
-      "transform": {
-        "position": [
-          0.0,
-          0.5,
-          0.0
-        ],
-        "rotation": [
-          1.0,
-          0.0,
-          0.0,
-          0.0
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 7,
-      "materialOverride": {
-        "materialAsset": "2b32fe56-31ae-4af7-8304-461fa721c53b",
-        "scalars": {
-          "baseColorFactor": [
-            0.20000000298023224,
-            0.20000000298023224,
-            0.20000000298023224,
-            1.0
-          ]
-        },
-        "textures": {}
-      },
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "CubeGray",
-      "transform": {
-        "position": [
-          -3.0,
-          0.5,
-          0.0
-        ],
-        "rotation": [
-          1.0,
-          0.0,
-          0.0,
-          0.0
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 8,
-      "materialOverride": {
-        "materialAsset": "d3f4abb0-0000-4000-0000-000000000001",
-        "scalars": {
-          "baseColorFactor": [
-            0.0,
-            0.0,
-            0.0,
-            1.0
-          ],
-          "metallicFactor": 1.0,
-          "roughnessFactor": 0.4449999928474426
+          "emissiveIntensity": 9.75,
+          "metallicFactor": 0.0,
+          "roughnessFactor": 1.0
         },
         "textures": {}
       },
       "meshRenderer": {
         "castShadow": false,
         "materials": [],
-        "receiveShadow": true
+        "receiveShadow": false
       },
       "parent": -1,
-      "staticGeometry": true,
       "staticMesh": {
         "mesh": "c0be0000-0000-4000-0000-000000000002"
       },
-      "tag": "GroundPlane",
+      "tag": "AreaRight",
       "transform": {
         "position": [
-          0.0,
-          -0.009999999776482582,
+          6.0,
+          2.0,
           0.0
         ],
         "rotation": [
-          1.0,
+          0.7070000171661377,
           0.0,
           0.0,
-          0.0
+          0.7070000171661377
         ],
         "scale": [
-          10.0,
-          1.0,
-          8.0
-        ]
-      }
-    },
-    {
-      "camera": {
-        "far": 500.0,
-        "fovY": 1.0471999645233154,
-        "near": 0.10000000149011612,
-        "priority": 1
-      },
-      "id": 9,
-      "parent": -1,
-      "tag": "MainCamera",
-      "transform": {
-        "position": [
-          0.0,
-          3.0,
-          8.0
-        ],
-        "rotation": [
-          0.9890000224113464,
-          -0.1509999930858612,
-          0.0,
-          0.0
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
+          2.0,
+          0.05000000074505806,
+          3.0
         ]
       }
     }
@@ -444,13 +439,32 @@
     ],
     "backgroundMode": "SolidColor",
     "brdfLut": "ba667a20-2b4d-4a24-bd80-949820265af3",
-    "exposure": 0.5299999713897705,
-    "gamma": 2.200000047683716,
-    "lutStrength": 1.0,
+    "postProcess": {
+      "bloomEnabled": true,
+      "bloomMipLevels": 3,
+      "bloomRadius": 0.800000011920929,
+      "bloomStrength": 0.41999998688697815,
+      "bloomThreshold": 0.6800000071525574,
+      "exposure": 0.5299999713897705,
+      "gamma": 2.200000047683716,
+      "lutStrength": 1.0,
+      "ssaoBias": 0.02500000037252903,
+      "ssaoBlurSharpness": 10.0,
+      "ssaoDirections": 4,
+      "ssaoEnabled": true,
+      "ssaoRadius": 32.0,
+      "ssaoSteps": 3,
+      "ssaoStrength": 1.0,
+      "taaAntiGhosting": true,
+      "taaBlendMotion": 0.5,
+      "taaBlendStatic": 0.10000000149011612,
+      "taaEnabled": true,
+      "tonemapLut": "911aa46e-4510-4bab-bc15-0013ab7ac82f",
+      "tonemapMode": "Builtin"
+    },
     "prefilteredEnv": "006e3a40-137e-4773-9e5c-2fe48868dacf",
     "sh9": "6a64a606-b3fc-4bee-803d-f783d1c8ee33",
     "skyboxCubemap": "ef1f8eb8-40d4-4e95-8a45-2b313e9c8a4a",
-    "skyboxHdr": "7a735f5c-b3c4-4361-b342-699c816fa64d",
-    "tonemapMode": "Builtin"
+    "skyboxHdr": "7a735f5c-b3c4-4361-b342-699c816fa64d"
   }
 }

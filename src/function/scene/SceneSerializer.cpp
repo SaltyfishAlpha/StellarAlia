@@ -71,7 +71,6 @@ static glm::vec4 JsonToVec4(const json& j) {
     return { j[0].get<float>(), j[1].get<float>(),
              j[2].get<float>(), j[3].get<float>() };
 }
-static json Vec4ToJson(const glm::vec4& v) { return { v.x, v.y, v.z, v.w }; }
 static glm::vec3 JsonToVec3Color(const json& j) { return JsonToVec3(j); }
 static glm::quat JsonToQuat(const json& j) {
     return { j[0].get<float>(), j[1].get<float>(),
@@ -112,11 +111,48 @@ bool SceneSerializer::SaveToFile(const Scene& scene,
         if (ws.prefilteredEnv.IsValid())  wj["prefilteredEnv"]  = AssetToStr(ws.prefilteredEnv);
         if (ws.brdfLut.IsValid())         wj["brdfLut"]         = AssetToStr(ws.brdfLut);
         if (ws.skyboxCubemap.IsValid())   wj["skyboxCubemap"]   = AssetToStr(ws.skyboxCubemap);
-        wj["tonemapMode"]  = (ws.tonemapMode == WorldSettings::TonemapMode::LUT) ? "LUT" : "Builtin";
-        if (ws.tonemapLut.IsValid())      wj["tonemapLut"]      = AssetToStr(ws.tonemapLut);
-        wj["exposure"]     = ws.exposure;
-        wj["gamma"]        = ws.gamma;
-        wj["lutStrength"]  = ws.lutStrength;
+        {
+            const PostProcessSettings& pp = ws.pp;
+            json ppj;
+            ppj["bloomEnabled"]   = pp.bloomEnabled;
+            ppj["bloomThreshold"] = pp.bloomThreshold;
+            ppj["bloomStrength"]  = pp.bloomStrength;
+            ppj["bloomRadius"]    = pp.bloomRadius;
+            ppj["bloomMipLevels"] = pp.bloomMipLevels;
+            ppj["tonemapMode"]    = (pp.tonemapMode == PostProcessSettings::TonemapMode::LUT) ? "LUT" : "Builtin";
+            if (pp.tonemapLut.IsValid()) ppj["tonemapLut"] = AssetToStr(pp.tonemapLut);
+            ppj["exposure"]         = pp.exposure;
+            ppj["lutStrength"]      = pp.lutStrength;
+            {
+                const ColorGradingSettings& cg = pp.colorGrading;
+                json cgj;
+                cgj["enabled"]    = cg.enabled;
+                cgj["lift"]       = Vec3ToJson(cg.lift);
+                cgj["midtone"]    = Vec3ToJson(cg.midtone);
+                cgj["gain"]       = Vec3ToJson(cg.gain);
+                cgj["saturation"] = cg.saturation;
+                cgj["contrast"]   = cg.contrast;
+                ppj["colorGrading"] = std::move(cgj);
+            }
+            ppj["ssaoEnabled"]      = pp.ssaoEnabled;
+            ppj["ssaoRadius"]       = pp.ssaoRadius;
+            ppj["ssaoStrength"]     = pp.ssaoStrength;
+            ppj["ssaoBias"]         = pp.ssaoBias;
+            ppj["ssaoDirections"]   = pp.ssaoDirections;
+            ppj["ssaoSteps"]        = pp.ssaoSteps;
+            ppj["ssaoBlurSharpness"]= pp.ssaoBlurSharpness;
+            ppj["taaEnabled"]       = pp.taaEnabled;
+            ppj["taaBlendStatic"]   = pp.taaBlendStatic;
+            ppj["taaBlendMotion"]   = pp.taaBlendMotion;
+            ppj["taaAntiGhosting"]  = pp.taaAntiGhosting;
+            ppj["autoExposureEnabled"] = pp.autoExposureEnabled;
+            ppj["aeEvMin"]          = pp.aeEvMin;
+            ppj["aeEvMax"]          = pp.aeEvMax;
+            ppj["aeAdaptSpeed"]     = pp.aeAdaptSpeed;
+            ppj["aeLowPercent"]     = pp.aeLowPercent;
+            ppj["aeHighPercent"]    = pp.aeHighPercent;
+            wj["postProcess"]       = std::move(ppj);
+        }
         root["world"] = std::move(wj);
     }
 
@@ -331,14 +367,56 @@ bool SceneSerializer::LoadFromFile(Scene& scene,
         if (wj.contains("brdfLut"))        ws.brdfLut        = StrToAsset(wj["brdfLut"].get<std::string>());
         if (wj.contains("skyboxCubemap"))  ws.skyboxCubemap  = StrToAsset(wj["skyboxCubemap"].get<std::string>());
 
-        if (wj.value("tonemapMode", "Builtin") == "LUT")
-            ws.tonemapMode = WorldSettings::TonemapMode::LUT;
-        else
-            ws.tonemapMode = WorldSettings::TonemapMode::Builtin;
-        if (wj.contains("tonemapLut")) ws.tonemapLut = StrToAsset(wj["tonemapLut"].get<std::string>());
-        ws.exposure    = wj.value("exposure",    ws.exposure);
-        ws.gamma       = wj.value("gamma",       ws.gamma);
-        ws.lutStrength = wj.value("lutStrength", ws.lutStrength);
+        PostProcessSettings& pp = ws.pp;
+        if (wj.contains("postProcess")) {
+            const auto& ppj = wj["postProcess"];
+            pp.bloomEnabled   = ppj.value("bloomEnabled",   pp.bloomEnabled);
+            pp.bloomThreshold = ppj.value("bloomThreshold", pp.bloomThreshold);
+            pp.bloomStrength  = ppj.value("bloomStrength",  pp.bloomStrength);
+            pp.bloomRadius    = ppj.value("bloomRadius",    pp.bloomRadius);
+            pp.bloomMipLevels = ppj.value("bloomMipLevels", pp.bloomMipLevels);
+            pp.tonemapMode    = (ppj.value("tonemapMode", "Builtin") == "LUT")
+                                    ? PostProcessSettings::TonemapMode::LUT
+                                    : PostProcessSettings::TonemapMode::Builtin;
+            if (ppj.contains("tonemapLut")) pp.tonemapLut = StrToAsset(ppj["tonemapLut"].get<std::string>());
+            pp.exposure         = ppj.value("exposure",         pp.exposure);
+            pp.lutStrength      = ppj.value("lutStrength",      pp.lutStrength);
+            if (ppj.contains("colorGrading")) {
+                const auto& cgj = ppj["colorGrading"];
+                ColorGradingSettings& cg = pp.colorGrading;
+                cg.enabled    = cgj.value("enabled",    cg.enabled);
+                if (cgj.contains("lift"))    cg.lift    = JsonToVec3(cgj["lift"]);
+                if (cgj.contains("midtone")) cg.midtone = JsonToVec3(cgj["midtone"]);
+                if (cgj.contains("gain"))    cg.gain    = JsonToVec3(cgj["gain"]);
+                cg.saturation = cgj.value("saturation", cg.saturation);
+                cg.contrast   = cgj.value("contrast",   cg.contrast);
+            }
+            pp.ssaoEnabled      = ppj.value("ssaoEnabled",      pp.ssaoEnabled);
+            pp.ssaoRadius       = ppj.value("ssaoRadius",       pp.ssaoRadius);
+            pp.ssaoStrength     = ppj.value("ssaoStrength",     pp.ssaoStrength);
+            pp.ssaoBias         = ppj.value("ssaoBias",         pp.ssaoBias);
+            pp.ssaoDirections   = ppj.value("ssaoDirections",   pp.ssaoDirections);
+            pp.ssaoSteps        = ppj.value("ssaoSteps",        pp.ssaoSteps);
+            pp.ssaoBlurSharpness= ppj.value("ssaoBlurSharpness",pp.ssaoBlurSharpness);
+            pp.taaEnabled       = ppj.value("taaEnabled",       pp.taaEnabled);
+            pp.taaBlendStatic   = ppj.value("taaBlendStatic",   pp.taaBlendStatic);
+            pp.taaBlendMotion   = ppj.value("taaBlendMotion",   pp.taaBlendMotion);
+            pp.taaAntiGhosting  = ppj.value("taaAntiGhosting",  pp.taaAntiGhosting);
+            pp.autoExposureEnabled = ppj.value("autoExposureEnabled", pp.autoExposureEnabled);
+            pp.aeEvMin          = ppj.value("aeEvMin",          pp.aeEvMin);
+            pp.aeEvMax          = ppj.value("aeEvMax",          pp.aeEvMax);
+            pp.aeAdaptSpeed     = ppj.value("aeAdaptSpeed",     pp.aeAdaptSpeed);
+            pp.aeLowPercent     = ppj.value("aeLowPercent",     pp.aeLowPercent);
+            pp.aeHighPercent    = ppj.value("aeHighPercent",    pp.aeHighPercent);
+        } else {
+            // Backward compat: read old top-level tonemap keys from pre-#40 scenes.
+            pp.tonemapMode = (wj.value("tonemapMode", "Builtin") == "LUT")
+                                 ? PostProcessSettings::TonemapMode::LUT
+                                 : PostProcessSettings::TonemapMode::Builtin;
+            if (wj.contains("tonemapLut")) pp.tonemapLut = StrToAsset(wj["tonemapLut"].get<std::string>());
+            pp.exposure    = wj.value("exposure",    pp.exposure);
+            pp.lutStrength = wj.value("lutStrength", pp.lutStrength);
+        }
     }
 
     const auto& entities = root["entities"];

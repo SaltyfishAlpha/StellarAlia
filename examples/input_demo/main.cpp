@@ -108,8 +108,6 @@ int main() {
     rendDesc.shaderDir    = shaderDir;
     rendDesc.cookCacheDir = cookDir.string();
     rendDesc.config.shadowEnabled  = false;
-    rendDesc.config.bloomEnabled   = false;
-    rendDesc.config.builtinTonemap = true;
 
     if (!renderer.Init(rendDesc)) {
         SA_LOG_CRITICAL("InputDemo: renderer init failed");
@@ -118,6 +116,7 @@ int main() {
 
     // ── Scene: sun only — camera is driven by EditorCamera, not a scene entity ──
     Scene scene("InputDemo");
+    scene.GetWorldSettings().pp.bloomEnabled = false;
 
     EntityFactory::CreateDirectionalLight(scene, "Sun",
         { 1.f, 0.95f, 0.88f }, 1.5f,

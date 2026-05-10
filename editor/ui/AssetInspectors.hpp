@@ -41,10 +41,13 @@ public:
     void Draw(const std::filesystem::path& path) override;
 };
 
-// .png .jpg .hdr — file size; thumbnail deferred to when texture infra is ready.
+// .png .jpg .hdr — file size + thumbnail preview via EditorIconCache.
 class ImageAssetInspector : public IAssetInspector {
 public:
     void Draw(const std::filesystem::path& path) override;
+    void SetIconCache(class EditorIconCache* cache) { m_iconCache = cache; }
+private:
+    EditorIconCache* m_iconCache = nullptr;
 };
 
 } // namespace StellarAlia::Editor

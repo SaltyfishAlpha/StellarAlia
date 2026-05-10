@@ -5,7 +5,8 @@ namespace StellarAliaApp {
     inline constexpr const char* BUILTIN_SHADER_DIR = "@CMAKE_RUNTIME_OUTPUT_DIRECTORY@/assets/shaders";
     inline constexpr const char* PROJECT_DIR        = "@SA_PROJECT_DIR@";
     // Editor shader-cook support: paths needed to re-run StellarAliaShaderCook at runtime.
-    inline constexpr const char* BIN_DIR            = "@CMAKE_RUNTIME_OUTPUT_DIRECTORY@";
-    inline constexpr const char* GLSLC_PATH         = "@GLSLC_EXECUTABLE@";
+    inline constexpr const char* BIN_DIR             = "@CMAKE_RUNTIME_OUTPUT_DIRECTORY@";
+    inline constexpr const char* GLSLC_PATH          = "@GLSLC_EXECUTABLE@";
     inline constexpr const char* SHADER_DISPATCH_DIR = "@CMAKE_BINARY_DIR@/generated/shaders";
+    inline constexpr const char* ENGINE_SHADER_SRC_DIR = "@CMAKE_SOURCE_DIR@/assets/shaders";
 }

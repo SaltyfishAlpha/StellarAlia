@@ -73,6 +73,20 @@ public:
                                    RHIResourceState  from,
                                    RHIResourceState  to)                   = 0;
 
+    // Fill a buffer range with a 4-byte repeating pattern.
+    // offset and size must be multiples of 4; VK_WHOLE_SIZE fills to the end.
+    // Called internally by RenderGraph for clearOnCreate buffers.
+    virtual void FillBuffer(RHIBufferHandle buffer,
+                            uint64_t        offset,
+                            uint64_t        size,
+                            uint32_t        value)                         = 0;
+
+    // Emit a pipeline barrier for a buffer state transition.
+    // Called internally by RenderGraph — not by Feature/Application code.
+    virtual void BufferBarrier(RHIBufferHandle buffer,
+                               RHIBufferState  from,
+                               RHIBufferState  to)                         = 0;
+
     // ── Mip Generation ───────────────────────────────────────────────────────
     // Generate all mip levels from mip 0 using linear filtering (blit chain).
     // Mip 0 must be in ShaderRead state on entry; all mips will be in ShaderRead

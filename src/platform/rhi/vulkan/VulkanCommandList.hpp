@@ -52,6 +52,15 @@ public:
                            RHIResourceState from,
                            RHIResourceState to) override;
 
+    void FillBuffer(RHIBufferHandle buffer,
+                    uint64_t        offset,
+                    uint64_t        size,
+                    uint32_t        value) override;
+
+    void BufferBarrier(RHIBufferHandle buffer,
+                       RHIBufferState  from,
+                       RHIBufferState  to) override;
+
     void GenerateMipmaps(RHITextureHandle texture) override;
 
     void CopyBuffer(RHIBufferHandle src, RHIBufferHandle dst,

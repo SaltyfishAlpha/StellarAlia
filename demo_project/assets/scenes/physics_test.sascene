@@ -1,189 +1,428 @@
 {
-  "name": "PhysicsTest",
-  "version": 1,
   "entities": [
     {
+      "collider": {
+        "extents": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "offset": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "shape": "box"
+      },
       "id": 0,
-      "parent": -1,
-      "tag": "Camera",
-      "activeCamera": true,
-      "camera": { "fovY": 1.0472, "near": 0.1, "far": 500.0 },
-      "transform": {
-        "position": [0.0, 8.0, 15.0],
-        "rotation": [0.9700, -0.2432, 0.0, 0.0],
-        "scale":    [1.0, 1.0, 1.0]
-      }
-    },
-    {
-      "id": 1,
-      "parent": -1,
-      "tag": "Sun",
-      "directionalLight": {
-        "color":      [1.0, 0.95, 0.85],
-        "intensity":  2.5,
-        "castShadow": false
-      },
-      "transform": {
-        "position": [0.0, 0.0, 0.0],
-        "rotation": [0.8924, -0.3007, 0.3007, 0.1014],
-        "scale":    [1.0, 1.0, 1.0]
-      }
-    },
-    {
-      "id": 2,
-      "parent": -1,
-      "tag": "Ground",
-      "transform": {
-        "position": [0.0, 0.0, 0.0],
-        "rotation": [1.0, 0.0, 0.0, 0.0],
-        "scale":    [10.0, 1.0, 10.0]
-      },
-      "staticMesh": {
-        "mesh":          "c0be0000-0000-4000-0000-000000000002",
-        "materials":     [],
-        "castShadow":    false,
+      "meshRenderer": {
+        "castShadow": true,
+        "materials": [],
         "receiveShadow": true
       },
-      "rigidBody": {
-        "type":        "static",
-        "mass":        0.0,
-        "friction":    0.7,
-        "restitution": 0.3
-      },
-      "collider": {
-        "shape":   "box",
-        "extents": [5.0, 0.25, 5.0]
-      }
-    },
-    {
-      "id": 3,
       "parent": -1,
-      "tag": "Cube_A",
-      "transform": {
-        "position": [0.0, 2.0, 0.0],
-        "rotation": [1.0, 0.0, 0.0, 0.0],
-        "scale":    [1.0, 1.0, 1.0]
+      "rigidBody": {
+        "friction": 0.6000000238418579,
+        "mass": 1.5,
+        "restitution": 0.10000000149011612,
+        "type": "dynamic"
       },
       "staticMesh": {
-        "mesh":          "c0be0000-0000-4000-0000-000000000001",
-        "materials":     [],
-        "castShadow":    true,
-        "receiveShadow": true
+        "mesh": "c0be0000-0000-4000-0000-000000000001"
       },
-      "rigidBody": {
-        "type":        "dynamic",
-        "mass":        1.0,
-        "friction":    0.5,
-        "restitution": 0.3
-      },
-      "collider": {
-        "shape":   "box",
-        "extents": [0.5, 0.5, 0.5]
-      }
-    },
-    {
-      "id": 4,
-      "parent": -1,
-      "tag": "Cube_B",
-      "transform": {
-        "position": [0.1, 3.5, 0.1],
-        "rotation": [1.0, 0.0, 0.0, 0.0],
-        "scale":    [1.0, 1.0, 1.0]
-      },
-      "staticMesh": {
-        "mesh":          "c0be0000-0000-4000-0000-000000000001",
-        "materials":     [],
-        "castShadow":    true,
-        "receiveShadow": true
-      },
-      "rigidBody": {
-        "type":        "dynamic",
-        "mass":        1.0,
-        "friction":    0.5,
-        "restitution": 0.3
-      },
-      "collider": {
-        "shape":   "box",
-        "extents": [0.5, 0.5, 0.5]
-      }
-    },
-    {
-      "id": 5,
-      "parent": -1,
-      "tag": "Cube_C",
-      "transform": {
-        "position": [0.0, 5.0, 0.0],
-        "rotation": [1.0, 0.0, 0.0, 0.0],
-        "scale":    [1.0, 1.0, 1.0]
-      },
-      "staticMesh": {
-        "mesh":          "c0be0000-0000-4000-0000-000000000001",
-        "materials":     [],
-        "castShadow":    true,
-        "receiveShadow": true
-      },
-      "rigidBody": {
-        "type":        "dynamic",
-        "mass":        1.0,
-        "friction":    0.5,
-        "restitution": 0.3
-      },
-      "collider": {
-        "shape":   "box",
-        "extents": [0.5, 0.5, 0.5]
-      }
-    },
-    {
-      "id": 6,
-      "parent": -1,
-      "tag": "Cube_D",
-      "transform": {
-        "position": [-2.0, 3.0, 1.0],
-        "rotation": [0.9914, 0.0, 0.1305, 0.0],
-        "scale":    [1.0, 1.0, 1.0]
-      },
-      "staticMesh": {
-        "mesh":          "c0be0000-0000-4000-0000-000000000001",
-        "materials":     [],
-        "castShadow":    true,
-        "receiveShadow": true
-      },
-      "rigidBody": {
-        "type":        "dynamic",
-        "mass":        2.0,
-        "friction":    0.4,
-        "restitution": 0.5
-      },
-      "collider": {
-        "shape":   "box",
-        "extents": [0.5, 0.5, 0.5]
-      }
-    },
-    {
-      "id": 7,
-      "parent": -1,
       "tag": "Cube_E",
       "transform": {
-        "position": [2.5, 4.5, -1.5],
-        "rotation": [0.9659, 0.0, 0.2588, 0.0],
-        "scale":    [1.0, 1.0, 1.0]
+        "position": [
+          2.5,
+          4.5,
+          -1.5
+        ],
+        "rotation": [
+          0.9659000039100647,
+          0.0,
+          0.2587999999523163,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "collider": {
+        "extents": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "offset": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "shape": "box"
       },
-      "staticMesh": {
-        "mesh":          "c0be0000-0000-4000-0000-000000000001",
-        "materials":     [],
-        "castShadow":    true,
+      "id": 1,
+      "meshRenderer": {
+        "castShadow": true,
+        "materials": [],
         "receiveShadow": true
       },
+      "parent": -1,
       "rigidBody": {
-        "type":        "dynamic",
-        "mass":        1.5,
-        "friction":    0.6,
-        "restitution": 0.1
+        "friction": 0.4000000059604645,
+        "mass": 2.0,
+        "restitution": 0.5,
+        "type": "dynamic"
       },
+      "staticMesh": {
+        "mesh": "c0be0000-0000-4000-0000-000000000001"
+      },
+      "tag": "Cube_D",
+      "transform": {
+        "position": [
+          -2.0,
+          3.0,
+          1.0
+        ],
+        "rotation": [
+          0.9914000034332275,
+          0.0,
+          0.13050000369548798,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    {
       "collider": {
-        "shape":   "box",
-        "extents": [0.5, 0.5, 0.5]
+        "extents": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "offset": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "shape": "box"
+      },
+      "id": 2,
+      "meshRenderer": {
+        "castShadow": true,
+        "materials": [],
+        "receiveShadow": true
+      },
+      "parent": -1,
+      "rigidBody": {
+        "friction": 0.5,
+        "mass": 1.0,
+        "restitution": 0.30000001192092896,
+        "type": "dynamic"
+      },
+      "staticMesh": {
+        "mesh": "c0be0000-0000-4000-0000-000000000001"
+      },
+      "tag": "Cube_C",
+      "transform": {
+        "position": [
+          0.0,
+          5.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "collider": {
+        "extents": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "offset": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "shape": "box"
+      },
+      "id": 3,
+      "meshRenderer": {
+        "castShadow": true,
+        "materials": [],
+        "receiveShadow": true
+      },
+      "parent": -1,
+      "rigidBody": {
+        "friction": 0.5,
+        "mass": 1.0,
+        "restitution": 0.30000001192092896,
+        "type": "dynamic"
+      },
+      "staticMesh": {
+        "mesh": "c0be0000-0000-4000-0000-000000000001"
+      },
+      "tag": "Cube_B",
+      "transform": {
+        "position": [
+          0.10000000149011612,
+          3.5,
+          0.10000000149011612
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "collider": {
+        "extents": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "offset": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "shape": "box"
+      },
+      "id": 4,
+      "meshRenderer": {
+        "castShadow": true,
+        "materials": [],
+        "receiveShadow": true
+      },
+      "parent": -1,
+      "rigidBody": {
+        "friction": 0.5,
+        "mass": 1.0,
+        "restitution": 0.30000001192092896,
+        "type": "dynamic"
+      },
+      "staticMesh": {
+        "mesh": "c0be0000-0000-4000-0000-000000000001"
+      },
+      "tag": "Cube_A",
+      "transform": {
+        "position": [
+          0.0,
+          2.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "collider": {
+        "extents": [
+          5.0,
+          0.0010000000474974513,
+          5.0
+        ],
+        "offset": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "shape": "box"
+      },
+      "id": 5,
+      "meshRenderer": {
+        "castShadow": false,
+        "materials": [],
+        "receiveShadow": true
+      },
+      "parent": -1,
+      "rigidBody": {
+        "friction": 0.699999988079071,
+        "mass": 0.0,
+        "restitution": 0.30000001192092896,
+        "type": "static"
+      },
+      "staticMesh": {
+        "mesh": "c0be0000-0000-4000-0000-000000000002"
+      },
+      "tag": "Ground",
+      "transform": {
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          10.0,
+          1.0,
+          10.0
+        ]
+      }
+    },
+    {
+      "directionalLight": {
+        "castShadow": false,
+        "color": [
+          1.0,
+          0.949999988079071,
+          0.8500000238418579
+        ],
+        "intensity": 2.5
+      },
+      "id": 6,
+      "parent": -1,
+      "tag": "Sun",
+      "transform": {
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.8924000263214111,
+          -0.30070000886917114,
+          0.30070000886917114,
+          0.10140000283718109
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "camera": {
+        "far": 500.0,
+        "fovY": 1.0471999645233154,
+        "near": 0.10000000149011612,
+        "priority": 1
+      },
+      "id": 7,
+      "parent": -1,
+      "tag": "Camera",
+      "transform": {
+        "position": [
+          0.0,
+          8.0,
+          15.0
+        ],
+        "rotation": [
+          0.9700000286102295,
+          -0.24320000410079956,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
       }
     }
-  ]
+  ],
+  "name": "PhysicsTest",
+  "version": 1,
+  "world": {
+    "backgroundColor": [
+      0.07999999821186066,
+      0.07999999821186066,
+      0.07999999821186066
+    ],
+    "backgroundMode": "SolidColor",
+    "postProcess": {
+      "bloomEnabled": true,
+      "bloomRadius": 1.0,
+      "bloomStrength": 0.4000000059604645,
+      "bloomThreshold": 1.0,
+      "exposure": 1.0,
+      "gamma": 2.200000047683716,
+      "lutStrength": 1.0,
+      "ssaoBias": 0.02500000037252903,
+      "ssaoBlurSharpness": 10.0,
+      "ssaoDirections": 8,
+      "ssaoEnabled": true,
+      "ssaoRadius": 32.0,
+      "ssaoSteps": 4,
+      "ssaoStrength": 1.0,
+      "tonemapMode": "Builtin"
+    }
+  }
 }

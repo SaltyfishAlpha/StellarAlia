@@ -1,13 +1,16 @@
 #pragma once
 
+#include <chrono>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
 
+#include "core/spatial/BVHTree.hpp"
 #include "function/debug/DebugDraw.hpp"
 #include "function/FrameUniforms.hpp"
 #include "function/renderer/CameraData.hpp"
@@ -15,6 +18,7 @@
 #include "function/ibl/GpuIblBake.hpp"
 #include "function/ibl/GpuLtcBake.hpp"
 #include "function/material/MaterialInstance.hpp"
+#include "function/material/ComputeProgram.hpp"
 #include "function/material/MaterialManager.hpp"
 #include "function/material/ShaderProgram.hpp"
 #include "function/render_graph/RenderGraph.hpp"
@@ -38,14 +42,8 @@ struct RendererConfig {
     uint32_t shadowMapSize  = 2048;   // texel resolution (width = height)
 
     // ── Bloom pass ────────────────────────────────────────────────────────────
-    bool bloomEnabled       = true;   // multi-scale pyramid bloom
-    int  bloomMipCount      = 3;      // pyramid depth [2, kMaxBloomMips]; more = wider glow
-
-    // ── Tonemap pass ─────────────────────────────────────────────────────────
-    // true  → built-in ACES tonemap runs automatically after bloom.
-    // false → no tonemap is registered; the caller is expected to add their own
-    //         RenderFeature that reads m_rgHdr and writes to the swapchain.
-    bool builtinTonemap     = true;
+    // bloomEnabled / bloom params are in WorldSettings::pp (runtime hot-swap).
+    int  bloomMipCount      = 3;      // pyramid depth [2, kMaxBloomMips]; requires rebuild to change
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -107,6 +105,12 @@ public:
     // clear their AssetIDs from ws, then immediately re-bake from ws.skyboxHdr.
     void RebakeIBL(WorldSettings& ws);
 
+    // Must be called after ClearProjectAssets() and before the next
+    // ApplyWorldSettings() on a project switch.  Restores m_cachedBrdfLut to the
+    // Init-baked LUT so ApplyWorldSettings(SolidColor) does not write a dangling
+    // VkImageView (from a prior Skybox scene) into the frame-uniform descriptor.
+    void ResetProjectIBL();
+
     // Build (or rebuild) the per-entity draw list. Loads GPU meshes, resolves
     // materials via 3-tier fallback, pre-bakes pipelines.
     void BuildDrawList(Scene& scene);
@@ -138,6 +142,14 @@ public:
     // Update the cook cache path used for IBL bake output.
     // Call this when the active project changes.
     void SetCookCacheDir(const std::string& path) { m_cookCacheDir = path; }
+
+    // Apply project-specific shader types after a project switch.
+    // Clears old project MaterialTypes, hot-swaps deferred_lighting.frag when
+    // custom shading models were cooked, and registers new project types.
+    // cookedShaderDir — directory containing the project's cooked .spv / .refl files,
+    //                   or empty string when the project has no .saglsl files.
+    // Device must be idle (call after ClearProjectInstances()).
+    void ApplyProjectShaderTypes(const std::string& cookedShaderDir);
 
     // ── Render tick ───────────────────────────────────────────────────────────
     //
@@ -173,6 +185,16 @@ public:
     [[nodiscard]] bool IsReady() const { return m_ready; }
     [[nodiscard]] const RenderGraph& GetRenderGraph() const { return m_rg; }
 
+    // Returns the set=2 descriptor layout for GPU skinning (bone matrices + skin data SSBOs).
+    // Valid after Init(); used by AnimationSystem::Init to allocate per-entity skinDescSets.
+    [[nodiscard]] RHI::RHIDescLayoutHandle GetSkinDescLayout() const;
+
+    // Ray-cast against the scene BVH (render mesh AABBs).
+    // Returns the nearest hit entity, or entt::null when nothing was hit.
+    // Intended for editor mouse-picking (Issue #30).
+    [[nodiscard]] entt::entity RaycastScene(const Core::Ray& ray,
+                                            float maxDist = 1e30f) const;
+
 private:
     struct DrawItem {
         entt::entity                      entity;
@@ -186,6 +208,16 @@ private:
         std::unique_ptr<MaterialInstance> ownedMaterial;
         RHI::RHIPipelineHandle            pipeline;
         uint32_t                          pushConstantSize;
+        // Entity-local AABB (subLocalTransform applied). Used by BVH culling.
+        // skipCull = true for skinned meshes (animated AABB not computed).
+        glm::vec3                         localAABBMin { 1e30f};
+        glm::vec3                         localAABBMax {-1e30f};
+        // World-space AABB after model transform. Used by RaycastScene Phase B.
+        glm::vec3                         worldAABBMin { 1e30f};
+        glm::vec3                         worldAABBMax {-1e30f};
+        bool                              skipCull  = false;
+        bool                              isSkinned = false;
+        RHI::RHIDescSetHandle             skinDescSet;   // set=2; valid when isSkinned=true
     };
 
     // ── Built-in features — private inner classes ─────────────────────────────
@@ -204,6 +236,7 @@ private:
                        uint32_t w, uint32_t h) override;
     private:
         MaterialType* m_type = nullptr;
+        ShaderProgram m_skinnedShadowProgram;  // shadow_skinned.vert + shadow.frag
     };
 
     // Renders a fullscreen skybox into the HDR buffer (raw HDR, no tonemap).
@@ -225,6 +258,7 @@ private:
     // material instance in OnInit, then renders all draw items into the G-Buffer
     // (3 MRT + depth, with depth clear) in AddPasses.
     class GBufferFeature final : public RenderFeature {
+        friend class SceneRenderer;
     public:
         explicit GBufferFeature(SceneRenderer* owner) : m_owner(owner) {}
         void OnInit(const FeatureInitContext& ctx) override;
@@ -232,7 +266,9 @@ private:
                        const RendererHandles& handles, const entt::registry& reg,
                        uint32_t w, uint32_t h) override;
     private:
-        SceneRenderer* m_owner = nullptr;
+        SceneRenderer*           m_owner          = nullptr;
+        ShaderProgram            m_skinnedProgram;   // deferred_geometry_skinned.vert + _geometry.frag
+        RHI::RHIDescLayoutHandle m_skinDescLayout;   // set=2 layout from m_skinnedProgram
     };
 
     // Fullscreen deferred lighting: reads G-Buffer, writes HDR with AlphaBlend
@@ -243,28 +279,97 @@ private:
         void AddPasses(SceneRenderer& renderer, const FrameContext& ctx,
                        const RendererHandles& handles, const entt::registry& reg,
                        uint32_t w, uint32_t h) override;
+
+        // Hot-reload the frag shader from recompiled bytes.
+        // Device must be idle before calling.
+        void ReloadShaders(RHI::IRHIDevice*              device,
+                           std::span<const uint8_t>      fragSpv,
+                           const RHI::ShaderReflection&  fragRefl);
     private:
         MaterialType*         m_type = nullptr;
         RHI::RHIDescSetHandle m_gbDescSet;
-        uint32_t              m_trackedW = 0;
-        uint32_t              m_trackedH = 0;
+    };
+
+    // GTAO ambient occlusion: 3-pass (main + H blur + V blur).
+    // Always runs: when disabled writes 1.0 via a single fast pass.
+    class SSAOFeature final : public RenderFeature {
+    public:
+        void OnInit    (const FeatureInitContext& ctx) override;
+        void OnShutdown(RHI::IRHIDevice* device)       override;
+        void AddPasses (SceneRenderer& renderer, const FrameContext& ctx,
+                        const RendererHandles& handles, const entt::registry& reg,
+                        uint32_t w, uint32_t h) override;
+
+        bool  m_enabled       = false;
+        float m_radius        = 32.f;
+        float m_strength      = 1.0f;
+        float m_bias          = 0.025f;
+        int   m_directions    = 8;
+        int   m_steps         = 4;
+        float m_blurSharpness = 10.f;
+    private:
+        MaterialType*         m_gtaoType = nullptr;
+        MaterialType*         m_blurType = nullptr;
+        RHI::RHIDescSetHandle m_gtaoDescSet;
+        RHI::RHIDescSetHandle m_blurHDescSet;
+        RHI::RHIDescSetHandle m_blurVDescSet;
+    };
+
+    // Temporal Anti-Aliasing: depth-based reprojection + history blend + neighborhood clamp.
+    // When disabled, transparently passes handles.hdr through (m_outputHandle = handles.hdr).
+    class TAAFeature final : public RenderFeature {
+        friend class SceneRenderer;
+    public:
+        void OnInit    (const FeatureInitContext& ctx) override;
+        void OnShutdown(RHI::IRHIDevice* device)       override;
+        void AddPasses (SceneRenderer& renderer, const FrameContext& ctx,
+                        const RendererHandles& handles, const entt::registry& reg,
+                        uint32_t w, uint32_t h) override;
+
+        // Set by AddPasses each frame; RenderFrame redirects handles.taaResolved to this.
+        RGTextureHandle           m_outputHandle;
+
+        bool  m_enabled       = false;
+        float m_blendStatic   = 0.1f;
+        float m_blendMotion   = 0.5f;
+        bool  m_antiGhosting  = true;
+    private:
+        MaterialType*         m_taaType = nullptr;
+        RHI::RHIDescSetHandle m_resolveSet;  // set=1: binding0=current, binding1=history, binding2=depth
+        // Ping-pong history textures: prevIndex is read, currIndex is written each frame.
+        // The resolve pass writes directly to history[currIndex]; m_outputHandle = rgHistoryWrite.
+        RHI::RHITextureHandle m_historyTex[2];
+        int                   m_historyIndex = 0;  // index of the texture last written (= next read)
+        uint32_t              m_trackedW = 0, m_trackedH = 0;
+        bool                  m_historyValid = false;
     };
 
     // Fullscreen ACES tonemap: reads HDR buffer, writes swapchain.
+    // Optionally applies parametric color grading via a baked 32³ RGBA16F 3D LUT.
     class TonemapFeature final : public RenderFeature {
     public:
-        void OnInit(const FeatureInitContext& ctx) override;
-        void AddPasses(SceneRenderer& renderer, const FrameContext& ctx,
-                       const RendererHandles& handles, const entt::registry& reg,
-                       uint32_t w, uint32_t h) override;
+        void OnInit    (const FeatureInitContext& ctx) override;
+        void OnShutdown(RHI::IRHIDevice* device)       override;
+        void AddPasses (SceneRenderer& renderer, const FrameContext& ctx,
+                        const RendererHandles& handles, const entt::registry& reg,
+                        uint32_t w, uint32_t h) override;
 
-        float m_exposure = 1.f;
-        float m_gamma    = 2.2f;
+        // Called by ApplyWorldSettings whenever pp.colorGrading changes.
+        void SetColorGrading(const ColorGradingSettings& s);
+
+        float              m_exposure  = 1.f;
     private:
-        MaterialType*         m_type = nullptr;
-        RHI::RHIDescSetHandle m_hdrDescSet;
-        uint32_t              m_trackedW = 0;
-        uint32_t              m_trackedH = 0;
+        void BakeColorGrading(RHI::IRHIDevice& device);
+
+        MaterialType*          m_type      = nullptr;
+        RHI::RHIDescSetHandle  m_hdrDescSet;
+
+        RHI::RHITextureHandle  m_cgLutTex;
+        ComputeProgram         m_cgBakeProg;
+        RHI::RHIDescSetHandle  m_cgBakeDs;
+        ColorGradingSettings   m_cgSettings;
+        bool                   m_cgDirty   = true;
+        bool                   m_cgLutReady = false;
     };
 
     // LUT-based tonemap: ACES + color grading from a 2D strip LUT.
@@ -283,8 +388,6 @@ private:
     private:
         MaterialType*         m_type = nullptr;
         RHI::RHIDescSetHandle m_hdrLutDescSet;
-        uint32_t              m_trackedW = 0;
-        uint32_t              m_trackedH = 0;
     };
 
     // Editor line overlay: reads DebugDraw vertex data each frame, renders after Tonemap.
@@ -316,8 +419,9 @@ private:
                        const RendererHandles& handles, const entt::registry& reg,
                        uint32_t w, uint32_t h) override;
     private:
-        SceneRenderer* m_owner = nullptr;
-        MaterialType*  m_type  = nullptr;
+        SceneRenderer* m_owner          = nullptr;
+        MaterialType*  m_type           = nullptr;
+        ShaderProgram  m_skinnedProgram;  // selection_mask_skinned.vert + selection_mask.frag
     };
 
     // Fullscreen infinite XZ grid rendered at the Y=0 plane.
@@ -363,6 +467,14 @@ private:
         void AddPasses(SceneRenderer& renderer, const FrameContext& ctx,
                        const RendererHandles& handles, const entt::registry& reg,
                        uint32_t w, uint32_t h) override;
+
+        // Runtime parameters — updated by SceneRenderer::ApplyWorldSettings each call.
+        bool  m_enabled   = true;
+        float m_threshold = 1.0f;
+        float m_strength  = 0.4f;
+        float m_radius    = 1.0f;  // widest upsample level; each level scales by ×0.85
+        // Must be called after WaitIdle; frees old desc sets and reallocates for newMipCount.
+        void RebuildDescSets(int newMipCount, RHI::IRHIDevice* device);
     private:
         int                   m_mipCount       = 6;
         MaterialType*         m_thresholdType  = nullptr;
@@ -373,8 +485,39 @@ private:
         RHI::RHIDescSetHandle m_downsampleDescSet[kMaxBloomMips - 1];
         RHI::RHIDescSetHandle m_upsampleDescSet[kMaxBloomMips - 1];
         RHI::RHIDescSetHandle m_compositeDescSet;
-        uint32_t              m_trackedW = 0;
-        uint32_t              m_trackedH = 0;
+    };
+
+    // GPU histogram → exponential-smoothing exposure adaptation.
+    // Runs after DeferredLighting on the raw HDR buffer; skipped when disabled.
+    class AutoExposureFeature final : public RenderFeature {
+        friend class SceneRenderer;
+    public:
+        void OnInit    (const FeatureInitContext& ctx) override;
+        void OnShutdown(RHI::IRHIDevice* device)       override;
+        void AddPasses (SceneRenderer& renderer, const FrameContext& ctx,
+                        const RendererHandles& handles, const entt::registry& reg,
+                        uint32_t w, uint32_t h) override;
+
+        // Called once per frame after BeginFrame to bring the previous frame's
+        // GPU-computed exposure value back to CPU for the tonemap push constant.
+        void ReadbackExposure(RHI::IRHIDevice* device);
+
+        bool  m_enabled     = false;
+        float m_evMin       = -4.0f;
+        float m_evMax       =  4.0f;
+        float m_adaptSpeed  =  2.0f;
+        float m_lowPct      =  0.45f;
+        float m_highPct     =  0.95f;
+        float m_currentExposure = 1.0f;
+    private:
+        ComputeProgram        m_histoProg;
+        ComputeProgram        m_adaptProg;
+        RHI::RHIBufferHandle  m_exposureSsbo;    // device-local, Storage|CopySrc
+        RHI::RHIBufferHandle  m_exposureStaging; // CPU-visible, CopyDst
+        RHI::RHIDescSetHandle m_histoSet;        // set=1: binding0=HDR tex, binding1=histo SSBO
+        RHI::RHIDescSetHandle m_adaptSet;        // set=1: binding0=histo SSBO, binding1=exposure SSBO
+        bool                  m_timerInit = false;
+        std::chrono::steady_clock::time_point m_lastTime;
     };
 
     // ── Persistent state ──────────────────────────────────────────────────────
@@ -386,8 +529,9 @@ private:
     std::string                m_shaderDir;
     std::string                m_cookCacheDir;
 
-    RendererConfig             m_config;            // stored from Desc at Init time
-    int                        m_bloomMipCount = 0; // resolved from m_config at Init
+    RendererConfig             m_config;              // stored from Desc at Init time
+    int                        m_bloomMipCount        = 0;  // resolved from m_config at Init
+    int                        m_pendingBloomMipCount = -1; // deferred mip count change
 
     FrameUniformsBuffer        m_frameUniforms;   // owned — created in Init
     glm::vec4                  m_shCoeffs[9] = {};  // stored by SetIBL
@@ -396,15 +540,26 @@ private:
     GpuIblBake                 m_iblBake;
     GpuLtcBake                 m_ltcBake;
 
-    std::unique_ptr<MaterialInstance> m_defaultMaterial;
-    std::vector<DrawItem>             m_drawItems;
+    std::unique_ptr<MaterialInstance>    m_defaultMaterial;
+    std::vector<DrawItem>                m_drawItems;
+
+    // Spatial acceleration — built once per BuildDrawList, queried per frame.
+    Core::BVHTree<entt::entity>          m_bvh;
+    std::vector<entt::entity>            m_visibleEntities;   // BVH Query output
+    std::vector<const DrawItem*>         m_visibleDrawItems;  // filtered per RenderFrame
 
     std::vector<std::unique_ptr<RenderFeature>> m_features;
 
     // Raw pointers into m_features — stable as long as the vector doesn't reallocate.
     // Set during Init, updated by ApplyWorldSettings on tonemap replacement.
-    SkyboxFeature*   m_skyboxFeature  = nullptr;
-    RenderFeature*   m_tonemapFeature = nullptr;  // either TonemapFeature or LutTonemapFeature
+    GBufferFeature*          m_gbufferFeature          = nullptr;
+    DeferredLightingFeature* m_deferredLightingFeature = nullptr;
+    SkyboxFeature*           m_skyboxFeature           = nullptr;
+    BloomFeature*         m_bloomFeature   = nullptr;
+    SSAOFeature*          m_ssaoFeature    = nullptr;
+    TAAFeature*           m_taaFeature     = nullptr;
+    AutoExposureFeature*  m_aeFeature      = nullptr;
+    RenderFeature*        m_tonemapFeature = nullptr;  // either TonemapFeature or LutTonemapFeature
 
     // ── Solid-color ambient environment ──────────────────────────────────────
     // A 1×1 RGBA32F cubemap filled with backgroundColor.  Written to
@@ -413,9 +568,19 @@ private:
     RHI::RHITextureHandle m_solidAmbientCube;
     glm::vec3             m_solidAmbientColor = { -1.f, -1.f, -1.f };  // sentinel
 
+    // BRDF LUT baked at Init time — lives outside ResourceManager, never destroyed
+    // on project switch.  Restored into m_cachedBrdfLut by ResetProjectIBL().
+    RHI::RHITextureHandle m_bakeBrdfLut;
+
     // BRDF LUT from the most recent successful IBL load/bake.
     // Reused when switching to SolidColor so specular split-sum stays correct.
+    // MUST be reset to m_bakeBrdfLut after ClearProjectAssets() — see ResetProjectIBL().
     RHI::RHITextureHandle m_cachedBrdfLut;
+
+    // ── TAA temporal state ────────────────────────────────────────────────────
+    glm::mat4  m_prevUnjitteredViewProj = glm::mat4(1.f);  // last frame's unjittered VP
+    uint32_t   m_haltonIndex            = 0;               // Halton sequence position
+    uint32_t   m_frameIndex             = 0;               // frame counter mod 256
 
     // ── Debug overlay ─────────────────────────────────────────────────────────
     DebugDraw*  m_debugDraw      = nullptr;  // set by SetDebugDraw; not owned
@@ -443,9 +608,13 @@ private:
     RHI::RHITextureHandle m_gbRT0;    // RGBA8_UNORM  albedo.rgb + occlusion.a
     RHI::RHITextureHandle m_gbRT1;    // RGBA16F      oct-normal(RG) + roughness(B) + metallic(A)
     RHI::RHITextureHandle m_gbRT2;    // RGBA16F      emissive.rgb
-    RHI::RHITextureHandle m_hdrTex;   // RGBA16F      skybox + deferred-lit composite
+    // m_hdrTex removed — HDR_Color is transient; managed by the RG slot pool.
     uint32_t              m_gbWidth   = 0;
     uint32_t              m_gbHeight  = 0;
+
+    // ── SSAO result texture (R8_UNORM, full-res, resized in RenderFrame) ────────
+    RHI::RHITextureHandle m_ssaoTex;
+    RGTextureHandle       m_rgSsaoTex;
 
     // ── Bloom pyramid (m_bloomMipCount active levels, arrays sized to kMaxBloomMips) ──
     RHI::RHITextureHandle m_bloomMip[kMaxBloomMips];
@@ -474,7 +643,7 @@ private:
 
     // ── Frame data helpers (private, called from RenderFrame) ─────────────────
     [[nodiscard]] LightUniforms GatherLights(const Scene& scene) const;
-    static void ApplyCameraToUniforms(const CameraData& cam, FrameUniforms& fu);
+    void ApplyCameraToUniforms(const CameraData& cam, FrameUniforms& fu, uint32_t w, uint32_t h);
 
     // Shuts down the current tonemap feature, initialises the replacement, and
     // updates m_tonemapFeature.  Caller must call WaitIdle before invoking this.
