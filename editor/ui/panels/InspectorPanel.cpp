@@ -2,6 +2,7 @@
 
 #include "ui/ComponentDrawers.hpp"
 #include "ui/AssetInspectors.hpp"
+#include "ui/EditorIconCache.hpp"
 #include "ui/panels/AssetsPanel.hpp"
 #include "resource/AssetRegistry.hpp"
 #include "function/scene/Scene.hpp"
@@ -113,6 +114,21 @@ void InspectorPanel::RegisterAssetDrawers() {
 
     for (auto ext : {".png", ".jpg", ".jpeg", ".hdr", ".tga", ".bmp", ".exr"})
         m_assetDrawers[ext] = std::make_unique<ImageAssetInspector>();
+}
+
+void InspectorPanel::SetIconCache(EditorIconCache* cache) {
+    m_iconCache = cache;
+    // Propagate to all existing ImageAssetInspector instances.
+    for (auto& [ext, drawer] : m_assetDrawers) {
+        if (auto* img = dynamic_cast<ImageAssetInspector*>(drawer.get()))
+            img->SetIconCache(cache);
+    }
+}
+
+void InspectorPanel::SetIconFont(ImFont* font) {
+    m_iconFont = font;
+    for (auto& d : m_drawers)
+        d->SetIconFont(font);
 }
 
 void InspectorPanel::RegisterDrawers() {

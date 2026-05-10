@@ -1,0 +1,34 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 4) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform writeonly image3D u_LUT;
+
+layout(push_constant) uniform PC {
+    vec3  lift;    float _p0;
+    vec3  midtone; float _p1;
+    vec3  gain;    float _p2;
+    float saturation;
+    float contrast;
+    float _p3; float _p4;
+} pc;
+
+void main() {
+    ivec3 coord = ivec3(gl_GlobalInvocationID);
+    if (any(greaterThanEqual(coord, ivec3(32)))) return;
+
+    vec3 c = vec3(coord) / 31.0;
+
+    // Lift / Midtone (ASC CDL power) / Gain
+    c = c * pc.gain + pc.lift;
+    c = pow(max(c, vec3(0.0)), vec3(1.0) / max(pc.midtone, vec3(0.001)));
+
+    // Contrast (pivot 0.5)
+    c = (c - 0.5) * pc.contrast + 0.5;
+
+    // Saturation (luma-preserving)
+    float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    c = mix(vec3(luma), c, pc.saturation);
+
+    imageStore(u_LUT, coord, vec4(clamp(c, vec3(0.0), vec3(1.0)), 1.0));
+}

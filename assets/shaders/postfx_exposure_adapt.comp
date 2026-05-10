@@ -1,0 +1,67 @@
+#version 450
+
+// postfx_exposure_adapt.comp
+// 256-thread exposure adaptation: reads log-luminance histogram, computes weighted
+// average EV in [lowPct, highPct] range, and smoothly adapts the exposure value.
+// set=1, binding=0 = histogram SSBO (256 × uint, read-only)
+// set=1, binding=1 = exposure SSBO (1 × float, persistent across frames)
+
+layout(local_size_x = 256) in;
+
+layout(set = 1, binding = 0, std430) readonly buffer HistoBuffer {
+    uint bins[256];
+} u_histo;
+
+layout(set = 1, binding = 1, std430) buffer ExposureBuffer {
+    float value;
+} u_exposure;
+
+layout(push_constant) uniform PC {
+    float dt;
+    float adaptSpeed;
+    float evMin;
+    float evMax;
+    float lowPct;
+    float highPct;
+} pc;
+
+void main() {
+    if (gl_GlobalInvocationID.x != 0u) return;
+
+    uint total = 0u;
+    for (int i = 0; i < 256; ++i)
+        total += u_histo.bins[i];
+
+    if (total == 0u) return;
+
+    uint  lowCount  = uint(float(total) * pc.lowPct);
+    uint  highCount = uint(float(total) * pc.highPct);
+
+    float weightedEV    = 0.0;
+    uint  weightedCount = 0u;
+    uint  count         = 0u;
+
+    for (int i = 0; i < 256; ++i) {
+        uint binVal   = u_histo.bins[i];
+        uint binStart = count;
+        uint binEnd   = count + binVal;
+
+        uint lo = max(binStart, lowCount);
+        uint hi = min(binEnd,   highCount);
+        if (hi > lo) {
+            float binEV = pc.evMin + (float(i) + 0.5) / 255.0 * (pc.evMax - pc.evMin);
+            weightedEV    += binEV * float(hi - lo);
+            weightedCount += (hi - lo);
+        }
+        count = binEnd;
+    }
+
+    if (weightedCount == 0u) return;
+
+    float measuredEV      = weightedEV / float(weightedCount);
+    float targetExposure  = clamp(0.18 / pow(2.0, measuredEV), 0.001, 64.0);
+    float current         = u_exposure.value;
+    float adapted         = current + (targetExposure - current)
+                            * (1.0 - exp(-pc.dt * pc.adaptSpeed));
+    u_exposure.value = adapted;
+}

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include <entt/entt.hpp>
 
@@ -37,7 +38,8 @@ struct FeatureInitContext {
 // ─────────────────────────────────────────────────────────────────────────────
 struct RendererHandles {
     // ── Primary buffers ───────────────────────────────────────────────────────
-    RGTextureHandle hdr;          // RGBA16F  post-lighting HDR composite
+    RGTextureHandle hdr;          // RGBA16F  HDR target: raw lighting → BloomComposite writes here → Tonemap reads
+    RGTextureHandle taaResolved;  // RGBA16F  TAA history output (= hdr when TAA disabled); Bloom threshold reads this
     RGTextureHandle swapchain;    // swapchain colour attachment
     RGTextureHandle depth;        // D32F     scene depth
 
@@ -56,6 +58,9 @@ struct RendererHandles {
     // ── Selection outline mask + intermediate ─────────────────────────────────
     RGTextureHandle selectionMask; // R8_UNORM  1-bit per-pixel coverage mask
     RGTextureHandle dilateH;       // R8_UNORM  horizontally-dilated mask (separable pass 1)
+
+    // ── SSAO (GTAO) result ────────────────────────────────────────────────────
+    RGTextureHandle ssaoTex;       // R8_UNORM  final blurred AO (1.0 = no occlusion)
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -87,17 +92,39 @@ struct FrameContext {
 
     // ── Texture binding without exposing RHITextureHandle ────────────────────
     //
-    // Resolves the backing RHITextureHandle of an RGTextureHandle and writes it
-    // into the given descriptor slot. Zero overhead — single array lookup.
-    // No-op if handle is invalid.
+    // Queues a descriptor write that is resolved and flushed after Execute()
+    // when all physical slot handles are valid (imported and transient alike).
+    // No-op if either handle is invalid.
     void BindTexture(RHI::RHIDescSetHandle set, uint32_t binding,
                      RGTextureHandle handle) const;
 
+    // ── Buffer binding without exposing RHIBufferHandle ───────────────────────
+    //
+    // Queues a descriptor write (SSBO / uniform buffer) resolved after Execute().
+    // No-op if either handle is invalid.
+    void BindBuffer(RHI::RHIDescSetHandle set, uint32_t binding,
+                    RGBufferHandle handle) const;
+
 private:
     friend class SceneRenderer;
-    // Flat lookup table built in RenderFrame: index = RGTextureHandle.index
-    const RHI::RHITextureHandle* m_rhiTable = nullptr;
-    uint32_t                     m_tableSize = 0;
+
+    struct PendingBinding {
+        RHI::RHIDescSetHandle set;
+        uint32_t              binding;
+        RGTextureHandle       handle;
+    };
+    struct PendingBufferBinding {
+        RHI::RHIDescSetHandle set;
+        uint32_t              binding;
+        RGBufferHandle        handle;
+    };
+    // mutable: Bind* methods are const so callers need not change const FrameContext& signatures.
+    mutable std::vector<PendingBinding>       m_pendingBindings;
+    mutable std::vector<PendingBufferBinding> m_pendingBufferBindings;
+
+    // Resolves all queued bindings and writes descriptor sets.
+    // Called by SceneRenderer after AllocateSlots() but before Execute().
+    void FlushBindings() const;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

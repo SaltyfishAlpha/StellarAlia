@@ -77,6 +77,13 @@ public:
     void RequestCreateEmpty();
     void RequestSpawnTemplate(const std::filesystem::path& templatePath);
 
+    // Set single-entity selection (from viewport picking).
+    void SetSelection(entt::entity e);
+    // Clear the selection entirely.
+    void ClearSelection();
+    // Trigger an asset drop spawn at a specific world position (from viewport drop).
+    void TriggerAssetDrop(const std::filesystem::path& assetPath, const glm::vec3& spawnPos);
+
 private:
     void DrawNode(entt::entity entity, entt::registry& reg);
 
@@ -108,6 +115,9 @@ private:
     DoubleClickClassifier            m_dblClick;
     uint32_t                         m_dblClickEntity = ~0u;
 
+    // ── Pending deselect (deferred single-select so drag can start first) ────
+    uint32_t m_pendingDeselectOthers = ~0u;
+
     // ── Rename state ───────────────────────────────────────────────────────
     uint32_t m_renamingEntity  = ~0u;
     char     m_renameBuffer[256] = {};
@@ -127,8 +137,8 @@ private:
 
     // ── Drag-and-drop ──────────────────────────────────────────────────────
     struct DnDOp {
-        entt::entity dragged = entt::null;
-        entt::entity target  = entt::null;  // entt::null = detach to root
+        std::vector<entt::entity> dragged;             // one or many (multi-select drag)
+        entt::entity              target = entt::null; // entt::null = detach to root
         enum Mode : uint8_t { AsChild, BeforeSibling, AfterSibling } mode = AsChild;
         bool valid = false;
     };
@@ -136,8 +146,9 @@ private:
 
     struct AssetDropOp {
         std::filesystem::path assetPath;
-        entt::entity          parent = entt::null;  // entt::null = create at root
-        bool                  valid  = false;
+        entt::entity          parent   = entt::null;  // entt::null = create at root
+        glm::vec3             spawnPos = {};
+        bool                  valid    = false;
     };
     AssetDropOp m_pendingAssetDrop;
 };

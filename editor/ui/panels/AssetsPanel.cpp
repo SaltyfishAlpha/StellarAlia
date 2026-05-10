@@ -1,4 +1,6 @@
 #include "ui/panels/AssetsPanel.hpp"
+#include "ui/EditorIconCache.hpp"
+#include "ui/EditorIcons.hpp"
 #include "resource/AssetRegistry.hpp"
 #include "core/logs/Log.hpp"
 #include "core/asset/AssetID.hpp"
@@ -11,6 +13,7 @@
 #include "function/material/MaterialManager.hpp"
 
 #include <imgui.h>
+#include <imgui_internal.h>
 
 #include <nlohmann/json.hpp>
 
@@ -22,6 +25,9 @@
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
 #endif
 #include <windows.h>
 #include <shellapi.h>
@@ -307,6 +313,8 @@ void AssetsPanel::SetProjectDir(const std::filesystem::path& assetsRoot) {
     m_projectDir      = assetsRoot.parent_path().string();
     m_cookCacheDir    = (assetsRoot.parent_path() / "cook_cache").string();
     m_selectedPath.clear();
+    m_selectedDir.clear();     // reset to new root on next draw
+    m_filePaneDirty = true;
     m_initialScanDone = false;
 }
 
@@ -606,43 +614,88 @@ void AssetsPanel::OnDraw() {
         ImGui::TextDisabled("No project loaded.");
         return;
     }
+
+    // Flush deferred single-select: click on multi-selected item without dragging.
+    if (!m_pendingDeselectOtherPath.empty() && !ImGui::IsMouseDown(0)) {
+        m_selectedPath    = fs::path(m_pendingDeselectOtherPath);
+        m_selectedPaths   = { m_pendingDeselectOtherPath };
+        m_shiftAnchorPath = m_pendingDeselectOtherPath;
+        m_pendingDeselectOtherPath.clear();
+    }
+
+    // Validate selected directory
+    if (m_selectedDir.empty() || !fs::exists(m_selectedDir))
+        m_selectedDir = m_assetsRoot;
+
     m_drawOrderFilesBuild.clear();
-    DrawDirTree(m_assetsRoot);
 
-    // ── Panel empty area: single InvisibleButton handles both context menu
-    //    and drag-drop target.  BeginPopupContextWindow + NoOpenOverItems was
-    //    broken because the InvisibleButton itself registered as an item on the
-    //    previous frame, preventing the window-level popup from ever opening.
+    // Window-level root drop target (catches drops on empty space)
     {
-        const float h = std::max(ImGui::GetContentRegionAvail().y, 4.f);
-        ImGui::InvisibleButton("##root_zone", ImVec2(-1.f, h));
-
-        if (ImGui::BeginPopupContextItem("assets_root_ctx")) {
-            if (ImGui::BeginMenu("Create")) {
-                if (ImGui::MenuItem("Folder"))
-                    CreateNewDir(m_assetsRoot);
-                ImGui::Separator();
-                if (ImGui::MenuItem("Material (.samat)"))
-                    CreateNewFile(CreateKind::Mat, m_assetsRoot);
-                if (ImGui::MenuItem("Shader (.saglsl)"))
-                    CreateNewFile(CreateKind::Saglsl, m_assetsRoot);
-                ImGui::EndMenu();
+        const ImVec2 p0 = ImGui::GetWindowPos();
+        const ImRect winRect(p0, ImVec2(p0.x + ImGui::GetWindowWidth(),
+                                        p0.y + ImGui::GetWindowHeight()));
+        if (ImGui::BeginDragDropTargetCustom(winRect, ImGui::GetID("##win_root_dnd"))) {
+            if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAASSET")) {
+                const fs::path anchor(static_cast<const char*>(p->Data));
+                if (m_selectedPaths.count(anchor.string()) && m_selectedPaths.size() > 1) {
+                    for (const fs::path& f : m_drawOrderFiles)
+                        if (m_selectedPaths.count(f.string()))
+                            MoveAsset(f, m_assetsRoot);
+                    m_selectedPaths.clear();
+                } else {
+                    MoveAsset(anchor, m_assetsRoot);
+                }
             }
-            ImGui::Separator();
-            if (ImGui::MenuItem("Reimport All Assets"))
-                ReimportDir(m_assetsRoot);
-            ImGui::EndPopup();
-        }
-
-        if (ImGui::BeginDragDropTarget()) {
-            if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAASSET"))
-                MoveAsset(fs::path(static_cast<const char*>(p->Data)), m_assetsRoot);
             ImGui::EndDragDropTarget();
         }
     }
 
-    // ── Keyboard shortcuts (InputSystem) ─────────────────────────────────────
-    if (m_input && (ImGui::IsWindowFocused() || ImGui::IsWindowHovered())) {
+    // ── Two-pane layout ───────────────────────────────────────────────────────
+    static constexpr float kBottomH = 34.f;
+    static constexpr float kLeftW   = 200.f;
+
+    // Left pane: directory tree
+    ImGui::BeginChild("##dirtree", {kLeftW, -kBottomH}, true);
+    {
+        const std::string rootName = m_assetsRoot.filename().string();
+        ImGuiTreeNodeFlags rootFlags = ImGuiTreeNodeFlags_DefaultOpen
+                                     | ImGuiTreeNodeFlags_OpenOnArrow
+                                     | ImGuiTreeNodeFlags_SpanAvailWidth;
+        std::error_code ec;
+        if (fs::weakly_canonical(m_selectedDir, ec) == fs::weakly_canonical(m_assetsRoot, ec))
+            rootFlags |= ImGuiTreeNodeFlags_Selected;
+        const bool rootOpen = ImGui::TreeNodeEx(rootName.c_str(), rootFlags);
+        if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
+            m_selectedDir = m_assetsRoot;
+        if (ImGui::BeginPopupContextItem("##root_dir_ctx")) {
+            if (ImGui::BeginMenu("Create")) {
+                if (ImGui::MenuItem("Folder"))             CreateNewDir(m_assetsRoot);
+                ImGui::Separator();
+                if (ImGui::MenuItem("Material (.samat)"))  CreateNewFile(CreateKind::Mat,    m_assetsRoot);
+                if (ImGui::MenuItem("Shader (.saglsl)"))   CreateNewFile(CreateKind::Saglsl, m_assetsRoot);
+                ImGui::EndMenu();
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Reimport All Assets"))    ReimportDir(m_assetsRoot);
+            ImGui::EndPopup();
+        }
+        if (rootOpen) {
+            DrawDirPane(m_assetsRoot);
+            ImGui::TreePop();
+        }
+    }
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+
+    // Right pane: files in m_selectedDir
+    ImGui::BeginChild("##filecontent", {0.f, -kBottomH}, true);
+    DrawFilePane();
+    ImGui::EndChild();
+
+    // ── Keyboard shortcuts ────────────────────────────────────────────────────
+    if (m_input && (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) ||
+                    ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows))) {
         if (m_input->WasActivated("SelectAll")) {
             m_selectedPaths.clear();
             for (const auto& p : m_drawOrderFiles)
@@ -660,80 +713,60 @@ void AssetsPanel::OnDraw() {
         }
     }
 
-    // ── Swap draw order for next frame's range-select ─────────────────────────
+    // Swap draw order for next frame's range-select
     m_drawOrderFiles = std::move(m_drawOrderFilesBuild);
     m_drawOrderFilesBuild.clear();
 
-    // ── Delete confirmation modal (single path, from context menu) ───────────
-    if (m_deleteConfirmOpen) {
-        ImGui::OpenPopup("Delete##confirm");
-        m_deleteConfirmOpen = false;
-    }
+    // ── Modals ────────────────────────────────────────────────────────────────
+    if (m_deleteConfirmOpen) { ImGui::OpenPopup("Delete##confirm"); m_deleteConfirmOpen = false; }
     if (ImGui::BeginPopupModal("Delete##confirm", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         const bool isDir = fs::is_directory(m_pendingDeletePath);
-        ImGui::Text("Delete %s \"%s\"?",
-                    isDir ? "folder" : "file",
+        ImGui::Text("Delete %s \"%s\"?", isDir ? "folder" : "file",
                     m_pendingDeletePath.filename().string().c_str());
         if (isDir) ImGui::TextDisabled("All contents will be removed.");
         ImGui::TextDisabled("This cannot be undone.");
         ImGui::Separator();
         if (ImGui::Button("Delete", ImVec2(120, 0))) {
-            DeletePath(m_pendingDeletePath);
-            m_pendingDeletePath.clear();
+            DeletePath(m_pendingDeletePath); m_pendingDeletePath.clear();
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-            m_pendingDeletePath.clear();
-            ImGui::CloseCurrentPopup();
+            m_pendingDeletePath.clear(); ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
     }
 
-    // ── Batch delete confirmation modal (keyboard Delete, multiple files) ─────
-    if (m_batchDeleteConfirmOpen) {
-        ImGui::OpenPopup("Delete##batch");
-        m_batchDeleteConfirmOpen = false;
-    }
+    if (m_batchDeleteConfirmOpen) { ImGui::OpenPopup("Delete##batch"); m_batchDeleteConfirmOpen = false; }
     if (ImGui::BeginPopupModal("Delete##batch", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("Delete %zu item(s)?", m_pendingDeletePaths.size());
         ImGui::TextDisabled("This cannot be undone.");
         ImGui::Separator();
         if (ImGui::Button("Delete", ImVec2(120, 0))) {
-            for (const auto& p : m_pendingDeletePaths) {
-                DeletePath(p);
-                m_selectedPaths.erase(p.string());
-            }
+            for (const auto& p : m_pendingDeletePaths) { DeletePath(p); m_selectedPaths.erase(p.string()); }
             m_pendingDeletePaths.clear();
             if (m_selectedPaths.empty()) m_selectedPath.clear();
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-            m_pendingDeletePaths.clear();
-            ImGui::CloseCurrentPopup();
+            m_pendingDeletePaths.clear(); ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
     }
 
-    // ── Import path modal ────────────────────────────────────────────────────
-    if (m_importModalOpen)
-        ImGui::OpenPopup("Import Asset##modal");
-
-    if (ImGui::BeginPopupModal("Import Asset##modal", nullptr,
-                               ImGuiWindowFlags_AlwaysAutoResize)) {
+    if (m_importModalOpen) ImGui::OpenPopup("Import Asset##modal");
+    if (ImGui::BeginPopupModal("Import Asset##modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextUnformatted("File path to import:");
         ImGui::SetNextItemWidth(480);
-        const bool entered = ImGui::InputText("##ipath", m_importPathBuf,
-                                              sizeof(m_importPathBuf),
+        const bool entered = ImGui::InputText("##ipath", m_importPathBuf, sizeof(m_importPathBuf),
                                               ImGuiInputTextFlags_EnterReturnsTrue);
         if (entered || ImGui::Button("Import", ImVec2(120, 0))) {
             const fs::path src(m_importPathBuf);
             if (fs::exists(src) && fs::is_regular_file(src)) {
                 if (ImportFile(src)) {
                     SA_LOG_INFO("AssetsPanel: imported '{}'", src.string());
-                    m_importPathBuf[0] = '\0';
-                    m_importModalOpen  = false;
+                    m_importPathBuf[0] = '\0'; m_importModalOpen = false;
                     ImGui::CloseCurrentPopup();
                 } else {
                     SA_LOG_WARN("AssetsPanel: import failed for '{}'", src.string());
@@ -742,51 +775,95 @@ void AssetsPanel::OnDraw() {
         }
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-            m_importModalOpen = false;
-            ImGui::CloseCurrentPopup();
+            m_importModalOpen = false; ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
     }
+
+    // ── Bottom bar ────────────────────────────────────────────────────────────
+    ImGui::Separator();
+    ImGui::SetNextItemWidth(150.f);
+    ImGui::SliderFloat("##iconsize", &m_fileIconSize, 16.f, 96.f, "%.0fpx");
+    ImGui::SameLine();
+    ImGui::TextUnformatted("Icon Size");
+    ImGui::SameLine(0.f, 20.f);
+
+    // Layout toggle: List / Card
+    auto layoutBtn = [&](const char* label, bool active) -> bool {
+        if (active) {
+            ImGui::PushStyleColor(ImGuiCol_Button,
+                                  ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                                  ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+        }
+        const bool clicked = ImGui::SmallButton(label);
+        if (active) ImGui::PopStyleColor(2);
+        return clicked;
+    };
+    if (m_iconFont) ImGui::PushFont(m_iconFont);
+    if (layoutBtn(FA_ICON_VIEW_LIST, !m_gridView)) m_gridView = false;
+    ImGui::SameLine(0.f, 2.f);
+    if (layoutBtn(FA_ICON_VIEW_CARD,  m_gridView)) m_gridView = true;
+    if (m_iconFont) ImGui::PopFont();
 }
 
 static bool IsSidecar(const fs::path& p) {
     return p.extension() == ".sameta";
 }
 
-void AssetsPanel::DrawDirTree(const fs::path& dir) {
-    std::vector<fs::directory_entry> subdirs, files;
-    std::error_code ec;
-    for (const auto& entry : fs::directory_iterator(dir, ec)) {
-        if (IsSidecar(entry.path())) continue;
-        if (entry.is_directory(ec)) subdirs.push_back(entry);
-        else                        files.push_back(entry);
-    }
+static bool IsImageExt(const std::string& ext) {
+    return ext == ".png" || ext == ".jpg" || ext == ".jpeg"
+        || ext == ".bmp" || ext == ".tga";
+}
 
-    auto byName = [](const fs::directory_entry& a, const fs::directory_entry& b) {
-        return a.path().filename() < b.path().filename();
-    };
-    std::sort(subdirs.begin(), subdirs.end(), byName);
-    std::sort(files.begin(),   files.end(),   byName);
+// Returns the FA_ICON_* glyph for a file extension, or nullptr for unknown types.
+static const char* GlyphForExt(const std::string& ext) {
+    if (ext == ".glb" || ext == ".gltf" || ext == ".fbx") return FA_ICON_MESH;
+    if (IsImageExt(ext))                                   return FA_ICON_TEXTURE;
+    if (ext == ".samat" || ext == ".mat")                  return FA_ICON_MATERIAL;
+    if (ext == ".sascene")                                 return FA_ICON_SCENE;
+    if (ext == ".saanim")                                  return FA_ICON_ANIMATION;
+    if (ext == ".saglsl")                                  return FA_ICON_SCRIPT;
+    if (ext == ".json"  || ext == ".jsonc")                return FA_ICON_CONFIG;
+    return nullptr;
+}
+
+void AssetsPanel::DrawDirPane(const fs::path& dir) {
+    std::vector<fs::directory_entry> subdirs;
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(dir, ec))
+        if (entry.is_directory(ec)) subdirs.push_back(entry);
+
+    std::sort(subdirs.begin(), subdirs.end(),
+              [](const fs::directory_entry& a, const fs::directory_entry& b) {
+                  return a.path().filename() < b.path().filename();
+              });
 
     for (const auto& entry : subdirs) {
         const std::string name     = entry.path().filename().string();
         const std::string fullPath = entry.path().string();
         const bool        renaming = (entry.path() == m_renamingPath);
 
+        std::error_code ec2;
+        const bool isSelected =
+            (fs::weakly_canonical(m_selectedDir, ec2) ==
+             fs::weakly_canonical(entry.path(), ec2));
+
         ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow
                                  | ImGuiTreeNodeFlags_SpanAvailWidth;
-        if (renaming) flags |= ImGuiTreeNodeFlags_Selected;
+        if (isSelected) flags |= ImGuiTreeNodeFlags_Selected;
 
         ImGui::PushID(fullPath.c_str());
-        const bool open = ImGui::TreeNodeEx("##dir", flags, "%s", renaming ? "" : name.c_str());
+        const bool open = ImGui::TreeNodeEx("##dir", flags,
+                                            "%s", renaming ? "" : name.c_str());
 
         if (renaming) {
             ImGui::SameLine();
             ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
             if (m_renameFocusNext) { ImGui::SetKeyboardFocusHere(); m_renameFocusNext = false; }
             const bool committed = ImGui::InputText("##ri", m_renameNameBuf, sizeof(m_renameNameBuf),
-                                                    ImGuiInputTextFlags_EnterReturnsTrue
-                                                    | ImGuiInputTextFlags_AutoSelectAll);
+                                                    ImGuiInputTextFlags_EnterReturnsTrue |
+                                                    ImGuiInputTextFlags_AutoSelectAll);
             const bool lost = ImGui::IsItemDeactivated();
             if (committed) CommitRename();
             else if (lost) {
@@ -795,15 +872,15 @@ void AssetsPanel::DrawDirTree(const fs::path& dir) {
                 else m_renamingPath.clear();
             }
         } else {
+            if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
+                m_selectedDir = entry.path();
+
             if (ImGui::BeginPopupContextItem("##dir_ctx")) {
                 if (ImGui::BeginMenu("Create")) {
-                    if (ImGui::MenuItem("Folder"))
-                        CreateNewDir(entry.path());
+                    if (ImGui::MenuItem("Folder"))            CreateNewDir(entry.path());
                     ImGui::Separator();
-                    if (ImGui::MenuItem("Material (.samat)"))
-                        CreateNewFile(CreateKind::Mat, entry.path());
-                    if (ImGui::MenuItem("Shader (.saglsl)"))
-                        CreateNewFile(CreateKind::Saglsl, entry.path());
+                    if (ImGui::MenuItem("Material (.samat)")) CreateNewFile(CreateKind::Mat,    entry.path());
+                    if (ImGui::MenuItem("Shader (.saglsl)"))  CreateNewFile(CreateKind::Saglsl, entry.path());
                     ImGui::EndMenu();
                 }
                 ImGui::Separator();
@@ -822,10 +899,18 @@ void AssetsPanel::DrawDirTree(const fs::path& dir) {
                 ImGui::EndPopup();
             }
 
-            // Drag-drop target: accept files and sub-directories dropped onto this folder.
             if (ImGui::BeginDragDropTarget()) {
-                if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAASSET"))
-                    MoveAsset(fs::path(static_cast<const char*>(p->Data)), entry.path());
+                if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAASSET")) {
+                    const fs::path anchor(static_cast<const char*>(p->Data));
+                    if (m_selectedPaths.count(anchor.string()) && m_selectedPaths.size() > 1) {
+                        for (const fs::path& f : m_drawOrderFiles)
+                            if (m_selectedPaths.count(f.string()))
+                                MoveAsset(f, entry.path());
+                        m_selectedPaths.clear();
+                    } else {
+                        MoveAsset(anchor, entry.path());
+                    }
+                }
                 ImGui::EndDragDropTarget();
             }
         }
@@ -833,73 +918,100 @@ void AssetsPanel::DrawDirTree(const fs::path& dir) {
         ImGui::PopID();
 
         if (open) {
-            DrawDirTree(entry.path());
+            DrawDirPane(entry.path());
             ImGui::TreePop();
         }
     }
-    for (const auto& entry : files) {
-        const std::string name     = entry.path().filename().string();
-        const std::string fullPath = entry.path().string();
-        const bool selected        = m_selectedPaths.count(entry.path().string()) > 0
-                                  || entry.path() == m_selectedPath;
-        const bool isRenaming      = (entry.path() == m_renamingPath);
+}
 
-        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf
-                                 | ImGuiTreeNodeFlags_SpanAvailWidth
-                                 | ImGuiTreeNodeFlags_NoTreePushOnOpen;
-        if (selected || isRenaming) flags |= ImGuiTreeNodeFlags_Selected;
+void AssetsPanel::DrawFilePane() {
+    if (m_selectedDir.empty() || !fs::exists(m_selectedDir)) return;
 
-        ImGui::PushID(fullPath.c_str());
-
-        const bool isSidecarSource = entry.path().extension() == ".sanim" ||
-                                     entry.path().extension() == ".saskel";
-        if (isSidecarSource) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-        ImGui::TreeNodeEx("##file", flags, "%s", isRenaming ? "" : name.c_str());
-        if (isSidecarSource) ImGui::PopStyleColor();
-
-        if (isRenaming) {
-            // ── Inline rename ──────────────────────────────────────────────
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-            if (m_renameFocusNext) {
-                ImGui::SetKeyboardFocusHere();
-                m_renameFocusNext = false;
-            }
-            const bool committed = ImGui::InputText("##ri", m_renameNameBuf,
-                                                    sizeof(m_renameNameBuf),
-                                                    ImGuiInputTextFlags_EnterReturnsTrue
-                                                    | ImGuiInputTextFlags_AutoSelectAll);
-            const bool lost = ImGui::IsItemDeactivated();
-            if (committed) {
-                CommitRename();
-            } else if (lost) {
-                if (!ImGui::IsKeyDown(ImGuiKey_Escape) && m_renameNameBuf[0] != '\0')
-                    CommitRename();
-                else
-                    m_renamingPath.clear();
-            }
-
-            ImGui::PopID();
-            continue;  // skip normal click/drag/context logic while renaming
+    // ── Gather: rescan only when directory changes or an operation marks dirty ──
+    if (m_filePaneDirty || m_cachedScanDir != m_selectedDir) {
+        m_cachedSubdirs.clear();
+        m_cachedFiles.clear();
+        std::error_code ec;
+        for (const auto& entry : fs::directory_iterator(m_selectedDir, ec)) {
+            if (IsSidecar(entry.path())) continue;
+            if (entry.is_directory(ec)) m_cachedSubdirs.push_back(entry);
+            else                        m_cachedFiles.push_back(entry);
         }
+        auto byName = [](const fs::directory_entry& a, const fs::directory_entry& b) {
+            return a.path().filename() < b.path().filename();
+        };
+        std::sort(m_cachedSubdirs.begin(), m_cachedSubdirs.end(), byName);
+        std::sort(m_cachedFiles.begin(),   m_cachedFiles.end(),   byName);
+        m_cachedScanDir = m_selectedDir;
+        m_filePaneDirty = false;
+    }
+    const auto& subdirs = m_cachedSubdirs;
+    const auto& files   = m_cachedFiles;
 
-        m_drawOrderFilesBuild.push_back(entry.path());
+    const int numDirs  = (int)subdirs.size();
+    const int numFiles = (int)files.size();
+    const int numItems = numDirs + numFiles;
 
+    if (numItems == 0) { ImGui::TextDisabled("(empty)"); return; }
+
+    // Index helpers
+    auto itemIsDir = [&](int i) { return i < numDirs; };
+    auto itemEntry = [&](int i) -> const fs::directory_entry& {
+        return i < numDirs ? subdirs[i] : files[i - numDirs];
+    };
+
+    static constexpr int kMaxThumbLoadsPerFrame = 4;
+    int thumbLoadsThisFrame = 0;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    auto getThumb = [&](const fs::path& p, bool isDir) -> ImTextureID {
+        if (isDir || !m_iconCache) return ImTextureID(0);
+        const std::string ext = p.extension().string();
+        if (!IsImageExt(ext)) return ImTextureID(0);
+        if (m_iconCache->IsThumbnailCached(p))
+            return m_iconCache->GetThumbnailForPath(p);
+        // Never load a new thumbnail when the LRU is full: inserting would evict
+        // an entry that is likely visible this frame, causing thrashing.
+        if (!m_iconCache->CanLoadThumbnail()) return ImTextureID(0);
+        if (thumbLoadsThisFrame >= kMaxThumbLoadsPerFrame) return ImTextureID(0);
+        ++thumbLoadsThisFrame;
+        return m_iconCache->GetThumbnailForPath(p);
+    };
+
+    auto drawIcon = [&](const fs::path& p, bool isDir, ImTextureID thumb, ImVec2 tl, float sz) {
+        const ImVec2 br = {tl.x + sz, tl.y + sz};
+        if (isDir) {
+            if (m_iconFont) dl->AddText(m_iconFont, sz, tl, IM_COL32_WHITE, FA_ICON_FOLDER);
+            return;
+        }
+        const std::string ext = p.extension().string();
+        if (thumb) {
+            dl->AddImage(thumb, tl, br);
+        } else if (const char* glyph = GlyphForExt(ext)) {
+            if (m_iconFont) dl->AddText(m_iconFont, sz, tl, IM_COL32_WHITE, glyph);
+        } else if (ext == ".saproject" && m_iconCache) {
+            if (const ImTextureID logo = m_iconCache->GetEngineLogo())
+                dl->AddImage(logo, tl, br);
+        }
+    };
+
+    // Shared interaction logic (selection, drag, double-click, context menu).
+    auto handleItem = [&](const fs::path& p, const std::string& pathStr,
+                          const std::string& name, bool isDir) {
+        // ── Selection ────────────────────────────────────────────────────────
         if (ImGui::IsItemClicked()) {
-            const bool ctrlHeld  = ImGui::GetIO().KeyCtrl;
-            const bool shiftHeld = ImGui::GetIO().KeyShift;
-            const std::string pathStr = entry.path().string();
-            if (ctrlHeld) {
+            const bool ctrl  = ImGui::GetIO().KeyCtrl;
+            const bool shift = ImGui::GetIO().KeyShift;
+            if (ctrl) {
                 if (m_selectedPaths.count(pathStr)) m_selectedPaths.erase(pathStr);
                 else                                m_selectedPaths.insert(pathStr);
-                m_selectedPath    = entry.path();
+                m_selectedPath    = p;
                 m_shiftAnchorPath = pathStr;
-            } else if (shiftHeld && !m_shiftAnchorPath.empty()) {
-                // Range: find anchor and current in draw order from previous frame.
+            } else if (shift && !m_shiftAnchorPath.empty()) {
                 const auto& ord = m_drawOrderFiles;
                 auto itA = std::find_if(ord.begin(), ord.end(),
-                    [&](const fs::path& p){ return p.string() == m_shiftAnchorPath; });
-                auto itB = std::find(ord.begin(), ord.end(), entry.path());
+                    [&](const fs::path& q){ return q.string() == m_shiftAnchorPath; });
+                auto itB = std::find(ord.begin(), ord.end(), p);
                 if (itA != ord.end() && itB != ord.end()) {
                     if (itA > itB) std::swap(itA, itB);
                     m_selectedPaths.clear();
@@ -908,79 +1020,234 @@ void AssetsPanel::DrawDirTree(const fs::path& dir) {
                 } else {
                     m_selectedPaths = { pathStr };
                 }
-                m_selectedPath = entry.path();
+                m_selectedPath = p;
             } else {
-                m_selectedPaths   = { pathStr };
-                m_selectedPath    = entry.path();
-                m_shiftAnchorPath = pathStr;
-            }
-        }
-
-        // Drag source.
-        if (ImGui::BeginDragDropSource()) {
-            ImGui::SetDragDropPayload("SAASSET", fullPath.c_str(), fullPath.size() + 1);
-            ImGui::TextUnformatted(name.c_str());
-            ImGui::EndDragDropSource();
-        }
-
-        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-            const auto& ext = entry.path().extension();
-            if (ext == ".sascene" && m_onSceneLoad)
-                m_onSceneLoad(entry.path());
-            else if (IsTextAsset(ext))
-                OpenFileExternal(entry.path());
-        }
-
-        // Right-click context menu.
-        // .saglsl gets a .sameta (type=Shader) after first build; Reimport cooks it.
-        // .sascene has no .sameta (engine-native format); show "Load Scene" directly.
-        const fs::path ctxMeta   = Import::MetaFile::MetaPathFor(entry.path());
-        const bool     hasMeta   = fs::exists(ctxMeta);
-        const bool     isSascene = (entry.path().extension() == ".sascene");
-        const bool     isSaglsl  = (entry.path().extension() == ".saglsl");
-
-        if (ImGui::BeginPopupContextItem("##file_ctx")) {
-            if (hasMeta && ImGui::MenuItem("Reimport"))
-                ReimportFile(entry.path());
-            if (isSascene && ImGui::MenuItem("Load Scene") && m_onSceneLoad)
-                m_onSceneLoad(entry.path());
-            if (isSaglsl && ImGui::MenuItem("Create Material from Shader")) {
-                const SaglslMeta meta = ParseSaglslMeta(entry.path());
-                if (meta.shadingModel.empty()) {
-                    SA_LOG_WARN("AssetsPanel: no @ShadingModel found in '{}'",
-                                entry.path().filename().string());
-                } else if (m_matMgr && !m_matMgr->GetType(meta.shadingModel)) {
-                    // Shader exists but its type is not registered — cook failed
-                    // or the engine hasn't been rebuilt since the shader was added.
-                    const std::string msg =
-                        "Shader type '" + meta.shadingModel + "' is not registered. "
-                        "Cook the shader (right-click → Reimport) and rebuild.";
-                    SA_LOG_WARN("AssetsPanel: {}", msg);
-                    if (m_diagnostics)
-                        m_diagnostics->Push({DiagLevel::Warning, DiagSource::ShaderCook,
-                                             msg, entry.path()});
-                } else {
-                    CreateMatFromShader(meta.shadingModel,
-                                        entry.path().parent_path(),
-                                        entry.path().stem().string(),
-                                        meta.defaultParamsJson);
+                if (m_selectedPaths.count(pathStr) && m_selectedPaths.size() > 1)
+                    m_pendingDeselectOtherPath = pathStr;
+                else {
+                    m_selectedPaths   = { pathStr };
+                    m_selectedPath    = p;
+                    m_shiftAnchorPath = pathStr;
                 }
             }
-            ImGui::Separator();
-            if (ImGui::MenuItem("Rename")) {
-                m_renamingPath    = entry.path();
-                m_renameFocusNext = true;
-                std::snprintf(m_renameNameBuf, sizeof(m_renameNameBuf), "%s",
-                              entry.path().stem().string().c_str());
-            }
-            if (ImGui::MenuItem("Delete")) {
-                m_pendingDeletePath = entry.path();
-                m_deleteConfirmOpen = true;
-            }
-            ImGui::EndPopup();
         }
+        // ── Drag ─────────────────────────────────────────────────────────────
+        if (ImGui::BeginDragDropSource()) {
+            m_pendingDeselectOtherPath.clear();
+            ImGui::SetDragDropPayload("SAASSET", pathStr.c_str(), pathStr.size() + 1);
+            if (m_selectedPaths.count(pathStr) && m_selectedPaths.size() > 1)
+                ImGui::Text("%zu items", m_selectedPaths.size());
+            else
+                ImGui::TextUnformatted(name.c_str());
+            ImGui::EndDragDropSource();
+        }
+        // ── Double-click ──────────────────────────────────────────────────────
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            if (isDir)
+                m_selectedDir = p;
+            else if (p.extension() == ".sascene" && m_onSceneLoad)
+                m_onSceneLoad(p);
+            else if (IsTextAsset(p.extension()))
+                OpenFileExternal(p);
+        }
+        // ── Context menu ──────────────────────────────────────────────────────
+        if (isDir) {
+            if (ImGui::BeginPopupContextItem("##dir_ctx")) {
+                if (ImGui::BeginMenu("Create")) {
+                    if (ImGui::MenuItem("Folder"))            CreateNewDir(p);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Material (.samat)")) CreateNewFile(CreateKind::Mat,    p);
+                    if (ImGui::MenuItem("Shader (.saglsl)"))  CreateNewFile(CreateKind::Saglsl, p);
+                    ImGui::EndMenu();
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Rename")) {
+                    m_renamingPath    = p;
+                    m_renameFocusNext = true;
+                    std::snprintf(m_renameNameBuf, sizeof(m_renameNameBuf), "%s", name.c_str());
+                }
+                if (ImGui::MenuItem("Delete")) {
+                    m_pendingDeletePath = p;
+                    m_deleteConfirmOpen = true;
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Reimport All in Folder")) ReimportDir(p);
+                ImGui::EndPopup();
+            }
+        } else {
+            const std::string ext = p.extension().string();
+            const fs::path ctxMeta  = Import::MetaFile::MetaPathFor(p);
+            const bool hasMeta   = fs::exists(ctxMeta);
+            const bool isSascene = (ext == ".sascene");
+            const bool isSaglsl  = (ext == ".saglsl");
+            if (ImGui::BeginPopupContextItem("##file_ctx")) {
+                if (hasMeta && ImGui::MenuItem("Reimport")) ReimportFile(p);
+                if (isSascene && ImGui::MenuItem("Load Scene") && m_onSceneLoad)
+                    m_onSceneLoad(p);
+                if (isSaglsl && ImGui::MenuItem("Create Material from Shader")) {
+                    const SaglslMeta meta = ParseSaglslMeta(p);
+                    if (meta.shadingModel.empty()) {
+                        SA_LOG_WARN("AssetsPanel: no @ShadingModel found in '{}'",
+                                    p.filename().string());
+                    } else if (m_matMgr && !m_matMgr->GetType(meta.shadingModel)) {
+                        const std::string msg = "Shader type '" + meta.shadingModel +
+                            "' is not registered. Cook the shader and rebuild.";
+                        SA_LOG_WARN("AssetsPanel: {}", msg);
+                        if (m_diagnostics)
+                            m_diagnostics->Push({DiagLevel::Warning, DiagSource::ShaderCook, msg, p});
+                    } else {
+                        CreateMatFromShader(meta.shadingModel, p.parent_path(),
+                                            p.stem().string(), meta.defaultParamsJson);
+                    }
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Rename")) {
+                    m_renamingPath    = p;
+                    m_renameFocusNext = true;
+                    std::snprintf(m_renameNameBuf, sizeof(m_renameNameBuf),
+                                  "%s", p.stem().string().c_str());
+                }
+                if (ImGui::MenuItem("Delete")) {
+                    m_pendingDeletePath = p;
+                    m_deleteConfirmOpen = true;
+                }
+                ImGui::EndPopup();
+            }
+        }
+    };
 
-        ImGui::PopID();
+    // Inline rename widget — same shape for both layouts, parameterised by width.
+    auto drawRename = [&](float w) -> bool {
+        ImGui::SetNextItemWidth(w);
+        if (m_renameFocusNext) { ImGui::SetKeyboardFocusHere(); m_renameFocusNext = false; }
+        const bool committed = ImGui::InputText("##ri", m_renameNameBuf, sizeof(m_renameNameBuf),
+                                                ImGuiInputTextFlags_EnterReturnsTrue |
+                                                ImGuiInputTextFlags_AutoSelectAll);
+        const bool lost = ImGui::IsItemDeactivated();
+        if (committed) CommitRename();
+        else if (lost) {
+            if (!ImGui::IsKeyDown(ImGuiKey_Escape) && m_renameNameBuf[0] != '\0')
+                CommitRename();
+            else m_renamingPath.clear();
+        }
+        return committed || lost;
+    };
+
+    const float iconSz = m_fileIconSize;
+
+    // ── List mode ─────────────────────────────────────────────────────────────
+    if (!m_gridView) {
+        const float rowH = iconSz + 4.f;
+
+        ImGuiListClipper clipper;
+        clipper.Begin(numItems, rowH);
+        while (clipper.Step()) {
+            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                const bool isDir = itemIsDir(i);
+                const fs::path& p = itemEntry(i).path();
+                const std::string pathStr = p.string();
+                const std::string name    = p.filename().string();
+                const std::string ext     = p.extension().string();
+                const bool sel  = m_selectedPaths.count(pathStr) > 0;
+                const bool isRen = (p == m_renamingPath);
+
+                ImGui::PushID(pathStr.c_str());
+                if (isRen) { drawRename(ImGui::GetContentRegionAvail().x); ImGui::PopID(); continue; }
+
+                m_drawOrderFilesBuild.push_back(p);
+                const ImVec2 rowMin = ImGui::GetCursorScreenPos();
+                ImGui::Selectable("##item", sel, 0, ImVec2(0.f, rowH));
+                handleItem(p, pathStr, name, isDir);
+
+                const float vci = rowMin.y + (rowH - iconSz) * 0.5f;
+                const float vct = rowMin.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f;
+                drawIcon(p, isDir, getThumb(p, isDir), {rowMin.x + 2.f, vci}, iconSz);
+                const bool dimmed = !isDir && (ext == ".sanim" || ext == ".saskel");
+                dl->AddText(nullptr, 0.f, {rowMin.x + 2.f + iconSz + 4.f, vct},
+                            ImGui::GetColorU32(dimmed ? ImGuiCol_TextDisabled : ImGuiCol_Text),
+                            name.c_str());
+                ImGui::PopID();
+            }
+        }
+        clipper.End();
+
+    // ── Card mode ─────────────────────────────────────────────────────────────
+    } else {
+        const float cardPad = 8.f;
+        const float cardW   = iconSz + cardPad * 2.f;
+        const float labelH  = ImGui::GetTextLineHeight() + 4.f;
+        const float cardH   = cardPad + iconSz + 4.f + labelH + cardPad * 0.5f;
+        const float cardGap = 8.f;
+        const float availW  = ImGui::GetContentRegionAvail().x;
+        const int   cols    = std::max(1, (int)((availW + cardGap) / (cardW + cardGap)));
+        const int   numRows = (numItems + cols - 1) / cols;
+        const float rowH    = cardH + cardGap;
+
+        auto truncate = [](const std::string& s, float maxW) -> std::string {
+            if (ImGui::CalcTextSize(s.c_str()).x <= maxW) return s;
+            const float dotsW = ImGui::CalcTextSize("...").x;
+            std::string t = s;
+            while (!t.empty() && ImGui::CalcTextSize(t.c_str()).x + dotsW > maxW) t.pop_back();
+            return t + "...";
+        };
+
+        const ImU32 borderU32 = ImGui::ColorConvertFloat4ToU32(
+            ImGui::GetStyleColorVec4(ImGuiCol_Border));
+
+        ImGuiListClipper clipper;
+        clipper.Begin(numRows, rowH);
+        while (clipper.Step()) {
+            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+                for (int col = 0; col < cols; ++col) {
+                    const int idx = row * cols + col;
+                    if (idx >= numItems) break;
+                    if (col > 0) ImGui::SameLine(0.f, cardGap);
+
+                    const bool isDir = itemIsDir(idx);
+                    const fs::path& p = itemEntry(idx).path();
+                    const std::string pathStr = p.string();
+                    const std::string name    = p.filename().string();
+                    const std::string ext     = p.extension().string();
+                    const bool sel   = m_selectedPaths.count(pathStr) > 0;
+                    const bool isRen = (p == m_renamingPath);
+
+                    ImGui::PushID(pathStr.c_str());
+                    if (isRen) { drawRename(cardW); ImGui::PopID(); continue; }
+
+                    m_drawOrderFilesBuild.push_back(p);
+                    const ImVec2 cardMin = ImGui::GetCursorScreenPos();
+                    const ImVec2 cardMax = {cardMin.x + cardW, cardMin.y + cardH};
+                    ImGui::InvisibleButton("##card", ImVec2(cardW, cardH));
+                    const bool hov = ImGui::IsItemHovered();
+                    handleItem(p, pathStr, name, isDir);
+
+                    // Background + border
+                    if (sel)
+                        dl->AddRectFilled(cardMin, cardMax,
+                                          ImGui::GetColorU32(ImGuiCol_Header), 4.f);
+                    else if (hov)
+                        dl->AddRectFilled(cardMin, cardMax,
+                                          ImGui::GetColorU32(ImGuiCol_ButtonHovered), 4.f);
+                    dl->AddRect(cardMin, cardMax, borderU32, 4.f);
+
+                    // Icon
+                    drawIcon(p, isDir, getThumb(p, isDir),
+                             {cardMin.x + cardPad, cardMin.y + cardPad}, iconSz);
+
+                    // Label (centered, truncated)
+                    const std::string label = truncate(name, cardW - 4.f);
+                    const float textW  = ImGui::CalcTextSize(label.c_str()).x;
+                    const ImVec2 textPos = {cardMin.x + (cardW - textW) * 0.5f,
+                                            cardMin.y + cardPad + iconSz + 4.f};
+                    const bool dimmed = !isDir && (ext == ".sanim" || ext == ".saskel");
+                    dl->AddText(nullptr, 0.f, textPos,
+                                ImGui::GetColorU32(dimmed ? ImGuiCol_TextDisabled : ImGuiCol_Text),
+                                label.c_str());
+                    ImGui::PopID();
+                }
+            }
+        }
+        clipper.End();
     }
 }
 
@@ -994,6 +1261,44 @@ void AssetsPanel::ProcessImportQueue() {
         }
     }
     m_dropQueue.clear();
+}
+
+// Copy .bin buffers and external image files referenced by a .gltf into destDir.
+static void CopyGltfCompanions(const fs::path& gltfSrc, const fs::path& destDir) {
+    std::ifstream f(gltfSrc);
+    if (!f) return;
+
+    using json = nlohmann::json;
+    json j;
+    try { f >> j; } catch (...) { return; }
+
+    const fs::path srcDir = gltfSrc.parent_path();
+    std::error_code ec;
+
+    auto copyRef = [&](const std::string& uri) {
+        if (uri.empty() || uri.starts_with("data:") || uri.find("://") != std::string::npos)
+            return;
+        const fs::path src = srcDir / uri;
+        const fs::path dst = destDir / fs::path(uri).filename();
+        if (fs::exists(src) && !fs::exists(dst)) {
+            fs::copy_file(src, dst, ec);
+            if (!ec)
+                SA_LOG_INFO("AssetsPanel: copied companion '{}'", fs::path(uri).filename().string());
+            else
+                SA_LOG_WARN("AssetsPanel: failed to copy companion '{}': {}",
+                            fs::path(uri).filename().string(), ec.message());
+        }
+    };
+
+    if (j.contains("buffers"))
+        for (const auto& buf : j["buffers"])
+            if (buf.contains("uri") && buf["uri"].is_string())
+                copyRef(buf["uri"].get<std::string>());
+
+    if (j.contains("images"))
+        for (const auto& img : j["images"])
+            if (img.contains("uri") && img["uri"].is_string())
+                copyRef(img["uri"].get<std::string>());
 }
 
 bool AssetsPanel::ImportFile(const fs::path& srcPath) {
@@ -1037,6 +1342,15 @@ bool AssetsPanel::ImportFile(const fs::path& srcPath) {
                         srcPath.string(), destPath.string(), ec.message());
             return false;
         }
+    }
+
+    // For .gltf files, copy companion .bin and external image files alongside.
+    {
+        std::string ext = srcPath.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                       [](unsigned char c){ return static_cast<char>(::tolower(c)); });
+        if (ext == ".gltf")
+            CopyGltfCompanions(srcPath, destDir);
     }
 
     const Import::AssetEntry entry = MakeAndSaveMeta(destPath, type);

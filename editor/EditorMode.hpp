@@ -10,8 +10,14 @@
 #include "EditorLogCapture.hpp"
 #include "config/EditorShortcutConfig.hpp"
 
+#include "core/spatial/BVHTree.hpp"
+#include "ui/EditorIconCache.hpp"
+
+#include <entt/entt.hpp>
+#include <imgui.h>
 #include <filesystem>
 #include <memory>
+#include <vector>
 #include "EditorOverlaySettings.hpp"
 
 namespace StellarAlia             { class Application; }
@@ -50,7 +56,12 @@ private:
     EditorDiagnostics                 m_diagnostics;
     std::unique_ptr<EditorLogCapture> m_logCapture;
 
-    EditorOverlaySettings      m_overlaySettings;
+    EditorOverlaySettings                       m_overlaySettings;
+    std::unique_ptr<EditorIconCache>            m_iconCache;
+
+    struct BillboardHit { entt::entity entity; ImVec2 screenPos; };
+    std::vector<BillboardHit>                   m_billboardHits;
+
     SceneHierarchyPanel*       m_hierarchyPanel  = nullptr;
     AssetsPanel*               m_assetsPanel     = nullptr;
     InspectorPanel*            m_inspectorPanel  = nullptr;
@@ -65,10 +76,15 @@ private:
     EditorShortcutConfig                   m_shortcutConfig;
 
     std::filesystem::path      m_currentScenePath;
+    std::filesystem::path      m_pendingProjectLoad;   // deferred — set in OnRenderUI, executed in OnUpdate
     bool                       m_gizmoIsUsing    = false;
 
     void DrawOverlays();
+    void DrawBillboardIcons();
     void DrawImGuizmo();
+    void HandleViewportInteraction();
+    [[nodiscard]] Core::Ray ScreenToWorldRay(float sx, float sy) const;
+    static bool RayHitHorizontalPlane(const Core::Ray& ray, float planeY, glm::vec3& outHit);
     void LoadScene(const std::filesystem::path& path);
     void LoadProject(const std::filesystem::path& saprojectPath);
     void NewScene();

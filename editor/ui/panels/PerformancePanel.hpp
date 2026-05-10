@@ -1,15 +1,17 @@
 #pragma once
 #include "ui/IEditorWindow.hpp"
 #include "function/render_graph/RenderGraph.hpp"
+#include "platform/rhi/IRHIDevice.hpp"
 
 namespace StellarAlia::Editor {
 
 class PerformancePanel : public IEditorWindow {
 public:
-    explicit PerformancePanel(const RenderGraph* renderGraph = nullptr)
-        : m_renderGraph(renderGraph)
+    PerformancePanel(const RenderGraph* renderGraph = nullptr,
+                     RHI::IRHIDevice*   device      = nullptr)
+        : m_renderGraph(renderGraph), m_device(device)
     {
-        isOpen = false;
+        isOpen = true;
     }
 
     std::string_view GetName() const override { return "Performance"; }
@@ -17,6 +19,7 @@ public:
 
 private:
     const RenderGraph* m_renderGraph = nullptr;
+    RHI::IRHIDevice*   m_device      = nullptr;
 };
 
 } // namespace StellarAlia::Editor

@@ -14,6 +14,7 @@ layout(set = 0, binding = 0) uniform FrameData {
     mat4  proj;
     mat4  viewProj;
     mat4  invViewProj;
+    mat4  invProj;
     vec3  cameraPos;   float time;
     vec2  resolution;  float deltaTime;  float shadowBias;
     // L0+L1+L2 spherical harmonic coefficients for diffuse irradiance.
@@ -22,6 +23,11 @@ layout(set = 0, binding = 0) uniform FrameData {
     // w component unused (std140 vec3 → vec4 padding).
     vec4  irrSH[9];
     mat4  lightSpaceMatrix;  // orthographic light view-projection for shadow pass
+    // TAA temporal data
+    mat4  prevViewProj;      // previous frame unjittered viewProj for reprojection
+    vec2  jitter;            // current Halton jitter in pixel space [-0.5, 0.5]
+    uint  frameIndex;        // frame counter mod 256
+    float _fpad;
 } u_Frame;
 
 // binding=1  Light list, up to MAX_LIGHTS entries.

@@ -43,6 +43,25 @@ void MaterialManager::Shutdown() {
     m_device = nullptr;
 }
 
+void MaterialManager::ClearProjectInstances() {
+    SA_LOG_INFO("MaterialManager: cleared {} cached material instance(s)", m_cachedInstances.size());
+    m_cachedInstances.clear();
+}
+
+void MaterialManager::ClearProjectTypes() {
+    std::vector<std::string> toRemove;
+    for (auto& [name, type] : m_types) {
+        if (type->isProjectType) {
+            type->shader.Unload(m_device);
+            toRemove.push_back(name);
+        }
+    }
+    for (const auto& name : toRemove)
+        m_types.erase(name);
+    if (!toRemove.empty())
+        SA_LOG_INFO("MaterialManager: cleared {} project material type(s)", toRemove.size());
+}
+
 MaterialType* MaterialManager::RegisterType(std::unique_ptr<MaterialType> type) {
     SA_LOG_INFO("MaterialManager: registered type '{}'", type->name);
     auto* ptr = type.get();
@@ -129,8 +148,42 @@ bool MaterialManager::RegisterTypeFromShaders(const MaterialTypeDesc&   desc,
     return true;
 }
 
+bool MaterialManager::LoadShaderProgram(ShaderProgram& prog,
+                                         const std::string& vertStem,
+                                         const std::string& fragStem,
+                                         const FeatureInitContext& ctx)
+{
+    const auto vertSpv = LoadSpv(ctx.shaderDir + "/" + vertStem + ".vert.spv");
+    const auto fragSpv = LoadSpv(ctx.shaderDir + "/" + fragStem + ".frag.spv");
+    if (vertSpv.empty() || fragSpv.empty()) {
+        SA_LOG_ERROR("MaterialManager::LoadShaderProgram: .spv not found ({} / {})",
+                     vertStem, fragStem);
+        return false;
+    }
+
+    RHI::ShaderReflection vertRefl, fragRefl;
+    if (!RHI::ShaderReflectionIO::LoadFromFile(ctx.shaderDir + "/" + vertStem + ".vert.refl", vertRefl) ||
+        !RHI::ShaderReflectionIO::LoadFromFile(ctx.shaderDir + "/" + fragStem + ".frag.refl", fragRefl)) {
+        SA_LOG_ERROR("MaterialManager::LoadShaderProgram: .refl not found ({} / {})",
+                     vertStem, fragStem);
+        return false;
+    }
+
+    ShaderProgram::Desc pd;
+    pd.vertSpv     = vertSpv;  pd.vertRefl = vertRefl;
+    pd.fragSpv     = fragSpv;  pd.fragRefl = fragRefl;
+    pd.frameLayout = ctx.frameLayout;
+    if (!prog.Load(ctx.device, pd)) {
+        SA_LOG_ERROR("MaterialManager::LoadShaderProgram: program load failed ({} / {})",
+                     vertStem, fragStem);
+        return false;
+    }
+    return true;
+}
+
 void MaterialManager::RegisterTypesFromShaderDir(const std::string&        shaderDir,
-                                                   const FeatureInitContext& ctx)
+                                                   const FeatureInitContext& ctx,
+                                                   bool                      isProjectType)
 {
     namespace fs = std::filesystem;
     if (!fs::is_directory(shaderDir)) return;
@@ -158,7 +211,12 @@ void MaterialManager::RegisterTypesFromShaderDir(const std::string&        shade
 
         SA_LOG_INFO("MaterialManager: auto-registering '{}' from .refl",
                     fragRefl.shadingModel);
-        RegisterTypeFromShaders({fragRefl.shadingModel, vertName, fragStem}, ctx);
+        if (RegisterTypeFromShaders({fragRefl.shadingModel, vertName, fragStem}, ctx)) {
+            if (isProjectType) {
+                if (auto* type = GetType(fragRefl.shadingModel))
+                    type->isProjectType = true;
+            }
+        }
     }
 }
 

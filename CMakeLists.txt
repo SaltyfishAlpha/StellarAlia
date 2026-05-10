@@ -101,8 +101,6 @@ add_subdirectory(tools/cook)
 add_subdirectory(tools/shader_reflect)
 
 # Shader cook tool: processes .saglsl unified shaders → .spv + .refl + dispatch GLSL.
-# Must come before the active project subdirectory so demo_project/CMakeLists.txt
-# can reference $<TARGET_FILE:StellarAliaShaderCook>.
 add_subdirectory(tools/shader_cook)
 
 # Wire the project-wide asset cook into the build
@@ -198,11 +196,3 @@ foreach(_dep StellarAliaBuiltinShaders ShadingEvaluatorsCopy CookAssets)
         add_dependencies(${PROJECT_NAME} ${_dep})
     endif()
 endforeach()
-
-# CookDemoShaders (StellarAliaShaderCook) overwrites shading_model_ids.glsl and
-# shading_dispatch.glsl with the full project dispatch.  Wire it as a prerequisite
-# of StellarAliaBuiltinShaders so deferred_lighting.frag (which includes the
-# dispatch) always compiles against the complete set of shading models.
-if(TARGET StellarAliaBuiltinShaders AND TARGET CookDemoShaders)
-    add_dependencies(StellarAliaBuiltinShaders CookDemoShaders)
-endif()

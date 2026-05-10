@@ -118,7 +118,7 @@ endfunction()
 # compile_shaders_dir(shader_dir output_dir)
 # ===========================================================================
 function(compile_shaders_dir shader_dir output_dir)
-    file(GLOB_RECURSE _files
+    file(GLOB_RECURSE _files CONFIGURE_DEPENDS
         "${CMAKE_SOURCE_DIR}/${shader_dir}/*.vert"
         "${CMAKE_SOURCE_DIR}/${shader_dir}/*.frag"
         "${CMAKE_SOURCE_DIR}/${shader_dir}/*.comp"

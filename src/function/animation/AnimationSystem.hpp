@@ -52,28 +52,37 @@ public:
     std::span<const glm::mat4>           GetBoneGlobalPoses(entt::entity entity) const;
     std::span<const Resource::BoneInfo>  GetBoneSkeleton   (entt::entity entity) const;
 
+    // Must be called once before PrepareEntity; stores the set=2 layout used to allocate
+    // per-entity skinDescSets.  Obtain layout from SceneRenderer::GetSkinDescLayout().
+    void Init(RHI::IRHIDevice* device, RHI::RHIDescLayoutHandle skinDescLayout);
+
+    // Releases all per-entity GPU resources (skinMatricesBuffer, skinDescSet).
+    // skinDataBuffer and vertexBuffer are owned by ResourceManager and not freed here.
+    void Shutdown(RHI::IRHIDevice* device, entt::registry& registry);
+
 private:
     struct SkinEntry {
         entt::entity entity = entt::null;
 
-        std::vector<glm::vec3>              restPos;
-        std::vector<glm::vec3>              restNorm;
-        std::vector<glm::vec4>              restTang;
-        std::vector<glm::vec2>              restUV;
-        std::vector<Resource::SkinVertex>   skinData;
         std::vector<Resource::BoneInfo>     skeleton;
         const Resource::AnimClip*           cachedClip = nullptr;
         AssetID                             currentClipAsset;  // tracks last-loaded clip
-        std::vector<uint8_t>                deformedVerts;  // vertexCount × 48 bytes
-        std::vector<glm::mat4>              lastGlobalPose; // mesh-local FK result, updated each frame
+
+        // Pre-allocated per-bone work buffers — resized once in PrepareEntity to avoid
+        // per-frame heap allocation in Update()/EvaluateAll().
+        // workGlobalPose doubles as lastGlobalPose for bone gizmo queries.
+        std::vector<glm::vec3> workLocalT;
+        std::vector<glm::quat> workLocalR;
+        std::vector<glm::vec3> workLocalS;
+        std::vector<glm::mat4> workGlobalPose;
+        std::vector<glm::mat4> workSkinMats;
     };
 
-    std::unordered_map<uint32_t, SkinEntry> m_entries;
+    RHI::RHIDescLayoutHandle                 m_skinDescLayout;
+    std::unordered_map<uint32_t, SkinEntry>  m_entries;
 
     static void SampleChannel(const Resource::AnimChannel& ch, float t,
                                glm::vec3& out_T, glm::quat& out_R, glm::vec3& out_S);
-
-    static void SkinVertices(SkinEntry& e, const std::vector<glm::mat4>& skinMats);
 };
 
 } // namespace StellarAlia

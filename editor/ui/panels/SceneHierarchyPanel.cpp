@@ -96,8 +96,15 @@ entt::entity SceneHierarchyPanel::DuplicateEntity(entt::entity src) {
     if (auto* sl = reg.try_get<SpotLightComponent>(src))        reg.emplace_or_replace<SpotLightComponent>(dst, *sl);
     if (auto* al = reg.try_get<AreaLightComponent>(src))        reg.emplace_or_replace<AreaLightComponent>(dst, *al);
     if (auto* sm = reg.try_get<StaticMeshComponent>(src))       reg.emplace_or_replace<StaticMeshComponent>(dst, *sm);
+    if (auto* mr = reg.try_get<MeshRendererComponent>(src))     reg.emplace_or_replace<MeshRendererComponent>(dst, *mr);
     if (auto* mo = reg.try_get<MaterialOverrideComponent>(src)) reg.emplace_or_replace<MaterialOverrideComponent>(dst, *mo);
     if (auto* an = reg.try_get<AnimatorComponent>(src))         reg.emplace_or_replace<AnimatorComponent>(dst, *an);
+    if (auto* sk = reg.try_get<SkinnedMeshComponent>(src)) {
+        SkinnedMeshComponent skCopy{};
+        skCopy.meshAsset = sk->meshAsset;   // GPU handles re-allocated by PrepareEntity
+        reg.emplace_or_replace<SkinnedMeshComponent>(dst, skCopy);
+        m_scene->MarkSkinnedMeshDirty();
+    }
     if (auto* rb = reg.try_get<RigidBodyComponent>(src)) {
         RigidBodyComponent rbCopy = *rb;
         rbCopy.bodyId = ~0u;
@@ -196,9 +203,13 @@ void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
                 SelectRange(ebits);
                 m_primarySelected = ebits;
             } else {
-                m_selection = { ebits };
-                m_primarySelected = ebits;
-                m_shiftAnchor     = ebits;
+                if (m_selection.count(ebits) && m_selection.size() > 1)
+                    m_pendingDeselectOthers = ebits;
+                else {
+                    m_selection       = { ebits };
+                    m_primarySelected = ebits;
+                    m_shiftAnchor     = ebits;
+                }
             }
         }
 
@@ -257,9 +268,13 @@ void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
 
         // ── Drag source ────────────────────────────────────────────────────────
         if (!m_dblClick.IsTracking() && ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
+            m_pendingDeselectOthers = ~0u; // drag confirmed, preserve multi-selection
             uint32_t bits = ebits;
             ImGui::SetDragDropPayload("SAENTITY", &bits, sizeof(bits));
-            ImGui::TextUnformatted(name);
+            if (m_selection.count(ebits) && m_selection.size() > 1)
+                ImGui::Text("%zu entities", m_selection.size());
+            else
+                ImGui::TextUnformatted(name);
             ImGui::EndDragDropSource();
         }
 
@@ -285,14 +300,20 @@ void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
                 dl->AddLine({x0, itemBot}, {x1, itemBot}, lineCol, 2.f);
 
             if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAENTITY")) {
-                entt::entity dragged = static_cast<entt::entity>(
-                    *static_cast<const uint32_t*>(p->Data));
-                if (dragged != entity)
-                    m_pendingDnD = { dragged, entity, zone, true };
+                const uint32_t bits = *static_cast<const uint32_t*>(p->Data);
+                std::vector<entt::entity> list;
+                if (m_selection.count(bits) && m_selection.size() > 1) {
+                    for (uint32_t b : m_drawOrder)
+                        if (m_selection.count(b))
+                            list.push_back(static_cast<entt::entity>(b));
+                } else {
+                    list = { static_cast<entt::entity>(bits) };
+                }
+                m_pendingDnD = { std::move(list), entity, zone, true };
             }
             if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAASSET")) {
                 m_pendingAssetDrop = {
-                    fs::path(static_cast<const char*>(p->Data)), entity, true
+                    fs::path(static_cast<const char*>(p->Data)), entity, {}, true
                 };
             }
             ImGui::EndDragDropTarget();
@@ -316,6 +337,23 @@ void SceneHierarchyPanel::RequestCreateEmpty() {
 
 void SceneHierarchyPanel::RequestSpawnTemplate(const fs::path& templatePath) {
     m_pendingCreate = { CreateOp::Template, templatePath, entt::null };
+}
+
+void SceneHierarchyPanel::SetSelection(entt::entity e) {
+    m_selection.clear();
+    m_primarySelected = static_cast<uint32_t>(e);
+    m_selection.insert(m_primarySelected);
+    m_shiftAnchor = m_primarySelected;
+}
+
+void SceneHierarchyPanel::ClearSelection() {
+    m_selection.clear();
+    m_primarySelected = ~0u;
+    m_shiftAnchor     = ~0u;
+}
+
+void SceneHierarchyPanel::TriggerAssetDrop(const fs::path& assetPath, const glm::vec3& spawnPos) {
+    m_pendingAssetDrop = { assetPath, entt::null, spawnPos, true };
 }
 
 // ── OnDraw ─────────────────────────────────────────────────────────────────────
@@ -361,6 +399,15 @@ void SceneHierarchyPanel::OnDraw() {
         }
     };
 
+    // Flush deferred single-select: click on multi-selected item without dragging.
+    if (m_pendingDeselectOthers != ~0u && !ImGui::IsMouseDown(0)) {
+        const uint32_t bits = m_pendingDeselectOthers;
+        m_selection           = { bits };
+        m_primarySelected     = bits;
+        m_shiftAnchor         = bits;
+        m_pendingDeselectOthers = ~0u;
+    }
+
     // ── Entity tree ────────────────────────────────────────────────────────────
     m_drawOrderBuild.clear();
     auto view = reg.view<TagComponent>();
@@ -394,13 +441,20 @@ void SceneHierarchyPanel::OnDraw() {
 
         if (ImGui::BeginDragDropTarget()) {
             if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAENTITY")) {
-                entt::entity dragged = static_cast<entt::entity>(
-                    *static_cast<const uint32_t*>(p->Data));
-                m_pendingDnD = { dragged, entt::null, DnDOp::AsChild, true };
+                const uint32_t bits = *static_cast<const uint32_t*>(p->Data);
+                std::vector<entt::entity> list;
+                if (m_selection.count(bits) && m_selection.size() > 1) {
+                    for (uint32_t b : m_drawOrder)
+                        if (m_selection.count(b))
+                            list.push_back(static_cast<entt::entity>(b));
+                } else {
+                    list = { static_cast<entt::entity>(bits) };
+                }
+                m_pendingDnD = { std::move(list), entt::null, DnDOp::AsChild, true };
             }
             if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAASSET")) {
                 m_pendingAssetDrop = {
-                    fs::path(static_cast<const char*>(p->Data)), entt::null, true
+                    fs::path(static_cast<const char*>(p->Data)), entt::null, {}, true
                 };
             }
             ImGui::EndDragDropTarget();
@@ -499,6 +553,7 @@ void SceneHierarchyPanel::OnDraw() {
     if (m_pendingAssetDrop.valid) {
         const fs::path   assetPath = std::move(m_pendingAssetDrop.assetPath);
         const entt::entity parent  = m_pendingAssetDrop.parent;
+        const glm::vec3  spawnPos  = m_pendingAssetDrop.spawnPos;
         m_pendingAssetDrop = {};
 
         std::string ext = assetPath.extension().string();
@@ -520,6 +575,10 @@ void SceneHierarchyPanel::OnDraw() {
                         *m_scene, assetPath.stem().string(), entry->id);
                     if (reg.valid(parent))
                         m_scene->SetParent(e, parent);
+                    if (spawnPos != glm::vec3(0.f)) {
+                        reg.get<TransformComponent>(e).position = spawnPos;
+                        m_scene->MarkDirty(e);
+                    }
                     m_selection       = { static_cast<uint32_t>(e) };
                     m_primarySelected = static_cast<uint32_t>(e);
                     m_shiftAnchor     = m_primarySelected;
@@ -532,33 +591,50 @@ void SceneHierarchyPanel::OnDraw() {
 
     // ── Drag-and-drop execution ────────────────────────────────────────────────
     if (m_pendingDnD.valid) {
-        DnDOp op = m_pendingDnD;
+        DnDOp op = std::move(m_pendingDnD);
         m_pendingDnD = {};
 
-        if (!reg.valid(op.dragged)) {
-            // nothing
-        } else if (op.target == entt::null) {
-            // Detach to scene root
-            m_scene->SetParent(op.dragged, entt::null);
-        } else if (reg.valid(op.target) && op.dragged != op.target) {
+        if (op.target == entt::null) {
+            // Detach all to scene root
+            for (entt::entity dragged : op.dragged)
+                if (reg.valid(dragged))
+                    m_scene->SetParent(dragged, entt::null);
+        } else if (reg.valid(op.target)) {
             if (op.mode == DnDOp::AsChild) {
-                // Cycle guard: prevent making an entity a child of its own descendant
-                if (!IsInSubtree(op.target, op.dragged, reg))
-                    m_scene->SetParent(op.dragged, op.target);
+                for (entt::entity dragged : op.dragged) {
+                    if (!reg.valid(dragged) || dragged == op.target) continue;
+                    if (!IsInSubtree(op.target, dragged, reg))
+                        m_scene->SetParent(dragged, op.target);
+                }
             } else {
-                // Insert as sibling of target (share target's parent)
+                // BeforeSibling / AfterSibling — move all to target's parent level.
+                // Sort by draw order so entities maintain their relative visual order:
+                //   BeforeSibling: ascending order  → all land before target in original order
+                //   AfterSibling:  descending order → each inserted after target, stacking correctly
                 entt::entity targetParent = entt::null;
                 if (const auto* hc = reg.try_get<HierarchyComponent>(op.target))
                     targetParent = hc->parent;
-                // Cycle guard: targetParent must not be inside dragged's subtree
-                const bool safe = (targetParent == entt::null)
-                    || !IsInSubtree(targetParent, op.dragged, reg);
-                if (safe) {
-                    m_scene->SetParent(op.dragged, targetParent);
+
+                std::vector<entt::entity> sorted = op.dragged;
+                std::stable_sort(sorted.begin(), sorted.end(),
+                    [&](entt::entity a, entt::entity b) {
+                        auto pa = std::find(m_drawOrder.begin(), m_drawOrder.end(), (uint32_t)a);
+                        auto pb = std::find(m_drawOrder.begin(), m_drawOrder.end(), (uint32_t)b);
+                        return pa < pb;
+                    });
+                if (op.mode == DnDOp::AfterSibling)
+                    std::reverse(sorted.begin(), sorted.end());
+
+                for (entt::entity dragged : sorted) {
+                    if (!reg.valid(dragged) || dragged == op.target) continue;
+                    const bool safe = (targetParent == entt::null)
+                        || !IsInSubtree(targetParent, dragged, reg);
+                    if (!safe) continue;
+                    m_scene->SetParent(dragged, targetParent);
                     if (op.mode == DnDOp::BeforeSibling)
-                        MoveChildBefore(op.dragged, op.target, reg);
+                        MoveChildBefore(dragged, op.target, reg);
                     else
-                        MoveChildAfter(op.dragged, op.target, reg);
+                        MoveChildAfter(dragged, op.target, reg);
                 }
             }
         }

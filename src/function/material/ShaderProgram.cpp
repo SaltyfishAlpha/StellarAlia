@@ -1,4 +1,7 @@
 #include "function/material/ShaderProgram.hpp"
+
+#include <algorithm>
+
 #include "core/logs/Log.hpp"
 
 namespace StellarAlia {
@@ -15,10 +18,12 @@ bool ShaderProgram::Load(RHI::IRHIDevice* device, const Desc& desc) {
         return false;
     }
 
-    // Build set=1 descriptor layout from bindings with set index 1.
-    // If the shader has no set=1 bindings (e.g. a simple unlit pass), the layout
-    // will be empty but still valid.
     m_materialLayout = device->CreateDescriptorSetLayout(m_merged, 1);
+
+    bool hasSet2 = std::any_of(m_merged.bindings.begin(), m_merged.bindings.end(),
+                               [](const RHI::ShaderBindingDesc& b){ return b.set == 2; });
+    if (hasSet2)
+        m_set2Layout = device->CreateDescriptorSetLayout(m_merged, 2);
 
     SA_LOG_INFO("ShaderProgram: loaded ({} merged bindings, pc={}B)",
                 m_merged.bindings.size(), m_merged.pushConstantSize);
@@ -35,7 +40,29 @@ void ShaderProgram::Unload(RHI::IRHIDevice* device) {
     m_vertShader     = {};
     m_fragShader     = {};
     m_materialLayout = {};
+    m_set2Layout     = {};
     m_frameLayout    = {};
+}
+
+bool ShaderProgram::ReloadFragShader(RHI::IRHIDevice* device,
+                                      std::span<const uint8_t>     fragSpv,
+                                      const RHI::ShaderReflection& fragRefl) {
+    // Clear the pipeline cache — all pipelines bake in the frag shader and are now stale.
+    for (auto& [key, pipeline] : m_pipelineCache)
+        device->DestroyPipeline(pipeline);
+    m_pipelineCache.clear();
+
+    device->DestroyShader(m_fragShader);
+    m_fragShader = {};
+
+    m_fragShader = device->CreateShader(fragSpv, fragRefl);
+    if (!m_fragShader.IsValid()) {
+        SA_LOG_ERROR("ShaderProgram::ReloadFragShader — CreateShader failed");
+        return false;
+    }
+
+    SA_LOG_INFO("ShaderProgram: frag shader reloaded");
+    return true;
 }
 
 RHI::RHIPipelineHandle ShaderProgram::GetOrCreatePipeline(
@@ -55,10 +82,11 @@ RHI::RHIPipelineHandle ShaderProgram::GetOrCreatePipeline(
     pipeDesc.vertShader  = m_vertShader;
     pipeDesc.fragShader  = m_fragShader;
 
-    // set=0 = frame uniforms, set=1 = material params
+    // set=0 = frame uniforms, set=1 = material params, set=2 = GPU skinning (optional)
     uint32_t layoutCount = 0;
     if (m_frameLayout.IsValid())    pipeDesc.descriptorLayouts[layoutCount++] = m_frameLayout;
     if (m_materialLayout.IsValid()) pipeDesc.descriptorLayouts[layoutCount++] = m_materialLayout;
+    if (m_set2Layout.IsValid())     pipeDesc.descriptorLayouts[layoutCount++] = m_set2Layout;
     pipeDesc.descriptorLayoutCount = layoutCount;
 
     pipeDesc.pushConstantSize   = m_merged.pushConstantSize;

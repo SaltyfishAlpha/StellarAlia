@@ -9,6 +9,18 @@ void PerformancePanel::OnDraw() {
     constexpr double kMB = 1.0 / (1024.0 * 1024.0);
     const ImGuiIO& io = ImGui::GetIO();
 
+    // ── Hardware ──────────────────────────────────────────────────────────────
+    if (ImGui::CollapsingHeader("Hardware", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (m_device) {
+            const auto gpu = m_device->GetDeviceName();
+            ImGui::Text("GPU: %.*s", static_cast<int>(gpu.size()), gpu.data());
+        } else {
+            ImGui::TextDisabled("GPU: (unavailable)");
+        }
+        static const std::string cpuName = Platform::GetCpuName();
+        ImGui::Text("CPU: %s", cpuName.c_str());
+    }
+
     // ── Display ───────────────────────────────────────────────────────────────
     if (ImGui::CollapsingHeader("Display", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Text("Viewport:   %.0f x %.0f", io.DisplaySize.x, io.DisplaySize.y);
@@ -74,6 +86,43 @@ void PerformancePanel::OnDraw() {
                             physMB, savedMB, savedPct);
             } else {
                 ImGui::Text("Physical:  %.2f MB", physMB);
+            }
+
+            // ── Buffer stats ─────────────────────────────────────────────────────
+            {
+                ImGui::Separator();
+                ImGui::Text("Buffers imported:  %u", s.importedBufferCount);
+                const double logBufMB  = static_cast<double>(s.transientBufferBytesLogical)  * kMB;
+                const double physBufMB = static_cast<double>(s.transientBufferBytesPhysical) * kMB;
+                ImGui::Text("Buffers transient: %u logical / %u physical",
+                            s.transientBufferCount, s.physicalBufferSlotCount);
+                if (s.transientBufferBytesLogical > 0 &&
+                    s.transientBufferBytesPhysical < s.transientBufferBytesLogical) {
+                    const double savedMB  = logBufMB - physBufMB;
+                    const double savedPct = savedMB / logBufMB * 100.0;
+                    ImGui::Text("Buffer logical:  %.3f MB", logBufMB);
+                    ImGui::Text("Buffer physical: %.3f MB  (saved %.3f MB, %.1f%%)",
+                                physBufMB, savedMB, savedPct);
+                } else {
+                    ImGui::Text("Buffer logical:  %.3f MB", logBufMB);
+                }
+
+                if (ImGui::TreeNode("Buffer Details")) {
+                    ImGui::Columns(3, "rg_buf_detail_cols", true);
+                    ImGui::TextUnformatted("Name");  ImGui::NextColumn();
+                    ImGui::TextUnformatted("Bytes"); ImGui::NextColumn();
+                    ImGui::TextUnformatted("Slot");  ImGui::NextColumn();
+                    ImGui::Separator();
+                    for (const auto& e : s.bufferEntries) {
+                        ImGui::Text("%s", e.name.c_str()); ImGui::NextColumn();
+                        ImGui::Text("%llu", static_cast<unsigned long long>(e.bytes)); ImGui::NextColumn();
+                        if (e.slotIndex >= 0) ImGui::Text("%d", e.slotIndex);
+                        else                  ImGui::TextUnformatted("-");
+                        ImGui::NextColumn();
+                    }
+                    ImGui::Columns(1);
+                    ImGui::TreePop();
+                }
             }
 
             // Per-texture detail table

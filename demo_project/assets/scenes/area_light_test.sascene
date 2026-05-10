@@ -78,14 +78,9 @@
     {
       "id": 2,
       "materialOverride": {
-        "materialAsset": "2b32fe56-31ae-4af7-8304-461fa721c53b",
+        "materialAsset": "5ec599b2-0f1a-49cf-87ff-971e687d1da3",
         "scalars": {
-          "baseColorFactor": [
-            0.20000000298023224,
-            0.20000000298023224,
-            0.20000000298023224,
-            1.0
-          ]
+          "roughnessFactor": 1.0
         },
         "textures": {}
       },
@@ -445,15 +440,27 @@
     "backgroundMode": "SolidColor",
     "brdfLut": "ba667a20-2b4d-4a24-bd80-949820265af3",
     "postProcess": {
-      "bloomEnabled": false,
+      "bloomEnabled": true,
+      "bloomMipLevels": 3,
       "bloomRadius": 0.800000011920929,
       "bloomStrength": 0.41999998688697815,
       "bloomThreshold": 0.6800000071525574,
       "exposure": 0.5299999713897705,
       "gamma": 2.200000047683716,
       "lutStrength": 1.0,
+      "ssaoBias": 0.02500000037252903,
+      "ssaoBlurSharpness": 10.0,
+      "ssaoDirections": 4,
+      "ssaoEnabled": true,
+      "ssaoRadius": 32.0,
+      "ssaoSteps": 3,
+      "ssaoStrength": 1.0,
+      "taaAntiGhosting": true,
+      "taaBlendMotion": 0.5,
+      "taaBlendStatic": 0.10000000149011612,
+      "taaEnabled": true,
       "tonemapLut": "911aa46e-4510-4bab-bc15-0013ab7ac82f",
-      "tonemapMode": "LUT"
+      "tonemapMode": "Builtin"
     },
     "prefilteredEnv": "006e3a40-137e-4773-9e5c-2fe48868dacf",
     "sh9": "6a64a606-b3fc-4bee-803d-f783d1c8ee33",

@@ -5,6 +5,7 @@
 #include "ui/IAssetInspector.hpp"
 #include "ui/panels/SceneHierarchyPanel.hpp"
 
+#include <imgui.h>
 #include <entt/entt.hpp>
 #include <filesystem>
 #include <functional>
@@ -19,6 +20,7 @@ namespace StellarAlia::Resource { class AssetRegistry; }
 namespace StellarAlia::Editor {
 
 class AssetsPanel;
+class EditorIconCache;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // InspectorPanel — shows component details for the entity selected in the
@@ -61,6 +63,13 @@ public:
     // Wire the Assets panel so the Inspector can show asset details on selection.
     void SetAssetsPanel(const AssetsPanel* panel) { m_assetsPanel = panel; }
 
+    // Wire the icon cache for image thumbnail display.
+    void SetIconCache(EditorIconCache* cache);
+
+    // Wire the FA6 icon font for component drawers that render inline icons.
+    void SetIconFont(ImFont* font);
+
+
     // Register a component type in the "Add Component" popup.
     // Entries are grouped by category in registration order.
     void RegisterComponent(ComponentDescriptor desc);
@@ -79,6 +88,8 @@ private:
     const Resource::AssetRegistry*  m_registry   = nullptr;
     const MaterialManager*          m_matMgr     = nullptr;
     const AssetsPanel*              m_assetsPanel = nullptr;
+    EditorIconCache*                m_iconCache   = nullptr;
+    ImFont*                         m_iconFont    = nullptr;
 
     std::vector<std::unique_ptr<IComponentDrawer>> m_drawers;
     std::vector<ComponentDescriptor>               m_addableComponents;

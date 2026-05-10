@@ -112,6 +112,7 @@ VulkanDevice::~VulkanDevice() {
 
     if (m_samplerLinearRepeat)  vkDestroySampler(m_device, m_samplerLinearRepeat,  nullptr);
     if (m_samplerNearestRepeat) vkDestroySampler(m_device, m_samplerNearestRepeat, nullptr);
+    if (m_emptyDescLayout) vkDestroyDescriptorSetLayout(m_device, m_emptyDescLayout, nullptr);
     if (m_descPool)             vkDestroyDescriptorPool(m_device, m_descPool, nullptr);
 
     // Immediate submit infrastructure
@@ -226,6 +227,22 @@ void VulkanDevice::InitPhysicalDevice() {
     std::vector<VkPhysicalDevice> devices(count);
     vkEnumeratePhysicalDevices(m_instance, &count, devices.data());
 
+    // Score each candidate; pick the highest.  Discrete GPU always beats integrated.
+    auto deviceTypeScore = [](VkPhysicalDeviceType t) -> int {
+        switch (t) {
+            case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   return 1000;
+            case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return  100;
+            case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    return   50;
+            case VK_PHYSICAL_DEVICE_TYPE_CPU:            return   10;
+            default:                                     return    1;
+        }
+    };
+
+    VkPhysicalDevice bestDevice   = VK_NULL_HANDLE;
+    uint32_t         bestFamily   = 0;
+    int              bestScore    = -1;
+    std::string      bestName;
+
     for (auto pd : devices) {
         VkPhysicalDeviceProperties props{};
         vkGetPhysicalDeviceProperties(pd, &props);
@@ -265,14 +282,23 @@ void VulkanDevice::InitPhysicalDevice() {
         vkGetPhysicalDeviceFeatures2(pd, &features2);
         if (!features13.dynamicRendering || !features13.synchronization2) continue;
 
-        m_physDevice     = pd;
-        m_graphicsFamily = static_cast<uint32_t>(gfxFamily);
-
-        SA_LOG_INFO("VulkanDevice: selected GPU '{}'", props.deviceName);
-        return;
+        const int score = deviceTypeScore(props.deviceType);
+        SA_LOG_INFO("VulkanDevice: candidate GPU '{}' (score {})", props.deviceName, score);
+        if (score > bestScore) {
+            bestScore  = score;
+            bestDevice = pd;
+            bestFamily = static_cast<uint32_t>(gfxFamily);
+            bestName   = props.deviceName;
+        }
     }
 
-    throw std::runtime_error("No suitable GPU found (need graphics+present, swapchain, Vulkan 1.3)");
+    if (bestDevice == VK_NULL_HANDLE)
+        throw std::runtime_error("No suitable GPU found (need graphics+present, swapchain, Vulkan 1.3)");
+
+    m_physDevice     = bestDevice;
+    m_graphicsFamily = bestFamily;
+    m_gpuName        = bestName;
+    SA_LOG_INFO("VulkanDevice: selected GPU '{}'", m_gpuName);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -462,6 +488,15 @@ void VulkanDevice::DestroySwapchain() {
 }
 
 void VulkanDevice::RecreateSwapchain() {
+    // On Windows, minimizing the window causes the surface to report currentExtent={0,0}.
+    // vkCreateSwapchainKHR requires a non-zero extent, so bail out and keep the existing
+    // swapchain intact. The next frame's vkAcquireNextImageKHR will return OUT_OF_DATE
+    // again, retriggering this path until the window is restored.
+    VkSurfaceCapabilitiesKHR caps{};
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(m_physDevice, m_surface, &caps);
+    if (caps.currentExtent.width == 0 || caps.currentExtent.height == 0)
+        return;
+
     vkDeviceWaitIdle(m_device);
     DestroySwapchain();
     CreateSwapchain(m_swapchainExtent.width, m_swapchainExtent.height, m_vsync);
@@ -698,6 +733,13 @@ void VulkanDevice::InitDescriptorPool() {
 // InitDefaultSamplers + ImmediateSubmit
 // ─────────────────────────────────────────────────────────────────────────────
 void VulkanDevice::InitDefaultSamplers() {
+    // Empty descriptor set layout — 0 bindings, used as a placeholder to preserve
+    // set-index positions in pipeline layouts when set=0 is absent but set=1+ are needed.
+    VkDescriptorSetLayoutCreateInfo emptyCI{};
+    emptyCI.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    emptyCI.bindingCount = 0;
+    vkCreateDescriptorSetLayout(m_device, &emptyCI, nullptr, &m_emptyDescLayout);
+
     auto makeSampler = [&](VkFilter filter, VkSamplerAddressMode wrap) -> VkSampler {
         VkSamplerCreateInfo ci{};
         ci.sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -853,6 +895,18 @@ void VulkanDevice::UploadBufferData(RHIBufferHandle handle,
     }
 }
 
+void VulkanDevice::ReadBufferData(RHIBufferHandle handle,
+                                   void* data, uint64_t size, uint64_t offset) {
+    if (!handle.IsValid() || handle.index >= m_buffers.size()) return;
+    const auto& entry = m_buffers[handle.index];
+    if (!entry.valid || !entry.desc.cpuVisible) return;
+
+    vmaInvalidateAllocation(m_allocator, entry.alloc, offset, size);
+    VmaAllocationInfo info{};
+    vmaGetAllocationInfo(m_allocator, entry.alloc, &info);
+    memcpy(data, static_cast<const uint8_t*>(info.pMappedData) + offset, size);
+}
+
 void VulkanDevice::DestroyBuffer(RHIBufferHandle handle) {
     if (!handle.IsValid() || handle.index >= m_buffers.size()) return;
     auto& entry = m_buffers[handle.index];
@@ -867,11 +921,12 @@ void VulkanDevice::DestroyBuffer(RHIBufferHandle handle) {
 RHITextureHandle VulkanDevice::CreateTexture(const RHITextureDesc& desc) {
     VkImageCreateInfo ici{};
     ici.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    ici.imageType     = VK_IMAGE_TYPE_2D;
+    const bool is3D   = (desc.depth > 1 && !desc.cubemap);
+    ici.imageType     = is3D ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
     ici.format        = ToVkFormat(desc.format);
     ici.extent        = {desc.width, desc.height, desc.depth};
     ici.mipLevels     = desc.mipLevels;
-    ici.arrayLayers   = desc.cubemap ? 6u : desc.arrayLayers;
+    ici.arrayLayers   = desc.cubemap ? 6u : (is3D ? 1u : desc.arrayLayers);
     if (desc.cubemap) ici.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     ici.samples       = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
@@ -908,9 +963,11 @@ RHITextureHandle VulkanDevice::CreateTexture(const RHITextureDesc& desc) {
     VkImageViewCreateInfo viewCI{};
     viewCI.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewCI.image                           = img;
-    const uint32_t layers = desc.cubemap ? 6u : desc.arrayLayers;
+    const uint32_t layers = desc.cubemap ? 6u : (is3D ? 1u : desc.arrayLayers);
     if (desc.cubemap)
         viewCI.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
+    else if (is3D)
+        viewCI.viewType = VK_IMAGE_VIEW_TYPE_3D;
     else if (layers > 1)
         viewCI.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
     else
@@ -1239,6 +1296,7 @@ void VulkanDevice::WriteDescriptorTexture(RHIDescSetHandle dsHandle,
                                            RHITextureHandle textureHandle) {
     if (!dsHandle.IsValid()      || dsHandle.index      >= m_descSets.size())      return;
     if (!textureHandle.IsValid() || textureHandle.index >= m_textures.size())      return;
+    if (!m_textures[textureHandle.index].valid)                                    return;
 
     VkDescriptorImageInfo imgInfo{};
     imgInfo.sampler     = m_samplerLinearRepeat;  // default sampler; allow per-binding override later
@@ -1380,12 +1438,16 @@ void VulkanDevice::WriteDescriptorBuffer(RHIDescSetHandle dsHandle,
 // CreatePipeline / DestroyPipeline
 // ─────────────────────────────────────────────────────────────────────────────
 RHIPipelineHandle VulkanDevice::CreatePipeline(const RHIPipelineDesc& desc) {
-    // Collect descriptor set layouts into a VkPipelineLayout
+    // Collect descriptor set layouts into a VkPipelineLayout, preserving slot indices.
+    // Invalid slots are filled with m_emptyDescLayout so that valid layouts land at the
+    // correct set index (e.g., set=1 must be pSetLayouts[1], not pSetLayouts[0]).
     std::vector<VkDescriptorSetLayout> setLayouts;
     for (uint32_t i = 0; i < desc.descriptorLayoutCount; ++i) {
         const auto& h = desc.descriptorLayouts[i];
         if (h.IsValid() && h.index < m_descLayouts.size() && m_descLayouts[h.index].valid)
             setLayouts.push_back(m_descLayouts[h.index].layout);
+        else
+            setLayouts.push_back(m_emptyDescLayout);
     }
 
     VkPushConstantRange pushRange{};
@@ -1574,12 +1636,16 @@ void VulkanDevice::DestroyPipeline(RHIPipelineHandle handle) {
 // CreateComputePipeline
 // ─────────────────────────────────────────────────────────────────────────────
 RHIPipelineHandle VulkanDevice::CreateComputePipeline(const RHIComputePipelineDesc& desc) {
-    // Pipeline layout (descriptor sets + push constants)
+    // Pipeline layout (descriptor sets + push constants).
+    // Preserve slot indices: fill invalid entries with m_emptyDescLayout so that
+    // valid layouts land at the correct set index (e.g. set=1 → pSetLayouts[1]).
     std::vector<VkDescriptorSetLayout> setLayouts;
     for (uint32_t i = 0; i < desc.descriptorLayoutCount; ++i) {
         const auto& h = desc.descriptorLayouts[i];
         if (h.IsValid() && h.index < m_descLayouts.size() && m_descLayouts[h.index].valid)
             setLayouts.push_back(m_descLayouts[h.index].layout);
+        else
+            setLayouts.push_back(m_emptyDescLayout);
     }
 
     VkPushConstantRange pushRange{};

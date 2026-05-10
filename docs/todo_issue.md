@@ -1,43 +1,20 @@
----
-
-## Issue #34 — 全局快捷键配置窗口（含配置缓存）✅ DONE
-<!-- ActionDef::userConfigurable 过滤白名单；EditorShortcutConfig(Load/Save/Reload/Import/Export/ApplyTo) 直接存 BindingDef；ShortcutsPanel 动态枚举+按键捕获+Default/Reload/Import/Export 按钮+内置路径只读；InputSystem 严格 modifier 匹配(HasExtraModifiers)修复 Ctrl+Shift+S 落回 Ctrl+S 问题 -->
-
----
-
----
-
-## Issue #17 — 双击交互升级：短双击聚焦相机 / 长双击重命名 ✅ DONE
-<!-- DoubleClickClassifier + EditorCamera::FocusOn；Hierarchy/Assets 多选(Ctrl/Shift/Ctrl+A)；短双击→聚焦/长双击→内联重命名(0.20s 阈值)；Composite 快捷键(SelectAll/NewScene/SaveScene/EntityDuplicate)；TextInput map gate 修复 WASD/快捷键冲突 -->
-
----
-
-## 待办issue
+﻿## 待办issue
 
 24. **[低优先级] 长耗时操作进度反馈**
     - **启动进度条**（难度高）：`OnAttach` 在渲染循环前同步执行，ImGui 无法渲染。需重构为两阶段延迟初始化或独立 splash screen 渲染通道，暂不做。
     - **Reimport All 进度条**（难度中，最有实际价值）：`ReimportDir` 同步阻塞 UI。改法：将其拆成逐帧 N 个文件的状态机，`OnDraw` 期间推进并用 `ImGui::ProgressBar` + modal 显示；或移入工作线程 + 原子进度计数器。
     - 前置条件：依赖 `AssetsPanel` 暴露异步迭代接口；待项目素材量增大后再做。
 27. 美化编辑器：骨骼改用球+锥绘制而不是线
-28. 美化编辑器：灯光、相机等不可视物体添加icon贴图作为标识，素材由我提供
+28. 美化编辑器：灯光、相机等不可视物体添加icon贴图作为标识，素材由我提供;添加引擎logo，注册.saproject的图标为引擎logo；为各种引擎素材添加图标；asset panel可以显示文件对应图标并调节显示大小；
 29. 引入挂载脚本 并提炼现有运行时库暴露给脚本调用
-30. 屏幕空间射线求交：编辑器中点击选中物体，拖拽物体到场景
 31. animator编辑器 imguizmo
 32. 材质可视化编程 imguizmo
-33. 场景物体：贝塞尔曲线 imguizmo
+33. 场景物体：贝塞尔曲线与相机移动 imguizmo 脚本issue完成后
 36. **[极低优先级] RHI VkMemory 级别别名（Approach A）**
-
-
----
-
-## Issue #35 — 渲染资源内存统计 ✅ DONE
-<!-- RGStats 结构体（Execute() 末尾填充）+ CalcTextureBytes/FormatName static helpers + SceneRenderer::GetRenderGraph() + SettingsPanel "Render Stats" 折叠区（counts + MB + per-texture detail table） -->
-
----
-
-## Issue #16 — RG 资源别名（RenderGraph Handle 复用）✅ DONE
-<!-- RGPhysicalSlot + Compile Phase A/B 生命周期分析 + 贪心区间着色 + Execute per-slot barrier 状态跟踪修复 Vulkan layout 验证错误；RGStats 加 importedBytesLogical/Entry::slotIndex；IRHIDevice::GetMemoryStats + RHIMemoryStats（VMA 堆预算 + 逻辑字节统计）；PlatformMemory.hpp 跨平台 CPU RSS；PerformancePanel 替代 SettingsPanel 性能统计展示（默认关闭）；Windows 菜单加 Open All / Close All -->
-
+23. 帧率优化
+24. 透明材质面片（植物等）
+54. **[低优先级，待复现] Reimport 后内存缓存未失效导致 mesh 显示异常** — Reimport 更新 cook cache 磁盘数据后，`ResourceManager` 按 UUID 缓存的 GPU mesh handle 未刷新，渲染仍用旧数据；重启后缓存清空才恢复正常。根因：`ReimportDir` 完成后未调用 `ClearProjectAssets()`。修复方向：reimport 完成时触发 `ResourceManager::ClearProjectAssets()`（同 Issue #38 逻辑，触发时机改为 reimport 后）。现象：曾在 BoomBox.glb（带动画）上观察到固定面片破碎，无法稳定复现。
+23. 程序化天空盒，选择一个物体作为光源方向
 
 ---
 
@@ -55,376 +32,6 @@
 
 - `SkinnedMeshComponent.skeletonAsset` picker（独立指定骨骼资产）
 - 多 mesh 共用同一骨骼
-
----
-
-## Issue #25 — 项目结构模板，创建/打开项目面板 ✅ DONE
-新增 `ProjectManager` + `ProjectBrowserPanel`（启动模态，含创建/打开/最近三区）；`EditorMode::LoadProject` 热切换项目；VFS 升级为双路径（引擎缓存固定 + 项目缓存动态）；`Application::UpdateProjectPaths` 同步传播至 VFS 和 SceneRenderer；`SA_DEBUG_PROJECT` CMake 选项绕过浏览器直接加载 `SA_PROJECT_DIR`。
-
----
-
-## Issue #37 — Core 日志接入编辑器 Console 面板 ✅ DONE
-新增 `EditorLogCapture`（RAII `spdlog::base_sink` 包装，2000 条环形缓冲，线程安全 `Drain()`）；`EditorMode::OnAttach` 注入 sink，`OnDetach` 自动移除；`ConsolePanel` 扩展为两 Tab — Diagnostics（原有，`EditorDiagnostics`）+ Engine Logs（被动镜像 `SA_LOG_*`，T/D/I/W/E/C 级别独立过滤，默认 INFO+ 开启）。
-
----
-
-## Issue #38 — 切换项目时清空材质/纹理缓存
-
-**优先级：中**
-
-### 问题
-
-`MaterialManager` 和 `ResourceManager` 以 `AssetID`（UUID）为键缓存材质和纹理。  
-切换项目后旧的缓存条目不会被清空：若新旧项目存在 UUID 碰撞（小概率但理论上可能），
-或旧项目材质实例仍被 `DrawItem` 持有（Scene 未完全重建），可能导致错误的材质显示。
-
-### 设计方向
-
-在 `EditorMode::LoadProject` 中，执行 `scene.Clear()` 之后、`ApplyWorldSettings` 之前：
-
-```cpp
-m_app->GetResourceManager().ClearProjectCache();  // 清空材质、纹理（保留内置）
-m_app->GetMaterialManager().ClearInstanceCache();  // 清空 m_cachedInstances
-```
-
-- `ResourceManager::ClearProjectCache()`：销毁并清除 `m_textures` 和 `m_meshes`（保留 `m_white1x1` 和 `m_fileTextures`）
-- `MaterialManager::ClearInstanceCache()`：清除 `m_cachedInstances`
-
-内置纹理（`m_white1x1`）和文件纹理（`m_fileTextures`，用于 ImGui 图标等）不受影响。
-
-**不做**：跨项目共享缓存（当前规模下无必要）。
-
----
-
-## Issue #39 — 新项目首次 Cook：项目内资产 cook_cache 为空时的提示
-
-**优先级：低**
-
-### 问题
-
-用户通过 `ProjectBrowserPanel` 创建新项目后立即加载，`cook_cache/` 为空，
-所有 `ResolveCookedPath` 调用均回落至引擎 cook cache——项目自定义资产无法显示，
-但没有任何提示，用户不知道需要运行 cook 步骤。
-
-### 设计方向
-
-- 在 `EditorMode::LoadProject` 完成后，检查项目 `cook_cache/` 是否为空。
-- 若为空且 `assets/` 下有用户资产（`.sameta` 文件存在），在 Console 面板打印  
-  `WARN: Project cook cache is empty — run "CookAssets" to import project assets.`
-- 不阻断加载流程，仅给出提示。
-
----
-
-## Issue #40 — 规范化现有后处理参数（PostProcessSettings）
-
-**优先级：高（后续所有 PP issue 的前置）**
-
-### 目标
-
-将后处理参数从 `RendererConfig`（init-time）和零散 `WorldSettings` 字段统一到 `PostProcessSettings` 结构体，实现运行时开关和参数热更新，不需要重建 Renderer。消除 BloomFeature 内三处硬编码常量（threshold=1.0, strength=0.4, radius array）。
-
-### 问题现状（调研结果）
-
-| 参数 | 当前位置 | 问题 |
-|------|---------|------|
-| `bloomEnabled` | `RendererConfig` (init-time) | 不能运行时切换 |
-| `bloomMipCount` | `RendererConfig` (init-time) | 影响 descriptor set 数量，保留 |
-| `bloomThreshold=1.0` / `knee=0.1` | `SceneRenderer.cpp:1539` 硬编码 | 无法调节 |
-| `bloomStrength=0.4` | `SceneRenderer.cpp:1627` 硬编码 | 无法调节 |
-| upsample `radius` per-mip array | `SceneRenderer.cpp:1596` 硬编码 | 无法调节 |
-| `exposure` / `gamma` / `lutStrength` | `WorldSettings` + `TonemapFeature::m_*` | 已可热更，但入口分散 |
-| `tonemapMode` / `tonemapLut` | `WorldSettings` | 已可热更（ApplyWorldSettings feature 替换） |
-| `builtinTonemap` | `RendererConfig` (init-time) | 与 tonemapMode 重复，可删除 |
-
-### 设计
-
-#### PostProcessSettings 结构体
-
-位置：`src/function/scene/Scene.hpp`，定义在 `WorldSettings` 之前，由 `WorldSettings` 内嵌。
-
-```cpp
-struct PostProcessSettings {
-    // ── Bloom ───────────────────────────────────────────────────────────
-    bool  bloomEnabled   = true;
-    float bloomThreshold = 1.0f;   // 亮度截止（knee width 固定为 threshold×0.1）
-    float bloomStrength  = 0.4f;   // composite 权重
-    float bloomRadius    = 1.0f;   // 最宽一级 upsample radius；后续每级 ×0.85
-
-    // ── Tonemap ─────────────────────────────────────────────────────────
-    // 注：tonemapMode/tonemapLut 迁移自 WorldSettings
-    enum class TonemapMode { Builtin, LUT } tonemapMode = TonemapMode::Builtin;
-    AssetID tonemapLut;
-    float exposure    = 1.0f;
-    float gamma       = 2.2f;   // 保留字段，当前 shader 未用（swapchain 走 sRGB）
-    float lutStrength = 1.0f;
-
-    // ── 后续效果占位（enabled=false → pass 跳过，无实现） ──────────────
-    bool ssaoEnabled       = false;
-    bool taaEnabled        = false;
-    bool dofEnabled        = false;
-    bool motionBlurEnabled = false;
-};
-```
-
-#### WorldSettings 变化
-
-```cpp
-struct WorldSettings {
-    // Background（不变）
-    ...
-
-    // 删除以下字段（迁移至 pp）：
-    // - TonemapMode tonemapMode
-    // - AssetID     tonemapLut
-    // - float       exposure
-    // - float       gamma
-    // - float       lutStrength
-
-    PostProcessSettings pp;   // 新增
-};
-```
-
-#### RendererConfig 变化
-
-```cpp
-struct RendererConfig {
-    bool     shadowEnabled  = true;
-    uint32_t shadowMapSize  = 2048;
-    // 删除：bool bloomEnabled（迁移至 WorldSettings::pp）
-    int      bloomMipCount  = 3;   // 保留（影响 descriptor set layout）
-    // 删除：bool builtinTonemap（由 pp.tonemapMode 取代）
-};
-```
-
-#### BloomFeature 变化
-
-```cpp
-class BloomFeature final : public RenderFeature {
-public:
-    // 新增运行时可更新字段
-    bool  m_enabled   = true;
-    float m_threshold = 1.0f;
-    float m_strength  = 0.4f;
-    float m_radius    = 1.0f;   // 最宽一级；每级乘 0.85
-    // AddPasses 检查 m_enabled，返回 early 跳过所有 pass
-    // ThresholdPC 用 m_threshold（knee = m_threshold × 0.1）
-    // CompositePC 用 m_strength
-    // UpsamplePC 用 m_radius × pow(0.85f, layerIndex)
-    ...
-};
-```
-
-#### ApplyWorldSettings 变化
-
-```cpp
-void SceneRenderer::ApplyWorldSettings(WorldSettings& ws, bool updateIBL) {
-    const auto& pp = ws.pp;
-
-    // Bloom
-    if (auto* bloom = FindFeature<BloomFeature>()) {
-        bloom->m_enabled   = pp.bloomEnabled;
-        bloom->m_threshold = pp.bloomThreshold;
-        bloom->m_strength  = pp.bloomStrength;
-        bloom->m_radius    = pp.bloomRadius;
-    }
-
-    // Tonemap（现有 feature 替换逻辑迁移，从 ws.tonemapMode → pp.tonemapMode）
-    ...exposure/lutStrength 同样改读 pp.*...
-}
-```
-
-#### SceneSerializer 变化
-
-`WorldSettings` JSON block 新增 `"postProcess"` 子对象，旧的 `tonemapMode/exposure/gamma/lutStrength/tonemapLut` key 从顶层移入，保持向后兼容（读取时先尝试 `postProcess`，再 fallback 到顶层 key）。
-
-#### PostProcessPanel（新建独立窗口）
-
-位置：`editor/ui/panels/PostProcessPanel.hpp/.cpp`，注册为独立 `IEditorWindow`（默认开启）。
-
-```cpp
-class PostProcessPanel : public IEditorWindow {
-public:
-    PostProcessPanel(Scene* scene, SceneRenderer* renderer);
-    std::string_view GetName() const override { return "Post Process"; }
-    void OnDraw() override;
-private:
-    Scene*         m_scene    = nullptr;
-    SceneRenderer* m_renderer = nullptr;
-};
-```
-
-`OnDraw` 布局：
-- **Bloom** CollapsingHeader：`Checkbox("Bloom")` → disabled group：threshold / strength / radius sliders
-- **Tonemap** CollapsingHeader：RadioButton(Builtin/LUT) + exposure / gamma (Builtin) / lut picker + lutStrength (LUT)
-
-任意参数改动后调用 `m_renderer->ApplyWorldSettings(m_scene->GetWorldSettings(), false)` 热更新。
-
-#### WorldSettingsPanel 变化
-
-删除现有 Tonemap 区域（exposure/gamma/lutStrength/tonemapMode/tonemapLut），这些参数迁移至 `PostProcessPanel`。`WorldSettingsPanel` 只保留 Background（SolidColor/Skybox）和 IBL 相关控制。
-
-#### 数据流关系图
-
-```
-WorldSettings::pp (PostProcessSettings)
-        │
-        ├── WorldSettingsPanel (编辑 → ApplyWorldSettings)
-        │
-        └── SceneRenderer::ApplyWorldSettings()
-                │
-                ├── BloomFeature::m_enabled/threshold/strength/radius
-                │       └── AddPasses → ThresholdPC / UpsamplePC / CompositePC
-                │
-                └── TonemapFeature::m_exposure / m_gamma
-                    LutTonemapFeature::m_exposure / m_lutStrength
-                        └── AddPasses → TonemapPC / LutTonemapPC
-```
-
-### 实施步骤
-
-- [ ] 1. `Scene.hpp`：定义 `PostProcessSettings`；`WorldSettings` 删除 tonemap 散落字段，内嵌 `pp`
-- [ ] 2. `SceneRenderer.hpp`：`RendererConfig` 删除 `bloomEnabled`/`builtinTonemap`；`BloomFeature` 加 `m_enabled/m_threshold/m_strength/m_radius`
-- [ ] 3. `SceneRenderer.cpp`：`Init()` 从 `m_config.bloomMipCount` 构造 BloomFeature（不再用 `bloomEnabled`）；`ApplyWorldSettings` 读 `ws.pp.*` 更新 Bloom + Tonemap feature 字段；`BloomFeature::AddPasses` 改用成员字段替换三处硬编码
-- [ ] 4. `SceneSerializer.cpp`：`SaveWorldSettings` 输出 `"postProcess"` 子对象；`LoadWorldSettings` 先读子对象 fallback 到旧顶层 key
-- [ ] 5. 新建 `PostProcessPanel.hpp/.cpp`（Bloom + Tonemap 控制）；`WorldSettingsPanel` 删除 Tonemap 区；`EditorMode` 注册 PostProcessPanel
-- [ ] 6. `PerformancePanel.cpp`：Render Stats 区添加当前 PP 开关状态一行摘要
-
-### 边界情况与约束
-
-| 场景 | 处理 |
-|------|------|
-| `bloomMipCount` 变化 | 仍需重建 descriptor set；保留在 RendererConfig，不暴露运行时修改 |
-| `bloomEnabled = false` | `BloomFeature::AddPasses` 检查 `m_enabled`，直接 return；不从 feature list 移除（避免 reload overhead） |
-| 旧 `.sascene` 文件（无 `postProcess` key）| Serializer fallback 读顶层 `tonemapMode/exposure` 等字段，保持兼容 |
-| `pp.tonemapMode` 切换 | 复用现有 ApplyWorldSettings 的 feature-slot 替换逻辑，只是读取路径从 `ws.tonemapMode` → `ws.pp.tonemapMode` |
-| `gamma` 字段实际未在 shader 使用 | 保留字段（swapchain sRGB），不删除；slider 范围 1.0–3.0 不变 |
-
-**不做**：实现 SSAO/TAA/DoF/MotionBlur pass（仅添加占位 bool）；修改 bloom shader 代码（push constant 布局已兼容）；修改 `bloomMipCount` 为运行时。
-
-### 受益 issues
-
-- **#41 SSAO**：实现时只需在 ApplyWorldSettings 加读 `pp.ssaoEnabled` 的逻辑，入口已统一
-- **#42 TAA**：同上 `pp.taaEnabled`
-- **#44 Color Grading**：LUT pipeline 已在 LutTonemapFeature 中，参数统一后扩展更容易
-- **#45 DoF / #46 MotionBlur**：占位 bool 已就位
-
----
-
-## Issue #41 — SSAO（屏幕空间环境光遮蔽）
-
-**优先级：高（依赖 #40）**
-
-### 目标
-
-在 DeferredLighting 前插入 GTAO（Ground-Truth Ambient Occlusion）pass，输出 R8 AO 纹理，DeferredLighting shader 将其乘入环境光项，提升接触阴影质感。
-
-### 设计
-
-```
-GBuffer → SSAO_Main [读 depth + normal(RT1)] → SSAO_Blur [横向] → SSAO_BlurV [纵向]
-        → AO 纹理(R8) → DeferredLighting 读取
-```
-
-- 新增瞬态纹理：`ao` (R8, viewport)，`aoBlurH` (R8, viewport)——可 alias 到同一 slot
-- GTAO 采样：8 ray × 4 step（可配置），interleaved noise 降噪
-- Blur：双边滤波（depth-aware），保留锐利边缘
-- DeferredLighting shader 新增 `aoTex` 输入，`ambient *= ao`
-- `PostProcessSettings::ssaoEnabled` 控制，disabled 时 ao 固定为 1.0
-
-### 参数（PostProcessSettings）
-
-```cpp
-bool  ssaoEnabled  = true;
-float ssaoRadius   = 0.5f;   // 世界空间采样半径
-float ssaoStrength = 1.0f;   // AO 强度
-int   ssaoSamples  = 8;      // ray 数（质量档位）
-```
-
----
-
-## Issue #42 — TAA（时间性抗锯齿）
-
-**优先级：高（为 SSAO/SSR 降噪提供基础，依赖 #40）**
-
-### 目标
-
-Jitter + 历史帧混合，消除锯齿，同时为后续 SSAO/SSR 提供时域降噪基础。
-
-### 设计
-
-- **Velocity Buffer**：GBuffer pass 新增 RG16F `velocity` 附件，存储每像素屏幕空间速度（当前帧 MVP × 上一帧 MVP 反推）
-- **History Buffer**：1 张 RGBA16F viewport-sized 持久纹理（跨帧，不参与 aliasing）
-- **TAA Resolve pass**（Tonemap 之前）：
-  - Jitter 当前帧投影矩阵（Halton 序列，8/16 帧循环）
-  - 重投影历史帧，neighborhood clamping 消除 ghost
-  - 混合比：`lerp(history, current, 0.1)`（静止）/ `0.5`（运动区域）
-  - 输出写回 hdrTex 并更新 history buffer
-- Resize 时 invalidate history（同 depth/shadowMap 逻辑）
-
-### 参数（PostProcessSettings）
-
-```cpp
-bool  taaEnabled        = true;
-float taaBlendStatic    = 0.1f;  // 静止区混合比
-float taaBlendMotion    = 0.5f;  // 运动区混合比
-bool  taaAntiGhosting   = true;  // neighborhood clamp
-```
-
----
-
-## Issue #43 — Auto Exposure（自动曝光 / 眼适应）
-
-**优先级：中（依赖 #40）**
-
-### 目标
-
-每帧从 HDR buffer 计算亮度直方图，平滑插值目标曝光值（模拟人眼适应），替代手动 exposure 参数。
-
-### 设计
-
-- **Histogram compute pass**（HDR → 256-bin R32 buffer，1 dispatch）
-- **Exposure resolve compute pass**（读直方图 → 写 1×1 R32F 持久 buffer）
-  - 加权平均排除极端值（可配置低/高截断百分位）
-  - `targetEV = lerp(currentEV, measuredEV, deltaTime * adaptSpeed)`
-- Tonemap push constant 读取 exposure buffer 替代 WorldSettings::exposure
-
-### 参数
-
-```cpp
-bool  autoExposureEnabled = false;
-float evMin        = -3.0f;  // 最小曝光值（EV100）
-float evMax        =  5.0f;  // 最大曝光值
-float adaptSpeed   =  2.0f;  // 适应速度（秒）
-float lowPercent   =  0.45f; // 直方图低截断
-float highPercent  =  0.95f; // 直方图高截断
-```
-
----
-
-## Issue #44 — Color Grading（独立色彩校正）
-
-**优先级：中（依赖 #40，可与 Tonemap 合并成 LUT bake）**
-
-### 目标
-
-在 Tonemap pass 之后（或合并其中）提供 Lift/Gamma/Gain 和 HSL 控制，最终通过 LUT bake 合并为一次采样，零额外开销。
-
-### 设计
-
-- `PostProcessSettings` 增加 color grading 参数
-- **LUT bake pass**（首帧或参数变化时执行，非每帧）：将 tonemap + color grading 烘焙进 32³ RGBA16F 3D LUT
-- Tonemap pass 改为直接采样烘焙 LUT，参数变化时标脏重烘焙
-- `WorldSettingsPanel` 新增色彩校正区：Lift/Gamma/Gain 颜色拾取器 + Saturation/Contrast 滑条
-
-### 参数
-
-```cpp
-glm::vec3 lift    = {0,0,0};  // 阴影偏移
-glm::vec3 gamma   = {1,1,1};  // 中间调
-glm::vec3 gain    = {1,1,1};  // 高光
-float saturation  = 1.0f;
-float contrast    = 1.0f;
-```
 
 ---
 
@@ -561,5 +168,589 @@ Froxel（视锥体体素）光线积分，支持方向光散射 + 环境 fog。
 
 ---
 
-## Issue #50 — 面板全局隐藏/恢复快捷键 ✅ DONE
-<!-- EditorUI::m_panelsHidden + TogglePanelsHidden()；DrawPanels() loop 加 || m_panelsHidden 短路不改变 isOpen；"TogglePanels" action 默认 F8 可配置；Windows 菜单加 Toggle Panels 带对勾项 -->
+## Issue #55 — LOD（Level-of-Detail）系统
+
+**优先级：中（Issue #23 帧率优化 子任务；收益最高的几何体优化）**
+
+### 目标
+
+对场景中的 mesh 按每帧屏幕覆盖率自动选择简化级别（LOD0/1/2/3），使靠近时顶点数与现在持平、远离时大幅降低，解决 BVH per-object 剔除无法覆盖的高面数模型瓶颈。
+
+### 设计
+
+#### Cook Pipeline 扩展（`tools/cook/`）
+
+新增 `meshoptimizer` 依赖（MIT 许可，header-only-ish），Cook 时为每个 submesh 生成 N-1 个简化级别：
+
+```cpp
+// tools/cook/MeshImporter.cpp — 伪代码
+for each submesh:
+    lodLevels[0] = {原始 indices, indexCount}
+    for lod in 1..kMaxLODs-1:
+        targetCount = indexCount * pow(0.5f, lod)   // 50%, 25%, 12.5%
+        float err = 0.f
+        count = meshopt_simplify(dst, src, srcCount,
+            positions, vertexCount, stride,
+            targetCount, 0.02f * lod, 0, &err)
+        lodLevels[lod] = {appendedIndexOffset, count}
+```
+
+**CMake 变更：** `third_party/CMakeLists.txt` 添加 `meshoptimizer`（submodule 或 FetchContent，MIT 许可）。
+
+#### CookedMesh 格式扩展（`tools/cook/CookedMesh.hpp`）
+
+```cpp
+static constexpr int kMaxLODLevels = 4;
+
+struct CookedLODRange {
+    uint32_t indexOffset;
+    uint32_t indexCount;
+};
+
+struct CookedSubMesh {
+    // ... 现有字段不变 ...
+    uint32_t       lodCount = 1;                  // [1..kMaxLODLevels]
+    CookedLODRange lods[kMaxLODLevels] = {};      // lods[0] = 完整精度
+};
+// 向后兼容：lodCount==1 时行为与旧格式完全一致
+```
+
+#### DrawItem 扩展（`SceneRenderer.hpp`）
+
+```cpp
+static constexpr int kMaxDrawItemLODs = 4;
+
+struct DrawItemLOD {
+    uint32_t firstIndex;
+    uint32_t indexCount;
+};
+
+struct DrawItem {
+    // ... 现有字段 ...
+    DrawItemLOD  lods[kMaxDrawItemLODs];
+    int          lodCount    = 1;
+    glm::vec3    worldAABBMin, worldAABBMax;   // BuildDrawList 时计算（subLocalT × worldT）
+    mutable int  activeLOD   = 0;             // per-frame mutable，RenderFrame 写
+};
+```
+
+#### LOD 选择（`SceneRenderer.cpp`）
+
+BVH cull 之后、GBuffer AddPasses 之前：
+
+```cpp
+static float ComputeScreenCoverage(
+    glm::vec3 aabbMin, glm::vec3 aabbMax,
+    const glm::mat4& viewProj, uint32_t w, uint32_t h)
+{
+    // 8 角点投影到 NDC [-1,1]²，取 2D bounding rect 面积 / 4.0（归一化）
+    // 即 projected_rect_area / (w*h) 的近似
+}
+
+static int SelectLOD(float coverage, int lodCount) {
+    static const float kThresholds[] = { 0.10f, 0.02f, 0.003f };
+    for (int i = lodCount - 1; i > 0; --i)
+        if (coverage < kThresholds[i - 1]) return i;
+    return 0;
+}
+```
+
+LOD 阈值说明（屏幕覆盖率）：
+
+| LOD | 条件 |
+|-----|------|
+| 0   | coverage ≥ 10% |
+| 1   | 2% ≤ coverage < 10% |
+| 2   | 0.3% ≤ coverage < 2% |
+| 3   | coverage < 0.3% |
+
+`GBufferFeature::AddPasses` 和 `ShadowFeature::AddPasses` 改为读取 `item->lods[item->activeLOD]`。
+
+#### PerformancePanel
+
+"LOD Stats" 折叠区：各级别当前帧 DrawItem 数量分布。
+
+### 实施步骤
+
+- [ ] 1. `third_party/CMakeLists.txt` — 添加 `meshoptimizer`（FetchContent 或 submodule，MIT）
+- [ ] 2. `tools/cook/CookedMesh.hpp` — `CookedLODRange` + `CookedSubMesh::lodCount/lods[]`（向后兼容 lodCount=1）
+- [ ] 3. `tools/cook/MeshImporter.cpp` — `meshopt_simplify` 生成 LOD1/2/3；index 数据追加到末尾；记录各级别 offset+count
+- [ ] 4. `src/function/renderer/SceneRenderer.hpp` — `DrawItemLOD` 结构体；`DrawItem` 加 `lods[]/lodCount/worldAABBMin/Max/activeLOD`
+- [ ] 5. `src/function/renderer/SceneRenderer.cpp` — `BuildDrawList`：从 `CookedSubMesh.lods[]` 填充 DrawItem；计算 `worldAABBMin/Max`（local AABB × subLocalTransform × worldTransform）
+- [ ] 6. `src/function/renderer/SceneRenderer.cpp` — `RenderFrame`：LOD 选择 pass（`ComputeScreenCoverage` + `SelectLOD` → `activeLOD`）
+- [ ] 7. `GBufferFeature::AddPasses` + `ShadowFeature::AddPasses` — 用 `item->lods[item->activeLOD]` 替代原 `firstIndex/indexCount`
+- [ ] 8. `editor/ui/panels/PerformancePanel.cpp` — LOD 分布统计
+
+### 边界情况与约束
+
+| 场景 | 处理 |
+|------|------|
+| `meshopt_simplify` 返回 0 或极少三角形 | 跳过该 LOD，`lodCount` 保持较小值 |
+| Skinned mesh | `skipCull=true` 的 DrawItem 跳过 LOD 选择（activeLOD = 0），骨骼 AABB 运动中失效 |
+| worldAABBMin/Max 静态 | `BuildDrawList` 计算一次；移动物体下一帧 LOD 选择滞后 1 帧（可接受） |
+| 旧 cook cache | `.samesh` 格式变化需要 Reimport；旧格式读取时 `lodCount` 缺失视为 1 |
+| `ComputeScreenCoverage` | 每可见 DrawItem 8 次 NDC 变换，< 500 item 可接受 |
+| LOD popping | 初版不加迟滞（hysteresis），后续可加 ±5% 缓冲带 |
+
+**不做：** 运行时 LOD bias 参数 UI（初版硬编码）；Impostor billboard（LOD3 只用低面数 mesh）；GPU 驱动 LOD（见 #57）。
+
+### 受益 issues
+
+- **#23 帧率优化**：高面数模型远距帧率可提升 40–70%
+- **#57 Cluster Culling**：LOD1/2/3 的简化 mesh 可直接作为 meshlet 生成输入，形成完整层级剔除体系
+
+---
+
+## Issue #56 — Stencil Masking for Deferred Lighting
+
+**优先级：低（小优化，工程量小；收益在大背景场景）**
+
+### 目标
+
+GBuffer pass 向深度附件的模板通道写入 1（有几何体的像素），Deferred Lighting pass 开启模板测试仅处理 stencil == 1 的像素，使背景像素在固定功能阶段被拒绝，比当前 shader 内 `if (depth >= 1.0) return` 更彻底（无 fragment invocation）。
+
+副作用：alpha-test 修复后（植物 `discard` 不写深度/模板），植物镂空区域 stencil = 0，lighting 自动正确跳过。
+
+### 设计
+
+#### 改动链
+
+```
+深度格式: D32F → D24_S8（stencil 通道已有 RHIFormat 定义，barrier 逻辑已正确）
+
+RHIPipelineDesc 扩展:
+  + stencilFormat, stencilTestEnable, stencilWriteEnable
+  + RHIStencilOpState front/back（failOp/passOp/compareOp/reference/masks）
+
+VulkanDevice::CreatePipeline:
+  + ds.stencilTestEnable = true (GBuffer 写; Lighting 读)
+  + renderingCI.stencilAttachmentFormat = ToVkFormat(desc.stencilFormat)
+
+ToVkImageLayout(DepthWrite):
+  当前返回 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL（depth-only）
+  → 改为 VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL（兼容 D32F 和 D24_S8）
+
+VulkanCommandList::BeginRenderPass depthAttachment.imageLayout:
+  同上，改为 VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+```
+
+#### RHIPipelineDesc / IRHIDevice.hpp 扩展
+
+```cpp
+// 新增枚举（IRHIDevice.hpp）
+enum class RHIStencilOp  : uint8_t { Keep, Zero, Replace, IncrClamp, DecrClamp,
+                                      Invert, IncrWrap, DecrWrap };
+enum class RHICompareOp  : uint8_t { Never, Less, Equal, LessOrEqual, Greater,
+                                      NotEqual, GreaterOrEqual, Always };
+
+struct RHIStencilOpState {
+    RHIStencilOp failOp     = RHIStencilOp::Keep;
+    RHIStencilOp passOp     = RHIStencilOp::Keep;
+    RHICompareOp compareOp  = RHICompareOp::Always;
+    uint8_t      reference    = 0;
+    uint8_t      compareMask  = 0xFF;
+    uint8_t      writeMask    = 0xFF;
+};
+
+struct RHIPipelineDesc {
+    // ... 现有字段不变 ...
+    RHIFormat         stencilFormat      = RHIFormat::Undefined; // Undefined = 无模板
+    bool              stencilTestEnable  = false;
+    bool              stencilWriteEnable = false;
+    RHIStencilOpState stencilFront;
+    RHIStencilOpState stencilBack;
+};
+```
+
+#### GBuffer pipeline 配置（`SceneRenderer.cpp` GBufferFeature::OnInit）
+
+```cpp
+pipelineDesc.stencilFormat      = RHIFormat::D24_S8;
+pipelineDesc.stencilWriteEnable = true;
+pipelineDesc.stencilFront = {
+    .passOp    = RHIStencilOp::Replace,
+    .compareOp = RHICompareOp::Always,
+    .reference = 1
+};
+```
+
+#### DeferredLighting pipeline 配置
+
+```cpp
+pipelineDesc.depthTest           = false;
+pipelineDesc.depthWrite          = false;
+pipelineDesc.stencilFormat       = RHIFormat::D24_S8;
+pipelineDesc.stencilTestEnable   = true;
+pipelineDesc.stencilFront = {
+    .compareOp = RHICompareOp::Equal,
+    .reference = 1
+};
+```
+
+### 实施步骤
+
+- [ ] 1. `src/platform/rhi/IRHIDevice.hpp` — 新增 `RHIStencilOp`、`RHICompareOp` enums + `RHIStencilOpState`；`RHIPipelineDesc` 加 stencil 字段
+- [ ] 2. `src/platform/rhi/vulkan/VulkanUtils.cpp` — `ToVkImageLayout(DepthWrite)` 改返回 `VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL`
+- [ ] 3. `src/platform/rhi/vulkan/VulkanCommandList.cpp` — `BeginRenderPass` 深度附件 imageLayout 同步改为 `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`
+- [ ] 4. `src/platform/rhi/vulkan/VulkanDevice.cpp` — `CreatePipeline`：新增 `ToVkStencilOpState` 映射函数；`ds` 填充 stencil 字段；`renderingCI.stencilAttachmentFormat` 设置
+- [ ] 5. `src/function/renderer/SceneRenderer.cpp` — `RenderFrame` 深度纹理格式改为 `RHIFormat::D24_S8`
+- [ ] 6. `GBufferFeature::OnInit` — 所有 GBuffer MaterialType 的 pipeline desc 加模板写入配置（含自定义 shading model）
+- [ ] 7. `DeferredLightingFeature::OnInit` — pipeline 加模板测试配置（`depthTest=false`，`stencilTestEnable=true`）
+- [ ] 8. 验证（RenderDoc）：lighting pass 背景区域无 fragment 调用；PerformancePanel lighting 耗时对比
+
+### 边界情况与约束
+
+| 场景 | 处理 |
+|------|------|
+| `D24_S8` 驱动支持 | RTX 3070 必支持；`VkFormatProperties::optimalTilingFeatures` 含 `DEPTH_STENCIL_ATTACHMENT_BIT` |
+| Alpha-test 植物 | `discard` 不写深度/模板 → stencil = 0 → lighting 正确跳过（依赖 alpha-test bug 先修复）|
+| `D32F` → `D24_S8` 精度 | D24 深度精度下降（24-bit vs 32-bit）；对 Sponza 规模场景不明显；如有需要可改用 D32F_S8（若驱动支持） |
+| GBuffer 多 MaterialType | PBR + 所有自定义 shading model 的 pipeline 均需加 stencil write |
+| ShadowFeature | shadow pipeline 无颜色/模板附件，无需修改 |
+| `AttachmentKey` pipeline cache | `stencilFormat` 是 pipeline 缓存 key 的一部分（`ShaderProgram::AttachmentKey`）；若 AttachmentKey 不含 stencil 字段，需扩展 |
+| 向后兼容 | `RHIPipelineDesc` 默认 `stencilTestEnable=false`，所有现有 pipeline 行为不变 |
+
+**不做：** 多层 stencil 值（只用 0/1）；物体 ID 写 stencil；stencil shadow volumes。
+
+### 受益 issues
+
+- **#23 帧率优化**：大背景场景 Deferred Lighting 节省 15–30%
+- **植物 alpha-test 修复**：修复后 stencil 使镂空区域在 lighting 中自动正确跳过
+
+---
+
+## Issue #57 — GPU-Driven Meshlet Cluster Culling
+
+**优先级：低（大工程量；场景 mesh 面数 > 10 万时收益显著，现有 Sponza 场景较小）**
+
+### 目标
+
+将 mesh 切分为约 128 三角形一组的 meshlet，GPU compute shader 在顶点着色器运行之前做 per-cluster frustum + backface cone 剔除，通过 `vkCmdDrawIndexedIndirect` 只绘制存活的 meshlet。将顶点处理粒度从 per-object 降至 per-cluster，实现单 mesh 内部的三角形级剔除。
+
+### 设计
+
+#### 数据流对比
+
+```
+现状（per-object draw call）：
+  vkCmdDrawIndexed(indexCount=100000) → 顶点着色器 ×100000（全跑）
+
+目标（per-meshlet indirect draw）：
+  Compute cull → vkCmdDrawIndexedIndirect(survivingMeshletBuffer)
+  → 每个 surviving meshlet → 顶点着色器 × 128 × survivingCount（仅存活）
+```
+
+#### Meshlet 数据结构
+
+```cpp
+struct Meshlet {
+    uint32_t  vertexOffset;    // 该 meshlet 顶点在全局 vertex buffer 的起始
+    uint32_t  triangleOffset;  // 三角形索引在全局 triangle buffer 的起始
+    uint8_t   vertexCount;     // ≤ 64
+    uint8_t   triangleCount;   // ≤ 128
+    uint8_t   _pad[2];
+    glm::vec3 aabbMin, aabbMax;
+    glm::vec3 coneAxis;        // backface cone culling 轴（meshoptimizer 计算）
+    float     coneCutoff;      // cos(半角)；dot(coneAxis, toCamera) >= cutoff → 整个 meshlet 背面
+};
+```
+
+#### Cook Pipeline 扩展（共享 #55 的 meshoptimizer）
+
+```cpp
+// tools/cook/MeshImporter.cpp — 伪代码
+meshopt_Meshlet raw[max_meshlets];
+uint8_t verts[max_meshlets * 64], tris[max_meshlets * 128 * 3];
+
+size_t count = meshopt_buildMeshlets(
+    raw, verts, tris, indices, index_count,
+    vertex_positions, vertex_count, sizeof(Vertex),
+    64, 128, 0.0f);  // max_verts=64, max_tris=128, cone_weight=0
+
+for each meshlet m:
+    meshopt_Bounds b = meshopt_computeMeshletBounds(
+        &verts[m.vertex_offset], &tris[m.triangle_offset],
+        m.triangle_count, positions, vertex_count, stride);
+    // b → Meshlet::aabbMin/Max, coneAxis, coneCutoff
+```
+
+序列化为新资产格式 `.sameshlet`（含 Meshlet 数组 + 全局 vertex table + 全局 triangle buffer）。
+
+#### 运行时 GPU Buffers（`BuildDrawList` 时上传）
+
+```
+Meshlet SSBO        — 所有场景 mesh 的 Meshlet[] 合并
+Global Vertex SSBO  — 所有 mesh 顶点合并（Meshlet::vertexOffset 为全局偏移）
+Triangle Buffer     — 所有 mesh 三角形索引合并（uint8 packed, ×3 = index）
+Instance SSBO       — per-DrawItem：{meshletOffset, meshletCount, modelMatrix}
+Indirect Draw Buf   — compute shader 写入 VkDrawIndexedIndirectCommand[]
+Visible Counter     — atomic uint，compute 累加
+```
+
+#### Culling Compute Shader（`assets/shaders/meshlet_cull.comp`）
+
+```glsl
+layout(local_size_x = 64) in;
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= u_totalMeshlets) return;
+    Meshlet m = u_meshlets[id];
+
+    // Frustum cull（p-vertex AABB 测试）
+    for (int i = 0; i < 6; i++)
+        if (dot(u_frustumPlanes[i].xyz, m.aabbMax) + u_frustumPlanes[i].w < 0.0) return;
+
+    // Backface cone cull
+    vec3 center = (m.aabbMin + m.aabbMax) * 0.5;
+    if (dot(m.coneAxis, normalize(u_cameraPos - center)) >= m.coneCutoff) return;
+
+    uint slot = atomicAdd(u_visibleCount, 1);
+    u_indirectCmds[slot] = VkDrawIndexedIndirectCommand{
+        uint(m.triangleCount) * 3, 1, m.triangleOffset * 3, int(m.vertexOffset), slot
+    };
+}
+```
+
+#### Vertex Shader 改造
+
+`deferred_geometry_meshlet.vert`：`gl_InstanceIndex`（= firstInstance = slot）→ 从全局 SSBO 读取顶点（set=2 bindings），与 `#54 GPU skinning` set=2 约定需协调（skinned 路径和 meshlet 路径互斥）。
+
+#### SceneRenderer 架构变化
+
+- `BuildDrawList`：新增 `BuildMeshletBuffers` 路径（存在 `.sameshlet` 时）
+- `RenderFrame`：dispatch meshlet cull compute → pipeline barrier → `vkCmdDrawIndexedIndirect`
+- 原 `DrawItem` draw call 链路保留为 fallback（无 `.sameshlet` 时继续使用）
+- 新增私有 `ComputeProgram m_meshletCullProg`
+
+#### IRHICommandList 扩展
+
+```cpp
+virtual void DrawIndexedIndirect(
+    RHIBufferHandle drawBuffer, uint64_t offset,
+    uint32_t drawCount, uint32_t stride) = 0;
+```
+
+### 实施步骤
+
+- [ ] 1. `third_party/CMakeLists.txt` — meshoptimizer（若 #55 已完成则跳过）
+- [ ] 2. `tools/cook/CookedMesh.hpp` — 新增 `.sameshlet` 格式（Meshlet[], global vertex table, global triangle table）
+- [ ] 3. `tools/cook/MeshImporter.cpp` — meshlet 生成 + bounds 计算 + `.sameshlet` 序列化
+- [ ] 4. `src/platform/rhi/IRHIDevice.hpp` / `VulkanDevice` — `DrawIndexedIndirect` 接口 + 实现
+- [ ] 5. `assets/shaders/meshlet_cull.comp` — frustum + backface cone compute culling
+- [ ] 6. `assets/shaders/deferred_geometry_meshlet.vert` — 从 set=2 全局 SSBO 读顶点的 vertex shader
+- [ ] 7. `src/function/renderer/SceneRenderer.hpp/.cpp` — `BuildMeshletBuffers`（上传全局 SSBOs）；`m_meshletCullProg`；`RenderFrame` meshlet 路径；双路径 fallback 判断
+- [ ] 8. `editor/ui/panels/PerformancePanel.cpp` — Meshlet stats（total/visible/culled）
+
+### 边界情况与约束
+
+| 场景 | 处理 |
+|------|------|
+| 无 `.sameshlet` 的资产 | fallback 到原 `DrawItem` 路径，双路径必须稳定共存 |
+| Skinned mesh | 不生成 meshlet（骨骼变形后 AABB 失效），恒走原路径 |
+| Global buffer 大小 | 初版固定上限（如 4M 三角形），超出时 warn 并 fallback |
+| Descriptor pool | SSBO 描述符需求增加，`VulkanDevice` 初始化 pool 时扩容 |
+| set=2 与 #54 冲突 | GPU skinning 和 meshlet vertex fetch 都占 set=2；两路径互斥，`isSkinned` 和 `hasMeshlet` 不同时成立 |
+| IndirectDraw GPU counter | compute 写 draw count 到 `u_visibleCount`，需额外 buffer readback 或 GPU query 统计 PerformancePanel 数据 |
+
+**不做：** HZB 遮挡剔除（单独 issue）；Mesh Shader（需 `VK_EXT_mesh_shader`，普及度有限）；CPU 端 cluster cull fallback。
+
+### 受益 issues
+
+- **#23 帧率优化**：高面数 mesh 顶点处理开销降 50–80%
+- **#55 LOD**：LOD1/2/3 简化 mesh 也可生成 meshlet，形成 LOD × cluster 双层剔除体系
+
+---
+
+## Issue #59 — 自定义 .saglsl Shading Model 运行时 Cook（项目无需重编引擎）
+
+**优先级：中（解锁外部项目自定义 shading model；同时消除 demo_project/CMakeLists.txt 的 CookDemoShaders 块）**
+
+### 目标
+
+当编辑器加载含 `assets/shaders/*.saglsl` 文件的项目时，自动在运行时触发 shader cook 流水线，将 `.saglsl` 编译为 `.gbuffer.frag.spv` + dispatch GLSL，重编 `deferred_lighting.frag.spv`（dispatch 变化时），热替换 DeferredLightingFeature 的 ShaderProgram，并注册新 MaterialType——外部项目无需 CMakeLists.txt，无需重编引擎。
+
+### 设计
+
+#### A. 时序（在 LoadProject 中）
+
+```
+app.UpdateProjectPaths(projectDir, cookCacheDir)
+  └─ SceneRenderer::SetCookCacheDir()
+       ├─ [现有] VFS::SetCookCacheDir, IBL 路径更新
+       └─ [新增] RuntimeShaderCook::Cook(cfg) → 存入 m_pendingCookResult
+               ├─ 扫描 projectAssets/shaders/*.saglsl
+               ├─ mtime 比对 cook_cache/.shader_manifest.json  → 跳过未变更
+               ├─ spawn StellarAliaShaderCook → cook_cache/shaders/*.spv/.refl + generated/
+               ├─ dispatch 变化 → spawn glslc 重编 deferred_lighting.frag
+               │     -I ENGINE_SHADER_SRC_DIR -I cook_cache/generated/shaders/
+               │     deferred_lighting.frag → cook_cache/shaders/deferred_lighting.frag.spv
+               └─ 更新 .shader_manifest.json
+
+resMgr.ClearProjectAssets()          ← WaitIdle + 销毁 GPU 资产
+matMgr.ClearProjectInstances()
+
+[新增] renderer.ApplyProjectShaderTypes()  ← WaitIdle 已完成，安全做 GPU 工作
+    ├─ matMgr.ClearProjectTypes()     ← 清除上一个项目的 isProjectType 类型
+    ├─ if m_pendingCookResult.deferredLightDirty:
+    │     DeferredLightingFeature::ReloadShaders(device, cook_cache/shaders/deferred_lighting.frag.spv)
+    │       ← 读 .spv 文件 → bytes → ShaderProgram::Reload() → 清 pipeline cache + 重建 handle
+    └─ RegisterTypesFromShaderDir(cook_cache/shaders/, isProjectType=true)
+```
+
+#### B. `RuntimeShaderCook`（新建 `src/function/shader_cook/`）
+
+```cpp
+struct RuntimeShaderCookConfig {
+    std::filesystem::path projectAssetsDir;      // project/assets/
+    std::filesystem::path cookCacheDir;          // project/cook_cache/
+    const char*           glslcPath;             // ApplicationPath::GLSLC_PATH
+    const char*           binDir;                // ApplicationPath::BIN_DIR (ShaderCookTool + ReflectTool 在此)
+    const char*           engineShaderSrcDir;    // ApplicationPath::ENGINE_SHADER_SRC_DIR
+};
+
+struct RuntimeShaderCookResult {
+    bool        success            = false;
+    bool        deferredLightDirty = false;  // dispatch 变化，需热替换 deferred_lighting
+    std::string errors;                      // 子进程 stderr 输出（编译错误）
+};
+
+class RuntimeShaderCook {
+public:
+    static RuntimeShaderCookResult Cook(const RuntimeShaderCookConfig& cfg);
+private:
+    static bool RunSubprocess(const std::string& cmd, std::string& outErr);
+    // popen/_popen 跨平台（MSVC + POSIX 均支持），同步阻塞，适合编辑器非热路径
+};
+```
+
+`Cook()` 实现逻辑：
+1. `HasSaglslFiles(projectAssetsDir/shaders/)` — 无则直接 `return {success=true}`
+2. 读 `cookCacheDir/.shader_manifest.json` 记录的各 `.saglsl` mtime；若全部未变且 `deferred_lighting.frag.spv` 存在，skip cook（`deferredLightDirty=false`）
+3. `fs::create_directories(cookCacheDir/shaders/, cookCacheDir/generated/shaders/)`
+4. spawn `StellarAliaShaderCook`（`BIN_DIR/StellarAliaShaderCook[.exe]`）：
+   ```
+   --scan-dir  <projectAssetsDir>
+   --spv-out   <cookCacheDir>/shaders
+   --dispatch-out <cookCacheDir>/generated/shaders
+   --glslc     <glslcPath>
+   --reflect-tool <binDir>/ShaderReflectTool[.exe]
+   --include   <engineShaderSrcDir>
+   --include   <cookCacheDir>/generated/shaders
+   ```
+5. 若第一步 dispatch hash 变化（对比 `shading_dispatch.glsl` 内容前后），spawn `glslc` 重编：
+   ```
+   glslc -fshader-stage=frag
+         -I <engineShaderSrcDir>
+         -I <cookCacheDir>/generated/shaders
+         <engineShaderSrcDir>/deferred_lighting.frag
+         -o <cookCacheDir>/shaders/deferred_lighting.frag.spv
+   ```
+   并设 `deferredLightDirty=true`
+6. 更新 `.shader_manifest.json`
+
+#### C. `ApplicationPath.hpp.in` 补充
+
+```cpp
+// 新增：供 RuntimeShaderCook 运行时重编 deferred_lighting.frag 时作为 include 根目录
+inline constexpr const char* ENGINE_SHADER_SRC_DIR = "@CMAKE_SOURCE_DIR@/assets/shaders";
+```
+
+对应 `CMakeLists.txt` 的 `configure_file` 调用无需额外参数，`CMAKE_SOURCE_DIR` 已自动展开。
+
+#### D. `MaterialManager` — 项目 MaterialType 标记
+
+```cpp
+// MaterialType 内部新增：
+bool isProjectType = false;  // true = 由 .saglsl runtime cook 注册，切换项目时清除
+
+// 新公开方法：
+void ClearProjectTypes();    // 移除所有 isProjectType==true 的类型条目
+
+// RegisterTypesFromShaderDir 新增参数：
+void RegisterTypesFromShaderDir(const std::string& dir,
+                                const FeatureInitContext& ctx,
+                                bool isProjectType = false);
+```
+
+#### E. `ShaderProgram::Reload`
+
+```cpp
+bool ShaderProgram::Reload(IRHIDevice* device,
+                           std::span<const uint8_t> newSpv,
+                           const ShaderReflection& fragRefl);
+// 实现：清空 m_pipelineCache（逐条 device.DestroyPipeline）；
+//      device.DestroyShader(m_fragShader)；
+//      m_fragShader = device.CreateShader(newSpv, fragRefl)；
+//      重建 set=1 desc layout（若反射变化）；
+//      调用方需保证 WaitIdle 已完成
+```
+
+#### F. `SceneRenderer` 变化摘要
+
+```cpp
+// SceneRenderer.hpp 新增：
+RuntimeShaderCookResult m_pendingCookResult;    // SetCookCacheDir 存入，ApplyProjectShaderTypes 消费
+void ApplyProjectShaderTypes();                 // 在 WaitIdle 后调用
+
+// DeferredLightingFeature 新增方法：
+void ReloadShaders(IRHIDevice& device, const std::filesystem::path& spvPath);
+// → 读 spvPath bytes → ShaderProgram::Reload
+
+// DeferredLightingFeature::OnInit 检查顺序：
+// 1. 先查 cookCacheDir/shaders/deferred_lighting.frag.spv（项目专属）
+// 2. 缺失则用 BUILTIN_SHADER_DIR/deferred_lighting.frag.spv（引擎内置）
+```
+
+#### G. `demo_project/CMakeLists.txt` 清理
+
+删除：
+```cmake
+# 整个 if(TARGET StellarAliaShaderCook AND GLSLC_EXECUTABLE) ... endif() 块
+# 以及 add_custom_target(CookDemoShaders ALL ...) 行
+```
+
+根 `CMakeLists.txt` 删除：
+```cmake
+if(TARGET StellarAliaBuiltinShaders AND TARGET CookDemoShaders)
+    add_dependencies(StellarAliaBuiltinShaders CookDemoShaders)
+endif()
+```
+
+`sa_cook_directory`（非 shader 资产）保留，为 CI/CD 用途。
+
+### 实施步骤
+
+- [ ] 1. `src/ApplicationPath.hpp.in` — 新增 `ENGINE_SHADER_SRC_DIR = "@CMAKE_SOURCE_DIR@/assets/shaders"`
+- [ ] 2. 新建 `src/function/shader_cook/RuntimeShaderCook.hpp/.cpp` — `Cook()` 实现（HasSaglslFiles、mtime manifest、RunSubprocess spawn StellarAliaShaderCook + glslc、更新 manifest）
+- [ ] 3. `src/function/material/MaterialManager.hpp/.cpp` — `MaterialType::isProjectType`；`ClearProjectTypes()`；`RegisterTypesFromShaderDir` 加 `isProjectType` 参数
+- [ ] 4. `src/function/material/ShaderProgram.hpp/.cpp` — `Reload(device, spv, refl)` 方法（清 pipeline cache + 重建 frag shader handle）
+- [ ] 5. `src/function/renderer/SceneRenderer.hpp` — `m_pendingCookResult`；`ApplyProjectShaderTypes()` 声明；`DeferredLightingFeature::ReloadShaders()` 声明
+- [ ] 6. `src/function/renderer/SceneRenderer.cpp` — `SetCookCacheDir` 末尾调用 `RuntimeShaderCook::Cook()`；`ApplyProjectShaderTypes` 实现（ClearProjectTypes → ReloadShaders → RegisterTypesFromShaderDir）；`DeferredLightingFeature::OnInit` 检查 cookCacheDir 先于内置
+- [ ] 7. `editor/EditorMode.cpp` — `LoadProject` 在 `ClearProjectAssets()` 之后、`Scan()` 之前调用 `renderer.ApplyProjectShaderTypes()`
+- [ ] 8. `demo_project/CMakeLists.txt` — 删除 `CookDemoShaders` 块；根 CMakeLists 删除对应 `add_dependencies` 行
+- [ ] 9. `docs/architecture.md` — 更新 "Custom Shading Models" 章节（4 步注册流程改为：运行时 Cook + RegisterTypesFromShaderDir）；"Build-Time Pipeline" 注明 dispatch 生成已迁移至运行时
+
+### 边界情况与约束
+
+| 场景 | 处理 |
+|------|------|
+| `GLSLC_PATH` 为空（用户未安装 Vulkan SDK）| `Cook()` 提前 return `{success=false}`；`SA_LOG_WARN` 提示；项目只能使用内置 PBR，不崩溃 |
+| `.saglsl` 编译错误 | `StellarAliaShaderCook` 仍生成 `cook_errors.txt` 并继续处理其他 model；`Cook()` 读取错误文本放入 `result.errors`，由 EditorMode 转发至 `SA_LOG_WARN` |
+| 项目无 `.saglsl` 文件 | `HasSaglslFiles` 返回 false，直接跳过，`deferredLightDirty=false` |
+| `.saglsl` 文件未变化（二次加载同一项目）| mtime 比对命中，跳过所有 spawn，`deferredLightDirty=false` |
+| ID 稳定性 | `StellarAliaShaderCook` 已按字母顺序分配 ID，与构建时行为完全一致 |
+| 项目切换时旧 MaterialType 残留 | `ClearProjectTypes()` 在 `RegisterTypesFromShaderDir` 前调用；WaitIdle 由步骤 3.5 的 `ClearProjectAssets()` 保证 |
+| `deferred_lighting.frag.spv` 缺失于 cook_cache | `DeferredLightingFeature::OnInit` fallback 到内置 `.spv`；项目 `.saglsl` model 不可用（需要 Cook 成功后才注册） |
+| `ShaderProgram::Reload` 时 GPU 仍在使用旧 pipeline | WaitIdle 前置（LoadProject 步骤 3.5）保证安全 |
+| Windows 路径传给 glslc `-I` 参数 | 使用 `path.generic_string()` 输出正斜杠，避免 MSVC shell 转义问题 |
+| `ENGINE_SHADER_SRC_DIR` 在发布包中不存在 | 当前 issue 针对编辑器开发场景；发布包的 GLSL 源码打包策略是独立 issue |
+| PlayState != Editing | `LoadProject` 现有 guard 阻止进入，无需额外保护 |
+
+**不做**：文件监视器（修改 `.saglsl` 自动触发 Cook）；Playing 状态热加载；非 `.saglsl` shader 的运行时 cook；`sa_cook_directory`（非 shader 资产）的运行时化（已由编辑器运行时 cook 处理）。
+
+### 受益 issues
+
+- **demo_project 去 CMake 化**：删除 `CookDemoShaders` 块后，`demo_project/CMakeLists.txt` 仅剩 `sa_cook_directory`，最终可完全移除
+- **#28 .saglsl 图标**：AssetsPanel 对 `.saglsl` 文件可区分 cook 状态（未 cook / cook 成功 / 编译错误）
+- **未来 #N shader 文件监视**：`RuntimeShaderCook::Cook()` 接口可直接复用，仅需加 FileWatcher 触发

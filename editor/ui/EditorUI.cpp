@@ -1,5 +1,6 @@
 #include "ui/EditorUI.hpp"
 #include "ui/IEditorWindow.hpp"
+#include "resource/EditorFontLoader.hpp"
 #include "EditorDiagnostics.hpp"
 
 #include "platform/rhi/vulkan/VulkanDevice.hpp"
@@ -13,11 +14,13 @@
 #include <GLFW/glfw3.h>
 #include <volk.h>
 
+#include <filesystem>
 #include <string>
 
 namespace StellarAlia::Editor {
 
-bool EditorUI::Init(GLFWwindow* window, RHI::VulkanDevice* device) {
+bool EditorUI::Init(GLFWwindow* window, RHI::VulkanDevice* device,
+                    const std::filesystem::path& engineAssetsDir) {
     m_device = device;
     auto ctx = device->GetImGuiContext();
 
@@ -57,7 +60,8 @@ bool EditorUI::Init(GLFWwindow* window, RHI::VulkanDevice* device) {
     initInfo.QueueFamily         = ctx.graphicsFamily;
     initInfo.Queue               = ctx.graphicsQueue;
     // Let ImGui create and manage its own descriptor pool.
-    initInfo.DescriptorPoolSize  = 64;
+    // 256 = ImGui internal + engine logo (1) + thumbnails (≤64) + margin.
+    initInfo.DescriptorPoolSize  = 256;
     initInfo.MinImageCount       = ctx.swapchainMinImageCount;
     initInfo.ImageCount          = ctx.swapchainImageCount;
     initInfo.UseDynamicRendering = true;
@@ -74,6 +78,9 @@ bool EditorUI::Init(GLFWwindow* window, RHI::VulkanDevice* device) {
         ImGui::DestroyContext();
         return false;
     }
+
+    // ── Fonts ─────────────────────────────────────────────────────────────────
+    m_iconFont = EditorFontLoader::Load(io, engineAssetsDir).icons;
 
     m_initialized = true;
     SA_LOG_INFO("EditorUI: initialised (docking enabled)");

@@ -16,10 +16,13 @@
 13. [Compute Pipeline & ComputeProgram](#compute-pipeline--computeprogram)
 14. [GPU IBL Bake (Runtime)](#gpu-ibl-bake-runtime)
 15. [Deferred Rendering Pipeline](#deferred-rendering-pipeline)
-16. [Custom Shading Models](#custom-shading-models)
-17. [Frame Loop](#frame-loop)
-18. [Editor Architecture](#editor-architecture)
-19. [Key Design Decisions](#key-design-decisions)
+16. [CPU Frustum Culling & BVH](#cpu-frustum-culling--bvh)
+17. [Custom Shading Models](#custom-shading-models)
+18. [Frame Loop](#frame-loop)
+19. [Editor Architecture](#editor-architecture)
+20. [Key Design Decisions](#key-design-decisions)
+21. [Profiler](#profiler)
+22. [GPU Performance Notes](#gpu-performance-notes)
 
 ---
 
@@ -32,7 +35,8 @@
 │  EditorMode : AppMode                                            │
 │    EditorCamera, EditorUI (ImGui), EditorOverlaySettings        │
 │    Panels: Hierarchy, Inspector, Assets, Console, Playback,     │
-│            Settings, Performance, WorldSettings, Shortcuts       │
+│            Settings, Performance, WorldSettings, PostProcess,   │
+│            Shortcuts                                             │
 │    EntityTemplateRegistry — data-driven spawn templates          │
 │    AssetsPanel — native file picker (nfd-extended), import       │
 │    ProjectManager — create/open/recent projects                  │
@@ -73,9 +77,10 @@
 │                                                                  │
 │  RenderGraph                                                     │
 │    Reset / CreateTexture / ImportTexture / AddPass              │
+│    CreateBuffer(name, RGBufferDesc) / ImportBuffer              │
 │    Compile / Execute / GetLastFrameStats() / GetLastMemoryStats()│
 │    Topological sort + greedy interval slot aliasing             │
-│    RGPhysicalSlot — persistent GPU handles, reused across frames │
+│    RGPhysicalSlot / RGPhysicalBufferSlot — persistent handles   │
 │                                                                  │
 │  FrameUniformsBuffer (owned by SceneRenderer)                   │
 │    set=0: per-frame camera + light + IBL data                   │
@@ -107,6 +112,7 @@
 │    CreatePipeline / CreateComputePipeline                        │
 │    AllocateDescriptorSet / WriteDescriptor*                      │
 │    BeginFrame / EndFrame / Present / ImmediateCompute           │
+│    UploadBufferData / ReadBufferData — CPU↔GPU buffer I/O       │
 │    GetMemoryStats() → RHIMemoryStats                            │
 │                                                                  │
 │  VulkanDevice  (Vulkan 1.3, dynamic rendering)                  │
@@ -334,7 +340,10 @@ CookedMesh {
     }
     vector<uint8_t> vertexData   // Vertex: pos3 normal3 tangent4 uv2 (48 bytes)
     vector<uint8_t> indexData
+    vector<uint8_t> skinData     // SkinVertex[]: uvec4 joints + vec4 weights (32 bytes/vert); empty for static meshes
 }
+// IsSkinned() → !skinData.empty()
+// Format version 5+ includes skinData blob
 ```
 
 ### Cooked Skeleton — `.saskel`
@@ -415,7 +424,7 @@ storage. `Scene` wraps an `entt::registry` and exposes `View<C...>()`.
 | `StaticMeshComponent` | `meshAsset` (→ .samesh) — mesh identity only |
 | `MeshRendererComponent` | `materialSlots[]` (→ .samat per sub-mesh) + `castShadow` / `receiveShadow` — shared by static and skinned mesh entities |
 | `MaterialOverrideComponent` | Unified material override: optional `materialAsset` + named `scalars` + named `textures` |
-| `SkinnedMeshComponent` | GPU skinned mesh: `meshAsset`, `dynVertexBuffer`, `indexBuffer`, `subMeshes`; written by `AnimationSystem::PrepareEntity` |
+| `SkinnedMeshComponent` | Per-entity GPU skinning state: `meshAsset`, `skinMatricesBuffer`, `skinDescSet`, `boneCount`, `ready`; mesh geometry (`vertexBuffer`/`indexBuffer`/`skinDataBuffer`) lives in `GPUMesh` (ResourceManager) |
 | `AnimatorComponent` | `clipAsset` (→ .saanim), `time`, `speed`, `looping`, `playing` |
 | `CameraComponent` | `fovY`, `nearPlane`, `farPlane`, `priority` (highest wins) |
 | `ActiveCameraTag` | _(legacy)_ marks the active camera; superseded by `CameraComponent::priority` |
@@ -447,7 +456,7 @@ Entity
   ├── TransformComponent
   ├── WorldTransformComponent
   ├── AnimatorComponent         { clipAsset, time, speed, looping, playing }
-  ├── SkinnedMeshComponent      { meshAsset, dynVB, indexBuffer, subMeshes, ready }
+  ├── SkinnedMeshComponent      { meshAsset, skinMatricesBuffer, skinDescSet, boneCount, ready }
   ├── MeshRendererComponent     { materialSlots[], castShadow, receiveShadow }
   └── MaterialOverrideComponent { … } (optional)
 ```
@@ -467,6 +476,74 @@ struct MaterialOverrideComponent {
 // ParamValue = variant<float, vec2, vec3, vec4>
 ```
 
+### ColorGradingSettings
+
+Parametric color grading applied post-ACES. When `enabled`, parameters are baked into a 32³
+RGBA16F 3D LUT by a compute shader (`postfx_cg_bake.comp`) on parameter change; the LUT is
+then sampled once per pixel in the Tonemap pass via `sampler3D`. Only active when
+`PostProcessSettings::tonemapMode == Builtin`.
+
+```cpp
+struct ColorGradingSettings {
+    bool      enabled    = false;
+    glm::vec3 lift       = {0.f, 0.f, 0.f};  // shadow additive offset  [-0.5, 0.5]
+    glm::vec3 midtone    = {1.f, 1.f, 1.f};  // midtone power (ASC CDL) [ 0.1, 3.0]
+    glm::vec3 gain       = {1.f, 1.f, 1.f};  // highlight multiplier    [ 0.0, 3.0]
+    float     saturation = 1.f;               // [0, 3]
+    float     contrast   = 1.f;              // [0, 3], pivot at 0.5
+};
+```
+
+### PostProcessSettings
+
+Nested value-type inside `WorldSettings`; all bloom + tonemap runtime parameters live here.
+
+```cpp
+struct PostProcessSettings {
+    // Bloom
+    bool  bloomEnabled   = true;
+    float bloomThreshold = 1.0f;   // knee width = threshold × 0.1
+    float bloomStrength  = 0.4f;
+    float bloomRadius    = 1.0f;   // widest upsample level; each subsequent level ×0.85
+    int   bloomMipLevels = 3;      // pyramid depth [2, 8]; change triggers WaitIdle + desc set rebuild
+
+    // Tonemap
+    enum class TonemapMode { Builtin, LUT } tonemapMode = TonemapMode::Builtin;
+    AssetID tonemapLut;
+    float exposure    = 1.f;
+    float lutStrength = 1.f;
+
+    // Color Grading (Builtin mode only)
+    ColorGradingSettings colorGrading;
+
+    // SSAO (GTAO)
+    bool  ssaoEnabled       = false;
+    float ssaoRadius        = 32.f;
+    float ssaoStrength      = 1.0f;
+    float ssaoBias          = 0.025f;
+    int   ssaoDirections    = 4;
+    int   ssaoSteps         = 3;
+    float ssaoBlurSharpness = 10.f;
+
+    // TAA (Temporal Anti-Aliasing)
+    bool  taaEnabled      = false;
+    float taaBlendStatic  = 0.1f;   // history lerp toward current in still regions
+    float taaBlendMotion  = 0.5f;   // history lerp toward current in motion regions
+    bool  taaAntiGhosting = true;   // 3×3 YCoCg neighborhood AABB clamp
+
+    // Auto Exposure (eye adaptation)
+    bool  autoExposureEnabled = false;
+    float aeEvMin        = -4.0f;
+    float aeEvMax        =  4.0f;
+    float aeAdaptSpeed   =  2.0f;
+    float aeLowPercent   =  0.45f;
+    float aeHighPercent  =  0.95f;
+
+    // Future-effect placeholders (disabled; no pass implementation yet)
+    bool dofEnabled = false, motionBlurEnabled = false;
+};
+```
+
 ### WorldSettings
 
 Value-type field on `Scene`, serialised in `.sascene`'s `"world"` block:
@@ -484,21 +561,19 @@ struct WorldSettings {
     AssetID brdfLut;
     AssetID skyboxCubemap;
 
-    // Tonemap
-    enum class TonemapMode { Builtin, LUT };
-    TonemapMode tonemapMode = TonemapMode::Builtin;
-    AssetID     tonemapLut;
-    float       exposure    = 1.f;
-    float       gamma       = 2.2f;
-    float       lutStrength = 1.f;
+    PostProcessSettings pp;  // bloom + tonemap + future-effect params
 };
 ```
 
 **SolidColor IBL behaviour:** `ApplyWorldSettings` encodes `backgroundColor` as a constant
 SH L0 ambient term and writes it to a 1×1 solid-colour cubemap used as `t_PrefilteredEnv`.
 
-**Tonemap hot-swap:** `ApplyWorldSettings` can replace `TonemapFeature` with
-`LutTonemapFeature` at runtime via `device->WaitIdle()`, in-place in the `m_features` slot.
+**PostProcess hot-swap:** `ApplyWorldSettings(ws, updateIBL=false)` updates `BloomFeature`
+runtime fields (`m_enabled/threshold/strength/radius`), SSAO/TAA/AutoExposure parameters,
+and tonemap parameters instantly from `ws.pp` without a device stall. `pp.tonemapMode` switching
+retains the WaitIdle feature-slot replacement for `LutTonemapFeature`. `pp.bloomMipLevels`
+change is **deferred** — set `m_pendingBloomMipCount`; actual GPU rebuild happens at the
+start of the next `RenderFrame` resize block (after `WaitIdle`).
 
 ### Transform Hierarchy
 
@@ -557,21 +632,45 @@ Rotation quaternions: `[w, x, y, z]`. `"parent": -1` = root. `"parent": N` = ind
 
 **Location:** `src/function/animation/AnimationSystem.hpp/.cpp`
 
-CPU skinning skeletal animation. Uses `.saskel` (skeleton) and `.saanim` (animation clip) cooked assets.
+GPU skinning skeletal animation. Uses `.saskel` (skeleton) and `.saanim` (animation clip) cooked assets.
+Bone deformation runs entirely on the GPU vertex shader; only bone matrices (~3 KB) are uploaded per frame.
 
-### Usage Pattern
+### Lifecycle
 
-```
-// Once after scene load (per animated entity):
+```cpp
+// Initialise once (after SceneRenderer is ready):
+animSystem.Init(device, sceneRenderer->GetSkinDescLayout());
+
+// Per scene load (per animated entity):
 animSystem.PrepareEntity(entity, registry, resMgr, device);
-// → allocates dynVertexBuffer, sets SkinnedMeshComponent::ready = true
+// → allocates skinMatricesBuffer (boneCount×64 B, CPU-visible)
+// → allocates skinDescSet (set=2: binding0=skinMats, binding1=gpuMesh.skinDataBuffer)
+// → sets SkinnedMeshComponent::ready = true
 
 // Every frame (Playing state):
 animSystem.Update(dt, registry, resMgr, device);
-// → advances AnimatorComponent::time, evaluates FK, CPU-skins verts, uploads dynVB
+// → advances AnimatorComponent::time, evaluates FK → workGlobalPose/workSkinMats
+// → uploads workSkinMats to skinMatricesBuffer (~3 KB); no vertex upload
 
 // When stopping (reset to rest pose):
 animSystem.EvaluateAll(0.f, registry, resMgr, device);
+
+// On shutdown:
+animSystem.Shutdown(device);
+// → frees per-entity skinMatricesBuffer + skinDescSet; mesh buffers owned by ResourceManager
+```
+
+### GPU Skinning Data Flow
+
+```
+PrepareEntity (once):
+  GPUMesh::skinDataBuffer  ← per-asset (joints+weights SSBO, uploaded by ResourceManager)
+  skinMatricesBuffer       ← per-entity (mat4[boneCount], CPU-visible)
+  skinDescSet (set=2)      ← binding0 = skinMatricesBuffer, binding1 = skinDataBuffer
+
+Update (per frame):
+  FK → workSkinMats[]  →  UploadBufferData(skinMatricesBuffer, ~3 KB)
+  deferred_geometry_skinned.vert:  gl_VertexIndex → skinDataBuffer → 4-bone blend → clip space
 ```
 
 ### Skeleton Resolution
@@ -743,6 +842,14 @@ RHIResourceState::Present          → VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
 Barriers use `VK_KHR_synchronization2` with conservative `ALL_COMMANDS /
 MEMORY_READ|WRITE` masks for correctness.
 
+### 3D Textures
+
+`RHITextureDesc::depth > 1` (and `cubemap == false`) triggers:
+- `imageType = VK_IMAGE_TYPE_3D`; `arrayLayers` forced to 1 (Vulkan requirement)
+- Main view: `VK_IMAGE_VIEW_TYPE_3D` (for `sampler3D` and `image3D`)
+
+Current users: `TonemapFeature::m_cgLutTex` (32×32×32 RGBA16F, color grading LUT).
+
 ### Cubemap Textures
 
 `RHITextureDesc::cubemap = true` triggers:
@@ -848,6 +955,7 @@ RegisterTypeFromShaders(MaterialTypeDesc, FeatureInitContext)
 
 LoadMaterial(AssetID, ResourceManager&) → MaterialInstance*  (cached; VFS paths set centrally)
 CloneInstance(MaterialInstance*) → unique_ptr<MaterialInstance>       (non-cached copy)
+ClearProjectInstances()  — evict m_cachedInstances on project switch; preserves m_types
 Shutdown()
 ```
 
@@ -875,29 +983,52 @@ that receive `MaterialOverrideComponent` overrides.
 Reset()
 CreateTexture(name, desc)  → RGTextureHandle   (transient; GPU alloc deferred)
 ImportTexture(name, handle, initState, finalState)  → RGTextureHandle
+CreateBuffer(name, RGBufferDesc)  → RGBufferHandle  (transient; clearOnCreate=true → FillBuffer(0) before first write)
+ImportBuffer(name, handle, initState) → RGBufferHandle  (persistent cross-frame buffers, e.g. exposure SSBO)
 AddPass(name, setupFn, executeFn)
   — passes must be declared in forward dependency order (writers before readers)
+  — setupFn: b.Read/Write/WriteDepth/WriteUAV(tex), b.ReadBuffer/WriteBuffer(buf)
 
 Compile()
-  Phase 0: Kahn's topological sort on read/write dependency edges
-  Phase A: lifetime analysis — firstWritePass / lastReadPass per transient texture
-  Phase B: greedy interval slot coloring — assign transient textures to compatible
-           RGPhysicalSlot entries (format + size + usage superset must match)
+  Phase 0: Kahn's topological sort on read/write dependency edges (textures + buffers)
+  Phase A: lifetime analysis — firstWritePass / lastReadPass per transient texture/buffer
+  Phase B: greedy interval slot coloring — textures → RGPhysicalSlot; buffers → RGPhysicalBufferSlot
+           clearOnCreate buffers get FillBuffer(0) + BufferBarrier(CopyDst→StorageWrite) injected
 
 Execute(device, cmd)
-  → allocate/reuse RGPhysicalSlot handles (create if first use or desc changed)
+  → AllocateSlots(device) — idempotent; creates slot GPU textures/buffers if not already valid
   → for each sorted pass:
       emit barriers — per-PHYSICAL-SLOT state tracking for transients,
-                      per-logical-index tracking for imported textures
+                      per-logical-index tracking for imported textures/buffers
       call executeFn(cmd, resources)
-  → final state transitions for imported textures
+  → final state transitions for imported textures/buffers
   → fill m_lastStats (RGStats) + snapshot device.GetMemoryStats() → m_lastMemStats
 
+GetResolvedHandle(h)  — returns physical RHITextureHandle for any RGTextureHandle
+                        after AllocateSlots: imported → t.imported; transient → slot handle
+GetResolvedBuffer(h)  — returns physical RHIBufferHandle for any RGBufferHandle
 GetLastFrameStats()  const → const RGStats&
 GetLastMemoryStats() const → const RHIMemoryStats&
-InvalidateSlots()           — call on resize; forces all slot handles to be
-                              recreated next Execute()
+InvalidateSlots()           — call on resize; destroys all slot GPU textures and buffers
 ```
+
+### FrameContext::BindTexture / BindBuffer — Deferred Descriptor Resolution
+
+`ctx.BindTexture(set, binding, rgHandle)` and `ctx.BindBuffer(set, binding, rgHandle)` called
+during `AddPasses` **do not** write descriptors immediately. Each enqueues a
+`PendingBinding{set, binding, handle}` (texture or buffer variant).
+
+After `Compile()`, `SceneRenderer` calls:
+```
+m_rg.AllocateSlots(*m_device)   // create/reuse slot GPU textures and buffers
+ctx.FlushBindings()             // GetResolvedHandle/GetResolvedBuffer → WriteDescriptorTexture/Buffer
+m_rg.Execute(*m_device, *cmd)   // AllocateSlots is no-op; descriptors already valid
+```
+
+This allows **transient** textures and buffers to be bound to descriptor sets during
+`AddPasses` — the physical handle is unknown until `AllocateSlots`, but `FlushBindings`
+runs immediately after. `HDR_Color` (transient texture) and `AE_Histo` (transient buffer)
+are examples bound via this mechanism.
 
 ### RGPhysicalSlot
 
@@ -924,6 +1055,12 @@ struct RGStats {
     uint64_t transientBytesLogical;   // sum of logical transient sizes
     uint64_t transientBytesPhysical;  // sum of physical slot sizes (< logical when aliasing)
     uint64_t importedBytesLogical;    // sum of imported texture sizes
+    // Buffer tracking
+    uint32_t transientBufferCount;          // CreateBuffer() buffers
+    uint32_t importedBufferCount;           // ImportBuffer() buffers
+    uint32_t physicalBufferSlotCount;       // RGPhysicalBufferSlot entries (≤ transientBufferCount)
+    uint64_t transientBufferBytesLogical;   // sum of logical transient buffer sizes
+    uint64_t transientBufferBytesPhysical;  // sum of physical buffer slot sizes
     struct Entry {
         std::string name;
         uint32_t width, height, mipLevels;
@@ -945,7 +1082,7 @@ collapsing header (imported + transient counts/MB, physical vs logical savings, 
 ### Frame Uniforms (set=0) Bindings
 
 ```
-binding=0  FrameData UBO    — camera matrices, time, resolution, SH9 irradiance
+binding=0  FrameData UBO    — camera matrices, time, resolution, SH9 irradiance, TAA jitter/prevViewProj (640 bytes)
 binding=1  LightData UBO    — up to 8 lights (directional / point / spot / area)
 binding=2  sampler2D        — BRDF LUT
 binding=3  samplerCube      — prefiltered specular env (5 mips)
@@ -1040,55 +1177,144 @@ Normal encoding uses **Octahedral Normal Encoding** (OctEncode/OctDecode).
 
 | Feature | Condition | Output | Shader |
 |---------|-----------|--------|--------|
-| `ShadowFeature` | `config.shadowEnabled` | shadow map (D32, 2048²) | `shadow.vert/.frag` |
-| `SkyboxFeature` | always | HDR buffer | `skybox.vert/.frag` |
-| `GBufferFeature` | always | RT0/RT1/RT2 + depth | `deferred_geometry.vert/.frag` |
-| `DeferredLightingFeature` | always | HDR buffer (RGBA16F) | `deferred_lighting.frag` |
-| `SelectionMaskFeature` | always | R8 silhouette mask | `selection_mask.vert/.frag` |
-| `BloomFeature` | `config.bloomEnabled` | additive bloom into HDR | `bloom_*.frag` |
-| `TonemapFeature` | `ws.tonemapMode==Builtin` | swapchain LDR | `tonemap.frag` (ACES + gamma) |
-| `LutTonemapFeature` | `ws.tonemapMode==LUT` | swapchain LDR | `postfx_lut_tonemap.frag` |
+| `ShadowFeature` | `config.shadowEnabled` | shadow map (D32, 2048²) | `shadow.vert/.frag` (+ `shadow_skinned.vert` for skinned) |
+| `SkyboxFeature` | always | HDR buffer (transient) | `skybox.vert/.frag` |
+| `GBufferFeature` | always | RT0/RT1/RT2 + depth | `deferred_geometry.vert/.frag` (+ `deferred_geometry_skinned.vert` for skinned) |
+| `SSAOFeature` | always registered; disabled → fills ssaoTex with 1.0 | half-res R8 AO → blurred into `ssaoTex` | `ssao.frag` + `ssao_blur.frag` |
+| `DeferredLightingFeature` | always | HDR (transient RGBA16F) | `deferred_lighting.frag` |
+| `SelectionMaskFeature` | always | R8 silhouette mask | `selection_mask.vert/.frag` (+ `selection_mask_skinned.vert` for skinned) |
+| `TAAFeature` | always registered; disabled → passes `handles.hdr` through | TAA-resolved into ping-pong history; `handles.taaResolved` | `taa_resolve.frag` |
+| `AutoExposureFeature` | always registered; skips if `pp.autoExposureEnabled==false` | 256-bin log-lum histogram → weighted percentile EV → exponential-smoothing exposure; 1-frame CPU readback via staging; reads `handles.hdr` (pre-TAA content) | `postfx_histogram.comp`, `postfx_exposure_adapt.comp` |
+| `BloomFeature` | always registered; skips if `pp.bloomEnabled==false` | threshold reads `taaResolved`; composite writes back to `handles.hdr` | `bloom_*.frag` |
+| `TonemapFeature` | always registered; active when `pp.tonemapMode==Builtin` | swapchain LDR | `postfx_tonemap.frag` (ACES + optional parametric CG LUT via `sampler3D`); rebakes 32³ LUT via `ImmediateCompute` when `ColorGradingSettings` changes |
+| `LutTonemapFeature` | hot-swapped in when `pp.tonemapMode==LUT` | swapchain LDR | `postfx_lut_tonemap.frag` |
 | `SelectionOutlineFeature` | always | outline on swapchain | `selection_outline_dilate.frag` + composite |
 | `InfiniteGridFeature` | when enabled | XZ grid on swapchain | `infinite_grid.frag` |
 | `DebugOverlayFeature` | always | debug lines on swapchain | `debug_line.vert/.frag` |
 | user `RenderFeature`s | `AddFeature(...)` | custom | custom |
 
-`TonemapFeature` ↔ `LutTonemapFeature` hot-swapped at runtime by `ApplyWorldSettings`.
+`BloomFeature` and `TAAFeature` are always in the feature list; their `AddPasses` early-returns when disabled.
+`TonemapFeature` ↔ `LutTonemapFeature` hot-swapped at runtime by `ApplyWorldSettings` (WaitIdle + slot replace).
 
 ```cpp
 struct RendererConfig {
-    bool     shadowEnabled  = true;
-    uint32_t shadowMapSize  = 2048;
-    bool     bloomEnabled   = true;
-    int      bloomMipCount  = 3;
-    bool     builtinTonemap = true;
+    bool     shadowEnabled = true;
+    uint32_t shadowMapSize = 2048;
+    int      bloomMipCount = 3;   // engine-level startup default; runtime changes via PostProcessSettings::bloomMipLevels
 };
 ```
 
 ### Bloom
 
 1. **Threshold pass** — extract pixels where luminance > 1.0
-2. **Downsample chain** — `bloomMipCount` levels, 13-tap COD downsample
+2. **Downsample chain** — `bloomMipLevels` levels (default 3, range 2–8), 13-tap COD downsample
 3. **Upsample + accumulate** — bilinear upsample, weighted additive blend
 4. **Composite** — additive blend into HDR color buffer
+
+### TAA (Temporal Anti-Aliasing)
+
+**Placement:** TAA runs after `SelectionMask` and before `Bloom`.
+
+**Data flow:**
+```
+GBuffer(jittered proj) → DeferredLighting → TAAFeature
+  TAA_Resolve: Read(handles.hdr, historyRead, depth) → Write(historyWrite)
+  handles.taaResolved = rgHistoryWrite
+→ BloomThreshold reads handles.taaResolved (anti-aliased pre-bloom)
+→ BloomComposite writes handles.hdr (transient, idle after TAA read)
+→ Tonemap reads handles.hdr
+```
+
+**Jitter:** Halton(2,3) sequence, 8-tap, written to `fu.jitter` (pixel space) and added to `proj[2][0/1]` (NDC offset). `fu.prevViewProj` stores last frame's unjittered view-projection for reprojection.
+
+**TAAFeature internals:**
+- Ping-pong `m_historyTex[2]` (persistent RGBA16F, full-res) — imported into RG each frame
+- TAA_Resolve: depth reprojection → prev UV → sample history → 3×3 YCoCg AABB neighborhood clamp → motion-adaptive blend
+- `m_historyValid = false` on first frame or resize → shader uses `historyValid = 0` push constant → outputs current unmodified
+
+**`handles.taaResolved`:** new field on `RendererHandles`; equals `handles.hdr` when TAA is disabled, set to `rgHistoryWrite` after `TAAFeature::AddPasses`. `BloomThreshold` reads this to avoid Bloom accumulating in TAA history (prevents progressive brightness).
+
+### CPU Frustum Culling & BVH
+
+**File:** `src/core/spatial/BVHTree.hpp`
+
+`BVHTree<T>` is a pure-algorithm template (glm only, no ECS dependency) providing:
+- **Build:** median-split on longest centroid axis, O(N log N)
+- **Query(Frustum):** p-vertex half-space test per node; prunes entire subtrees
+- **Raycast(Ray):** slab test, nearest child first for early termination
+- **`RayAABB(ray, mn, mx, tMax, tHit)`:** public static slab test — exposed for reuse outside the BVH (Phase B picking)
+
+`Frustum::Extract(viewProj)` uses Gribb-Hartmann for Vulkan NDC [0,1] depth (near = row2, far = row3−row2).
+
+`SceneRenderer` instantiates `BVHTree<entt::entity>` with **one leaf per entity** (union of all submesh world AABBs). This matches Unity/UE granularity: culling is at the component level, not per-submesh.
+
+**Per-frame flow:**
+```
+BuildDrawList:  GPUSubMesh.boundsMin/Max  →  ArvoAABB(wt*localT)  →  m_bvh.Insert(entity)
+                                          →  DrawItem::worldAABBMin/Max (per submesh, for Phase B)
+                m_bvh.Build()
+RenderFrame:    Frustum::Extract(viewProj)  →  m_bvh.Query  →  m_visibleDrawItems
+GBufferFeature: iterates m_visibleDrawItems (pointers into m_drawItems)
+```
+
+Skinned meshes set `DrawItem::skipCull = true` and bypass BVH; they are always included in `m_visibleDrawItems`.
+Skinned meshes also store a `worldAABBMin/Max` approximated from bind-pose bounds × world transform, for Phase B picking.
+
+**`SceneRenderer::RaycastScene(ray)`** — two-phase AABB picking:
+- **Phase A:** `m_bvh.Raycast()` — nearest static mesh entity via BVH slab test
+- **Phase B:** brute-force scan of `m_drawItems` where `skipCull==true` using `BVHTree::RayAABB` on `DrawItem::worldAABBMin/Max`; returns closest among both phases
+
+**`GPUSubMesh` bounds** are computed in `ResourceManager::LoadMesh` by iterating raw vertex data (stride=48, first 12 bytes = vec3 position) before GPU upload.
+
+Tracy plot: `SA_PROFILE_PLOT("VisibleDrawItems", ...)` tracks cull ratio per frame.
 
 ---
 
 ## Custom Shading Models
 
-Each custom material type needs:
+Custom shading models are defined in `.saglsl` unified shader files placed in the project's `assets/` directory. They are cooked **at runtime** (no engine recompile required).
 
-1. A `*.lighting.glsl` evaluator implementing `vec3 EvaluateShading(GBufferData gbuf)`.
-2. A `*.gbuffer.frag` writing the same 3-MRT layout as `deferred_geometry.frag`.
-3. CMake registration: `register_lighting_evaluator(path)`.
-4. C++ registration in a `RenderFeature::OnInit`:
-   ```cpp
-   ctx.matMgr->RegisterTypeFromShaders(
-       {"MyMaterial", "deferred_geometry", "my_material.gbuffer"}, ctx);
-   ```
+### `.saglsl` File Format
 
-The vertex shader (`deferred_geometry.vert`) is shared — only the fragment shader differs.
-`SHADING_MODEL_PBR = 0` is always reserved; custom models start from 1 in alphabetical file order.
+```glsl
+// @ShaderName  "My Shader"
+// @ShadingModel MyShader        // CamelCase; also the MaterialType name
+// @VertShader   deferred_geometry  // optional, default shown
+
+#pragma sa_section gbuffer
+// Full GLSL fragment shader writing the 3-MRT G-Buffer layout
+#pragma sa_end_section
+
+#pragma sa_section lighting
+vec3 EvaluateShading(GBufferData gbuf) { ... }
+#pragma sa_end_section
+```
+
+### Runtime Cook Flow
+
+When the editor loads a project with `.saglsl` files, `EditorMode::LoadProject` runs:
+
+```
+EditorMode::LoadProject()
+  ├─ ShaderCook::CookDirectory()      ← parse .saglsl, generate dispatch GLSL,
+  │                                      compile *.gbuffer.frag → .spv + .refl
+  ├─ ShaderCook::RecompileDeferredLighting()  ← recompile deferred_lighting.frag
+  │                                      with the project dispatch (glslc subprocess)
+  ├─ ClearProjectAssets() / ClearProjectInstances()  ← WaitIdle inside
+  └─ ApplyProjectShaderTypes(cookedShaderDir)
+       ├─ MaterialManager::ClearProjectTypes()
+       ├─ DeferredLightingFeature::ReloadShaders()   ← hot-swap frag SPV
+       └─ MaterialManager::RegisterTypesFromShaderDir(isProjectType=true)
+```
+
+Outputs land in `cook_cache/shaders/` (SPV + refl) and `cook_cache/generated/shaders/` (dispatch GLSL).
+
+### Key Properties
+
+- `MaterialType::isProjectType = true` marks types that come from `.saglsl` files; `ClearProjectTypes()` removes them on project switch, preserving builtin types (PBR, DeferredLighting, etc.).
+- `SHADING_MODEL_PBR = 0` is always reserved; custom models are assigned IDs 1..N in alphabetical order.
+- The vertex shader (`deferred_geometry.vert`) is shared — only the fragment shader differs.
+- `StellarAliaShaderCookLib` (`tools/shader_cook/`) is a static library linked by the editor, analogous to `StellarAliaImporter`.
 
 ---
 
@@ -1113,16 +1339,24 @@ Phase 1: Collect
    GatherLights(scene)               // all light component types
 
 Phase 2: GPU
-   device->BeginFrame()
+   device->BeginFrame()           ← fence wait; AutoExposureFeature::ReadbackExposure() called here
+                                    (maps staging buffer → m_currentExposure; updates tonemap exposure)
+   if (scene.IsAndClearMaterialDirty()) BuildDrawList(scene)
+   FrustumCull: Frustum::Extract(viewProj) → m_bvh.Query → m_visibleDrawItems
    frameUniforms.Upload(fi, fu, lu)
-   m_rg.Reset() + ImportTexture(swapchain, depth, hdrColor, gbuffers, shadowMap)
+   m_rg.Reset()
+   ImportTexture(swapchain, depth, gbuffers, shadowMap, ssaoTex, selectionMask, bloomMips, taaHistory)
+   CreateTexture(HDR_Color RGBA16F transient)   ← hdr is now transient
 
    ShadowFeature::AddPasses()
    SkyboxFeature::AddPasses()
-   GBufferFeature::AddPasses()
-   DeferredLightingFeature::AddPasses()
+   GBufferFeature::AddPasses()        ← iterates m_visibleDrawItems
+   SSAOFeature::AddPasses()           ← GTAO 3-pass; disabled → fill 1.0
+   DeferredLightingFeature::AddPasses() ← reads ssaoTex binding=5
    SelectionMaskFeature::AddPasses()
-   BloomFeature::AddPasses()
+   TAAFeature::AddPasses()            ← jittered resolve; sets handles.taaResolved
+   AutoExposureFeature::AddPasses()   ← histogram(hdr) + adapt; 1-frame readback feeds tonemap exposure
+   BloomFeature::AddPasses()          ← threshold reads taaResolved
    TonemapFeature::AddPasses()
    SelectionOutlineFeature::AddPasses()
    InfiniteGridFeature::AddPasses()
@@ -1130,7 +1364,9 @@ Phase 2: GPU
    for each user RenderFeature: feature.AddPasses(...)
 
    m_rg.Compile()
-   m_rg.Execute()
+   m_rg.AllocateSlots()
+   ctx.FlushBindings()   ← WriteDescriptorTexture for all pending bindings
+   m_rg.Execute()        ← AllocateSlots no-op; commands recorded with valid descriptors
    device->EndFrame() / Present()
 ```
 
@@ -1155,6 +1391,7 @@ Phase 2: GPU
 | `EditorShortcutConfig` | JSON-backed user shortcut overrides (`editor_shortcuts.json`); `Load`/`Save`/`Reload`/`ImportFrom`/`ExportTo`; `ApplyTo(defaults)` replaces `bindings[0]` for overridden actions; built-in path is read-only (Save disabled in panel) |
 | `EditorDiagnostics` | Collects warnings/errors for ConsolePanel Diagnostics tab (action-required events only) |
 | `EditorLogCapture` | RAII spdlog sink; passively mirrors all `SA_LOG_*` calls into a ring buffer for ConsolePanel Engine Logs tab |
+| `EditorIconCache` | LRU-bounded ImGui texture cache (`kMaxThumbnails=256`): one permanent engine-logo texture + per-path thumbnail entries (lazy GPU upload via `ImageLoader` + `VulkanDevice::CreateTexture`); evict callback frees `VkDescriptorSet` + GPU texture; `IsThumbnailCached()` / `CanLoadThumbnail()` let callers gate loads without touching the cache; `ClearAllThumbnails()` must be called before `ResourceManager::ClearProjectAssets()` on project switch |
 
 ### Panels
 
@@ -1162,9 +1399,10 @@ Phase 2: GPU
 |-------|---------|
 | `SceneHierarchyPanel` | Entity tree; multi-select (Ctrl-toggle / Shift-range / Ctrl+A all); data-driven spawn menu from `EntityTemplateRegistry`; Ctrl+D duplicate; drag-reparent; short double-click → `FocusEntityCallback` pans camera; long double-click (hold > 0.20 s) → inline rename |
 | `InspectorPanel` | Component editor for selected entity; auto-generated drawers per component type; `IAssetInspector` for `.mat`/`.satex`/`.samesh` selection |
-| `AssetsPanel` | File tree for `projectDir/assets/`; multi-select (Ctrl-toggle / Shift-range / Ctrl+A all); native file picker import (nfd-extended, multi-select); drag-to-viewport drop; Create Material; `SetProjectDir` for runtime project switch |
+| `AssetsPanel` | Two-pane Explorer layout: left dir tree (`DrawDirPane`, 200 px) + right file pane (`DrawFilePane`); list/card view toggle (FA `LIST`/`BORDER_ALL` buttons); icon-size slider (16–96 px); FA6 type glyphs per file extension + lazy-loaded LRU thumbnail preview for image files; multi-select (Ctrl-toggle / Shift-range / Ctrl+A); native file picker import (nfd-extended, multi-select); drag-to-viewport drop; Create Material/Shader/Folder; `SetProjectDir` for runtime project switch; per-frame thumbnail budget (`kMaxThumbLoadsPerFrame=4`); `CanLoadThumbnail()` guard prevents LRU eviction thrashing |
 | `ProjectBrowserPanel` | Standalone startup modal (not registered in EditorUI); three sections: Create / Open / Recent; uses NFD for folder+file picking |
-| `WorldSettingsPanel` | Scene-level settings: skybox HDR/LUT pickers, tonemap mode, exposure, background color |
+| `WorldSettingsPanel` | Scene background (SolidColor/Skybox) and IBL asset pickers only |
+| `PostProcessPanel` | Bloom (enabled/mipLevels/threshold/strength/radius) + Tonemap (mode/exposure/LUT picker/lutStrength) + Color Grading (enabled/Lift/Midtone/Gain/Saturation/Contrast; Builtin mode only) + SSAO (GTAO) (enabled/radius/strength/bias/directions/steps/blurSharpness); calls `ApplyWorldSettings(ws, false)` on any change; default open |
 | `PlaybackPanel` | Play / Pause / Stop buttons; triggers `Application::SetPlayState` |
 | `ConsolePanel` | Two-tab panel: **Diagnostics** (action-required events from `EditorDiagnostics`) + **Engine Logs** (real-time `SA_LOG_*` stream via `EditorLogCapture`, per-level filter) |
 | `SettingsPanel` | UI scale, overlay toggles (grid/axes/gizmo/outline/skeleton), physics debug toggles (shapes/AABBs/velocity/contacts) |
@@ -1190,12 +1428,17 @@ Phase 2: GPU
 2. scene.Clear(); m_currentScenePath = {}
 3. app.UpdateProjectPaths(projectDir, projectDir/"cook_cache")
    → propagates to VFS (SetCookCacheDir) + SceneRenderer (SetCookCacheDir)
+3.5. resMgr.ClearProjectAssets()     — WaitIdle + destroy GPU textures/meshes/CPU caches
+     matMgr.ClearProjectInstances()  — evict cached MaterialInstances; types survive
+     m_diagnostics.ClearSource(Runtime) — clear stale runtime warnings from previous project
 4. m_assetRegistry->Scan(projectDir/"assets", engineAssetsDir)
 5. m_assetsPanel->SetProjectDir(projectDir/"assets")
 6. LoadSaProject → load startupScene (warns if missing, continues with empty scene)
 7. renderer.ApplyWorldSettings(scene.GetWorldSettings())
 8. PrepareAnimatedEntities + RebuildDrawList
 9. m_projectManager.AddRecent + SaveRecents
+10. Cook-cache check: if cook_cache/ empty (ignoring .gitkeep) AND assets/ has .sameta files →
+    m_diagnostics.Push(Warning, Runtime, "…run Reimport All…")
 ```
 
 `ProjectBrowserPanel` is not an `IEditorWindow` — it is owned by `EditorMode` as a
@@ -1220,6 +1463,20 @@ keyboard-nav focus, so WASD camera movement still works when panels are focused.
    (`newLocal = inverse(parentWorld) × newWorld`), writes to `TransformComponent`,
    calls `Scene::MarkDirty(selected)`
 5. Caches `m_gizmoIsUsing` to suppress cursor capture while dragging
+6. Detects drag-end (`wasUsing && !m_gizmoIsUsing`) → calls `Scene::MarkMaterialDirty()` to
+   rebuild the BVH after a gizmo transform, keeping ray-picking AABBs in sync
+
+### Viewport Interaction (HandleViewportInteraction)
+
+`EditorMode::HandleViewportInteraction()` is called from `OnRenderUI` after `DrawImGuizmo`. It:
+1. Creates a transparent full-screen `##viewport_interact` ImGui window (`NoBringToFrontOnFocus | NoFocusOnAppearing | NoDocking`) as a drop target and picking receiver
+2. Calls `ImGuizmo::SetAlternativeWindow(currentWindow)` so ImGuizmo's `IsHoveringWindow()` check accepts this window as valid — without this, the full-screen overlay makes `g.HoveredWindow` non-null and non-gizmo, causing `mbMouseOver=false` and disabling all gizmo handle hit-tests
+3. `BeginDragDropTarget` — accepts `"SAASSET"` `.glb/.gltf` drops; computes world spawn position via `RayHitHorizontalPlane(ray, 0)` (or 10-unit fallback), calls `SceneHierarchyPanel::TriggerAssetDrop(path, spawnPos)`
+4. Left-click picking: guarded by `!m_gizmoIsUsing && !ImGuizmo::IsOver() && IsWindowHovered()`; fires `SceneRenderer::RaycastScene(ray)` → `SceneHierarchyPanel::SetSelection` or `ClearSelection`
+
+`ScreenToWorldRay(sx, sy)` unprojects NDC via `inverse(proj * view)` at depth 0 and 1; `cam.proj` already has the Vulkan Y-flip so `ndcY = (sy/sh)*2−1` is used directly.
+
+`SceneHierarchyPanel` gained three public methods: `SetSelection(entity)`, `ClearSelection()`, `TriggerAssetDrop(assetPath, spawnPos)`. `AssetDropOp` gained a `spawnPos` field applied to the spawned entity's `TransformComponent::position`.
 
 ### EditorOverlaySettings
 
@@ -1266,10 +1523,12 @@ created on first call to `GetPipeline()`.
 
 ### Descriptor Set Convention
 ```
-set=0  per-frame globals   (FrameUniformsBuffer — bound before any pass)
-set=1  per-material params (MaterialInstance::Bind())
+set=0  per-frame globals     (FrameUniformsBuffer — bound before any pass)
+set=1  per-material params   (MaterialInstance::Bind())
+set=2  per-entity skinning   (GPU skinning passes only: binding0 = SkinMatrices SSBO, binding1 = SkinData SSBO)
 ```
 ComputeProgram owns all its sets; set=0 may be a caller-supplied frame layout.
+Set=2 is only bound for `isSkinned` draw items; static mesh pipelines declare no set=2 layout.
 
 ### HierarchyComponent Is Optional
 Only parented entities carry `HierarchyComponent`. `UpdateTransforms()` uses
@@ -1323,10 +1582,19 @@ individual set reclamation.
 | AssetRegistry | App | Shared UUID index |
 | FrameUniformsBuffer | SceneRenderer | Frame data is renderer-specific |
 | Depth texture | SceneRenderer | Auto-resized on resolution change |
+| HDR_Color | RG slot pool (transient) | Created via `CreateTexture` each frame; aliasable |
+| SSAO result texture | SceneRenderer | R8_UNORM, half-res; imported into RG each frame |
+| TAA history textures (×2) | `TAAFeature` | Persistent RGBA16F ping-pong; imported into RG each frame |
+| AE histogram buffer | RG slot pool (transient) | Cleared each frame via `clearOnCreate=true`; aliasable |
+| AE exposure SSBO | `AutoExposureFeature` | Persistent float; imported into RG as StorageWrite each frame |
+| AE exposure staging | `AutoExposureFeature` | CPU-visible CopyDst; read via `ReadBufferData` after fence wait (1-frame latency) |
+| CG LUT (32³ RGBA16F) | `TonemapFeature` | Persistent 3D texture; baked via `ImmediateCompute` on param change; destroyed in `OnShutdown` |
 | GpuIblBake | SceneRenderer | One-shot renderer operation |
 | White 1×1 | ResourceManager | `GetBuiltin(BuiltinTexture::White1x1)` |
 | DrawItem list | SceneRenderer | Rebuilt by `BuildDrawList(scene)` |
 | RenderFeatures | SceneRenderer | `AddFeature` transfers ownership |
+| `GPUMesh::vertexBuffer/indexBuffer/skinDataBuffer` | ResourceManager | Per-asset, shared across all entities referencing same mesh |
+| `SkinnedMeshComponent::skinMatricesBuffer/skinDescSet` | AnimationSystem | Per-entity; freed in `AnimationSystem::Shutdown()` |
 
 ### Index-Based Handles vs Pointers
 - Safe to copy; no dangling pointer risk on pool realloc
@@ -1346,6 +1614,20 @@ engine defaults when UUIDs collide.
 `ResourceManager::SetProjectCookCache` calls `VFS::SetCookCacheDir` (per project switch).
 `SceneRenderer::SetCookCacheDir` updates the IBL bake write path for the active project.
 
+### GPU Skinning — Shared Mesh Data in GPUMesh
+`GPUMesh` (returned by `ResourceManager::LoadMesh`) holds `vertexBuffer`, `indexBuffer`, and
+`skinDataBuffer` (joints+weights SSBO). These are per-asset, cached by `AssetID`, and shared
+across all entity instances that reference the same mesh. `SkinnedMeshComponent` holds only
+per-entity state: `skinMatricesBuffer` (bone transforms, ~3 KB, updated each frame) and
+`skinDescSet` (set=2 binding the per-entity matrices and per-asset skin data). This eliminates
+N×VRAM waste when multiple entities share the same animated mesh.
+
+### skin_deform.glsl — Shared GPU Skinning Include
+`assets/shaders/skin_deform.glsl` declares the `SkinVertex` struct, the set=2 SSBO bindings
+(`SkinMatrices` + `SkinData`), and the `SkinMatrix()` helper function. All three skinned vertex
+shaders (`deferred_geometry_skinned.vert`, `shadow_skinned.vert`, `selection_mask_skinned.vert`)
+include it, avoiding duplicated bone-blend logic across passes.
+
 ### ProjectBrowserPanel Is Not an IEditorWindow
 `IEditorWindow` panels are registered with `EditorUI` and appear in the Windows menu;
 they are wrapped in `ImGui::Begin/End` by the registration infrastructure.
@@ -1353,3 +1635,134 @@ they are wrapped in `ImGui::Begin/End` by the registration infrastructure.
 other interaction until dismissed. Registering it as an `IEditorWindow` would break the
 modal semantics. Instead it is owned as `unique_ptr<ProjectBrowserPanel>` by `EditorMode`
 and driven directly from `OnRenderUI` after `NewFrame()`.
+
+---
+
+## Profiler
+
+**Location:** `src/core/Profiler.hpp`
+
+Thin wrapper around [Tracy](https://github.com/wolfpld/tracy) (submodule at
+`third_party/tracy`, pinned to **v0.13.1**). All macros expand to nothing in Release
+builds — zero binary overhead, no atomics, no `ScopedZone` objects.
+
+### Public Macros
+
+| Macro | Purpose |
+|-------|---------|
+| `SA_PROFILE_SCOPE()` | Zone named by `__FUNCTION__` |
+| `SA_PROFILE_SCOPE_N(name)` | Zone with explicit string-literal name |
+| `SA_PROFILE_SCOPE_C(name, col)` | Zone with name + `0xRRGGBB` colour |
+| `SA_PROFILE_FRAME()` | Frame boundary marker (call once per frame) |
+| `SA_PROFILE_PLOT(name, val)` | Numeric time-series plot |
+| `SA_PROFILE_MESSAGE(str, len)` | Log message on the timeline |
+
+### Runtime Toggle
+
+```cpp
+Profiler::SetEnabled(bool)  // pause / resume zone collection at runtime
+Profiler::IsEnabled()       // query current state
+```
+
+Backed by `std::atomic<bool>` (relaxed). Each `ScopedZone` receives `IsEnabled()` as its
+`active` flag — disabled zones return immediately without touching Tracy internals.
+
+Two-level toggle:
+- **Compile-time** (`TRACY_ENABLE`): whether Tracy infrastructure exists at all
+- **Viewer connection** (`TRACY_ON_DEMAND`): only records when Tracy Viewer is connected; zero overhead otherwise
+- **`Profiler::SetEnabled`**: fine-grained in-engine pause (e.g. editor pause button)
+
+### CMake Integration
+
+`third_party/CMakeLists.txt` builds `TracyClient` as a static library from
+`tracy/public/TracyClient.cpp`. Target alias: `Tracy::TracyClient`.
+
+```cmake
+# TRACY_ENABLE + TRACY_ON_DEMAND only for Debug / RelWithDebInfo:
+target_compile_definitions(TracyClient PUBLIC
+    $<$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>:TRACY_ENABLE;TRACY_ON_DEMAND>)
+```
+
+`StellarAliaRuntime` links `Tracy::TracyClient` (PUBLIC).
+
+### Implementation Note — No `TRACY_UNIQUE`
+
+Tracy v0.13 removed `TRACY_UNIQUE` as a public macro. `Profiler.hpp` uses its own
+`SA_PP_CAT_` / `SA_PP_CAT2_` token-paste helpers (defined at the top of the header)
+to generate unique `___sa_loc_N` / `___sa_zone_N` variable names via `__LINE__`.
+
+### Profiling Zones
+
+**`Application::Run` loop** (`src/engine/Application.cpp`):
+```
+Frame
+  ├─ Input
+  ├─ Physics
+  ├─ ModeUpdate
+  └─ Animation
+```
+
+**`SceneRenderer::RenderFrame`** (`src/function/renderer/SceneRenderer.cpp`):
+```
+RenderFrame
+  ├─ Shadow::AddPasses / GBuffer::AddPasses / DeferredLighting::AddPasses / SSAO::AddPasses
+  ├─ GPU::BeginFrame   ← fence wait; dominates RenderFrame when GPU-bound
+  ├─ RG::Compile
+  ├─ RG::Execute
+  │     ├─ Shadow::Execute
+  │     └─ GBuffer::Execute
+  └─ GPU::Present
+```
+
+`BuildDrawList` has its own top-level `SA_PROFILE_SCOPE_N("BuildDrawList")` zone.
+
+---
+
+## GPU Performance Notes
+
+Measurements taken with Tracy + RenderDoc on Sponza scene (104 draw calls, RTX 3070).
+
+### CPU vs GPU Bottleneck
+
+Tracy confirmed the engine is **GPU-bound**:
+
+| Zone | Share of `RenderFrame` | Meaning |
+|------|------------------------|---------|
+| `GPU::BeginFrame` | ~78% | CPU blocked on in-flight fence from previous frame — GPU is not finished |
+| `RG::Execute` | ~18% | Actual Vulkan command recording |
+| Other sub-phases | ~4% | Uniforms upload, AddPasses, Present |
+
+CPU submits commands in ~0.2% of `RenderFrame` wall time; 78% is pure fence wait.
+Optimising CPU-side code (pipeline sorting, etc.) does not improve FPS when GPU-bound.
+
+### Red-Frame Spikes
+
+`RG::Execute` occasionally spikes to ~30% of frame time on the first draw of a new
+material. Cause: **PSO (pipeline state object) lazy compilation** on first use per session
+in `ShaderProgram::GetOrCreatePipeline`. Mitigation: pipeline pre-warm pass at load time
+(not yet implemented).
+
+### Texture Bandwidth Hotspots
+
+RenderDoc GPU timestamps on Sponza (GBuffer pass):
+
+| Mesh | Triangles | GPU time | Root cause |
+|------|-----------|----------|------------|
+| Wall | 84 | ~1 253 μs | Full-screen coverage → millions of pixels × PBR texture sample |
+| Floor | 15 | ~440 μs | Same — large screen area drives texture bandwidth, not geometry count |
+
+Fix: generate mipmaps for cook pipeline output (`.satex`) and compress albedo/normal maps
+to **BC7** / **BC5** respectively. Mipmap hardware filtering reduces bandwidth proportionally
+to mip level; BC compression reduces VRAM footprint and cache miss rate 4–8×.
+
+### Alpha-Test Performance
+
+`discard` in `deferred_geometry.frag` for plant face-cards breaks **Early-Z**: the GPU
+cannot cull fragments before the shader runs. Transparent vegetation should be rendered
+last in the GBuffer pass (sorted back-to-front within the alpha-test subset) to minimise
+overdraw. Performance impact is secondary to the correctness fix (Issue #52 alpha-test bug).
+
+### Future Optimisations (Tracked in Issues)
+
+- **Mipmap + BC7 texture compression**: cook pipeline change in `tools/cook/`.
+- **PSO pre-warm**: iterate all registered `MaterialType`s at load time, compile pipelines eagerly.

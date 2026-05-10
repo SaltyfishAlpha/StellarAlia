@@ -76,6 +76,7 @@ public:
     InputSystem&                 GetInputSystem()      { return m_input; }
     Platform::GLFWInputProvider& GetInputProvider();
     Resource::ResourceManager&   GetResourceManager()  { return m_resMgr; }
+    MaterialManager&             GetMaterialManager()  { return m_matMgr; }
     Resource::AssetRegistry&     GetAssetRegistry()    { return m_assetRegistry; }
     // Returns the concrete Vulkan device. Use only in the editor layer.
     RHI::VulkanDevice&           GetVulkanDevice();

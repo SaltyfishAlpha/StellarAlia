@@ -249,6 +249,66 @@ void VulkanCommandList::GenerateMipmaps(RHITextureHandle texture) {
                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
+static std::pair<VkPipelineStageFlags2, VkAccessFlags2>
+ToVkBufferStageAccess(RHIBufferState state) {
+    switch (state) {
+        case RHIBufferState::StorageRead:
+            return {VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_2_SHADER_STORAGE_READ_BIT};
+        case RHIBufferState::StorageWrite:
+            return {VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT};
+        case RHIBufferState::IndirectRead:
+            return {VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+                    VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT};
+        case RHIBufferState::CopySrc:
+            return {VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT};
+        case RHIBufferState::CopyDst:
+            return {VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT};
+        case RHIBufferState::VertexRead:
+            return {VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT,
+                    VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT};
+        default:
+            return {VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE};
+    }
+}
+
+void VulkanCommandList::FillBuffer(RHIBufferHandle buffer,
+                                    uint64_t offset, uint64_t size,
+                                    uint32_t value) {
+    VkBuffer vkBuf = m_device->GetVkBuffer(buffer);
+    if (vkBuf == VK_NULL_HANDLE) return;
+    vkCmdFillBuffer(m_cmd, vkBuf, offset, size, value);
+}
+
+void VulkanCommandList::BufferBarrier(RHIBufferHandle buffer,
+                                       RHIBufferState from,
+                                       RHIBufferState to) {
+    VkBuffer vkBuf = m_device->GetVkBuffer(buffer);
+    if (vkBuf == VK_NULL_HANDLE) return;
+
+    const auto [srcStage, srcAccess] = ToVkBufferStageAccess(from);
+    const auto [dstStage, dstAccess] = ToVkBufferStageAccess(to);
+
+    VkBufferMemoryBarrier2 barrier{};
+    barrier.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
+    barrier.srcStageMask        = srcStage;
+    barrier.srcAccessMask       = srcAccess;
+    barrier.dstStageMask        = dstStage;
+    barrier.dstAccessMask       = dstAccess;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.buffer              = vkBuf;
+    barrier.offset              = 0;
+    barrier.size                = VK_WHOLE_SIZE;
+
+    VkDependencyInfo di{};
+    di.sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    di.bufferMemoryBarrierCount = 1;
+    di.pBufferMemoryBarriers    = &barrier;
+    vkCmdPipelineBarrier2(m_cmd, &di);
+}
+
 void VulkanCommandList::CopyBuffer(RHIBufferHandle src, RHIBufferHandle dst,
                                     uint64_t srcOff, uint64_t dstOff,
                                     uint64_t size) {
