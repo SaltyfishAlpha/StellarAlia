@@ -15,6 +15,7 @@
 24. 透明材质面片（植物等）
 54. **[低优先级，待复现] Reimport 后内存缓存未失效导致 mesh 显示异常** — Reimport 更新 cook cache 磁盘数据后，`ResourceManager` 按 UUID 缓存的 GPU mesh handle 未刷新，渲染仍用旧数据；重启后缓存清空才恢复正常。根因：`ReimportDir` 完成后未调用 `ClearProjectAssets()`。修复方向：reimport 完成时触发 `ResourceManager::ClearProjectAssets()`（同 Issue #38 逻辑，触发时机改为 reimport 后）。现象：曾在 BoomBox.glb（带动画）上观察到固定面片破碎，无法稳定复现。
 23. 程序化天空盒，选择一个物体作为光源方向
+22. 调试渲染：面片id着色，lod着色，随机着色，depth着色...
 
 ---
 
@@ -35,31 +36,8 @@
 
 ---
 
-## Issue #45 — Depth of Field（景深）
-
-**优先级：中（依赖 #40，可选依赖 #42 TAA 降噪）**
-
-### 目标
-
-基于 CoC（Circle of Confusion）的近景/远景 Bokeh 模糊，支持手动焦距和自动对焦。
-
-### 设计
-
-- **CoC pass**：depth → CoC（R16F，viewport），公式 `coc = (depth - focusDist) * aperture / depth`
-- **近景 blur**（分离式，两趟）+ **远景 blur**（同）：利用 CoC 大小控制卷积核半径
-- **Composite pass**：CoC 混合近/远/对焦三层，写回 hdrTex（Tonemap 之前）
-- 新增瞬态纹理：`cocTex`(R16F)、`dofNear`(RGBA16F)、`dofFar`(RGBA16F)——可参与 aliasing
-
-### 参数
-
-```cpp
-bool  dofEnabled      = false;
-float focusDistance   = 5.0f;
-float aperture        = 1.4f;   // f/N
-float focalLength     = 50.0f;  // mm
-int   dofSamples      = 16;     // 质量
-bool  autoFocus       = false;
-```
+## Issue #45 — Depth of Field（景深） ✅ DONE
+<!-- CoC 从深度重建（薄透镜公式）→ 分离式近/远高斯模糊（4 pass H+V）→ smoothstep 三层合成；DoFFeature 插入 Bloom 之后 Tonemap 之前，disabled 时零开销；参数序列化到 .sascene；Phase 2 路线：六边形 3-pass / Scatter-as-Gather 修复方形高光 -->
 
 ---
 
@@ -562,195 +540,67 @@ virtual void DrawIndexedIndirect(
 
 ---
 
-## Issue #59 — 自定义 .saglsl Shading Model 运行时 Cook（项目无需重编引擎）
+## Issue #60 — Mesh Split/Merge Cook 工具
 
-**优先级：中（解锁外部项目自定义 shading model；同时消除 demo_project/CMakeLists.txt 的 CookDemoShaders 块）**
+**优先级：低（按需启动；触发条件：需要在场景中独立控制 glTF 模型内部各节点的变换时）**
 
 ### 目标
 
-当编辑器加载含 `assets/shaders/*.saglsl` 文件的项目时，自动在运行时触发 shader cook 流水线，将 `.saglsl` 编译为 `.gbuffer.frag.spv` + dispatch GLSL，重编 `deferred_lighting.frag.spv`（dispatch 变化时），热替换 DeferredLightingFeature 的 ShaderProgram，并注册新 MaterialType——外部项目无需 CMakeLists.txt，无需重编引擎。
+独立 CLI 工具，输入 `.glb` 或 `.samesh`，输出多个 `.samesh`（split）或单个 `.samesh`（merge），以及可选的 GLB 导出（round-trip 编辑用）。工具与场景、ECS、灯光无关。
+
+```
+StellarAliaMeshTool split --input car.glb --output cook_cache/ [--by-node|--by-material]
+StellarAliaMeshTool merge --inputs wheel_fl.samesh wheel_fr.samesh --output cook_cache/wheels.samesh
+StellarAliaMeshTool export --input cook_cache/<uuid>.samesh --output car_cooked.glb
+```
 
 ### 设计
 
-#### A. 时序（在 LoadProject 中）
+**Split**：输入 `.glb`（多 mesh node）或 `.samesh`（多 submesh）；每个节点输出独立 `.samesh`，`localTransform = identity`（由场景/caller 负责设置）。UUID 派生规则：`DeriveNodeMeshID(glbUUID, nodeIndex)`，与 CookMesh 保持一致，stable。
 
-```
-app.UpdateProjectPaths(projectDir, cookCacheDir)
-  └─ SceneRenderer::SetCookCacheDir()
-       ├─ [现有] VFS::SetCookCacheDir, IBL 路径更新
-       └─ [新增] RuntimeShaderCook::Cook(cfg) → 存入 m_pendingCookResult
-               ├─ 扫描 projectAssets/shaders/*.saglsl
-               ├─ mtime 比对 cook_cache/.shader_manifest.json  → 跳过未变更
-               ├─ spawn StellarAliaShaderCook → cook_cache/shaders/*.spv/.refl + generated/
-               ├─ dispatch 变化 → spawn glslc 重编 deferred_lighting.frag
-               │     -I ENGINE_SHADER_SRC_DIR -I cook_cache/generated/shaders/
-               │     deferred_lighting.frag → cook_cache/shaders/deferred_lighting.frag.spv
-               └─ 更新 .shader_manifest.json
+**Merge**：输入多个 `.samesh`；输出单个 `.samesh`，各 submesh 保留 `localTransform`，相对位置可还原。合并后 UUID 由调用方指定（手动分配，避免与派生 UUID 冲突）。
 
-resMgr.ClearProjectAssets()          ← WaitIdle + 销毁 GPU 资产
-matMgr.ClearProjectInstances()
-
-[新增] renderer.ApplyProjectShaderTypes()  ← WaitIdle 已完成，安全做 GPU 工作
-    ├─ matMgr.ClearProjectTypes()     ← 清除上一个项目的 isProjectType 类型
-    ├─ if m_pendingCookResult.deferredLightDirty:
-    │     DeferredLightingFeature::ReloadShaders(device, cook_cache/shaders/deferred_lighting.frag.spv)
-    │       ← 读 .spv 文件 → bytes → ShaderProgram::Reload() → 清 pipeline cache + 重建 handle
-    └─ RegisterTypesFromShaderDir(cook_cache/shaders/, isProjectType=true)
-```
-
-#### B. `RuntimeShaderCook`（新建 `src/function/shader_cook/`）
-
-```cpp
-struct RuntimeShaderCookConfig {
-    std::filesystem::path projectAssetsDir;      // project/assets/
-    std::filesystem::path cookCacheDir;          // project/cook_cache/
-    const char*           glslcPath;             // ApplicationPath::GLSLC_PATH
-    const char*           binDir;                // ApplicationPath::BIN_DIR (ShaderCookTool + ReflectTool 在此)
-    const char*           engineShaderSrcDir;    // ApplicationPath::ENGINE_SHADER_SRC_DIR
-};
-
-struct RuntimeShaderCookResult {
-    bool        success            = false;
-    bool        deferredLightDirty = false;  // dispatch 变化，需热替换 deferred_lighting
-    std::string errors;                      // 子进程 stderr 输出（编译错误）
-};
-
-class RuntimeShaderCook {
-public:
-    static RuntimeShaderCookResult Cook(const RuntimeShaderCookConfig& cfg);
-private:
-    static bool RunSubprocess(const std::string& cmd, std::string& outErr);
-    // popen/_popen 跨平台（MSVC + POSIX 均支持），同步阻塞，适合编辑器非热路径
-};
-```
-
-`Cook()` 实现逻辑：
-1. `HasSaglslFiles(projectAssetsDir/shaders/)` — 无则直接 `return {success=true}`
-2. 读 `cookCacheDir/.shader_manifest.json` 记录的各 `.saglsl` mtime；若全部未变且 `deferred_lighting.frag.spv` 存在，skip cook（`deferredLightDirty=false`）
-3. `fs::create_directories(cookCacheDir/shaders/, cookCacheDir/generated/shaders/)`
-4. spawn `StellarAliaShaderCook`（`BIN_DIR/StellarAliaShaderCook[.exe]`）：
-   ```
-   --scan-dir  <projectAssetsDir>
-   --spv-out   <cookCacheDir>/shaders
-   --dispatch-out <cookCacheDir>/generated/shaders
-   --glslc     <glslcPath>
-   --reflect-tool <binDir>/ShaderReflectTool[.exe]
-   --include   <engineShaderSrcDir>
-   --include   <cookCacheDir>/generated/shaders
-   ```
-5. 若第一步 dispatch hash 变化（对比 `shading_dispatch.glsl` 内容前后），spawn `glslc` 重编：
-   ```
-   glslc -fshader-stage=frag
-         -I <engineShaderSrcDir>
-         -I <cookCacheDir>/generated/shaders
-         <engineShaderSrcDir>/deferred_lighting.frag
-         -o <cookCacheDir>/shaders/deferred_lighting.frag.spv
-   ```
-   并设 `deferredLightDirty=true`
-6. 更新 `.shader_manifest.json`
-
-#### C. `ApplicationPath.hpp.in` 补充
-
-```cpp
-// 新增：供 RuntimeShaderCook 运行时重编 deferred_lighting.frag 时作为 include 根目录
-inline constexpr const char* ENGINE_SHADER_SRC_DIR = "@CMAKE_SOURCE_DIR@/assets/shaders";
-```
-
-对应 `CMakeLists.txt` 的 `configure_file` 调用无需额外参数，`CMAKE_SOURCE_DIR` 已自动展开。
-
-#### D. `MaterialManager` — 项目 MaterialType 标记
-
-```cpp
-// MaterialType 内部新增：
-bool isProjectType = false;  // true = 由 .saglsl runtime cook 注册，切换项目时清除
-
-// 新公开方法：
-void ClearProjectTypes();    // 移除所有 isProjectType==true 的类型条目
-
-// RegisterTypesFromShaderDir 新增参数：
-void RegisterTypesFromShaderDir(const std::string& dir,
-                                const FeatureInitContext& ctx,
-                                bool isProjectType = false);
-```
-
-#### E. `ShaderProgram::Reload`
-
-```cpp
-bool ShaderProgram::Reload(IRHIDevice* device,
-                           std::span<const uint8_t> newSpv,
-                           const ShaderReflection& fragRefl);
-// 实现：清空 m_pipelineCache（逐条 device.DestroyPipeline）；
-//      device.DestroyShader(m_fragShader)；
-//      m_fragShader = device.CreateShader(newSpv, fragRefl)；
-//      重建 set=1 desc layout（若反射变化）；
-//      调用方需保证 WaitIdle 已完成
-```
-
-#### F. `SceneRenderer` 变化摘要
-
-```cpp
-// SceneRenderer.hpp 新增：
-RuntimeShaderCookResult m_pendingCookResult;    // SetCookCacheDir 存入，ApplyProjectShaderTypes 消费
-void ApplyProjectShaderTypes();                 // 在 WaitIdle 后调用
-
-// DeferredLightingFeature 新增方法：
-void ReloadShaders(IRHIDevice& device, const std::filesystem::path& spvPath);
-// → 读 spvPath bytes → ShaderProgram::Reload
-
-// DeferredLightingFeature::OnInit 检查顺序：
-// 1. 先查 cookCacheDir/shaders/deferred_lighting.frag.spv（项目专属）
-// 2. 缺失则用 BUILTIN_SHADER_DIR/deferred_lighting.frag.spv（引擎内置）
-```
-
-#### G. `demo_project/CMakeLists.txt` 清理
-
-删除：
-```cmake
-# 整个 if(TARGET StellarAliaShaderCook AND GLSLC_EXECUTABLE) ... endif() 块
-# 以及 add_custom_target(CookDemoShaders ALL ...) 行
-```
-
-根 `CMakeLists.txt` 删除：
-```cmake
-if(TARGET StellarAliaBuiltinShaders AND TARGET CookDemoShaders)
-    add_dependencies(StellarAliaBuiltinShaders CookDemoShaders)
-endif()
-```
-
-`sa_cook_directory`（非 shader 资产）保留，为 CI/CD 用途。
+**Export to GLB**（可选）：`samesh → GLB → [Blender 编辑] → GLB → cook → samesh` round-trip。
 
 ### 实施步骤
 
-- [ ] 1. `src/ApplicationPath.hpp.in` — 新增 `ENGINE_SHADER_SRC_DIR = "@CMAKE_SOURCE_DIR@/assets/shaders"`
-- [ ] 2. 新建 `src/function/shader_cook/RuntimeShaderCook.hpp/.cpp` — `Cook()` 实现（HasSaglslFiles、mtime manifest、RunSubprocess spawn StellarAliaShaderCook + glslc、更新 manifest）
-- [ ] 3. `src/function/material/MaterialManager.hpp/.cpp` — `MaterialType::isProjectType`；`ClearProjectTypes()`；`RegisterTypesFromShaderDir` 加 `isProjectType` 参数
-- [ ] 4. `src/function/material/ShaderProgram.hpp/.cpp` — `Reload(device, spv, refl)` 方法（清 pipeline cache + 重建 frag shader handle）
-- [ ] 5. `src/function/renderer/SceneRenderer.hpp` — `m_pendingCookResult`；`ApplyProjectShaderTypes()` 声明；`DeferredLightingFeature::ReloadShaders()` 声明
-- [ ] 6. `src/function/renderer/SceneRenderer.cpp` — `SetCookCacheDir` 末尾调用 `RuntimeShaderCook::Cook()`；`ApplyProjectShaderTypes` 实现（ClearProjectTypes → ReloadShaders → RegisterTypesFromShaderDir）；`DeferredLightingFeature::OnInit` 检查 cookCacheDir 先于内置
-- [ ] 7. `editor/EditorMode.cpp` — `LoadProject` 在 `ClearProjectAssets()` 之后、`Scan()` 之前调用 `renderer.ApplyProjectShaderTypes()`
-- [ ] 8. `demo_project/CMakeLists.txt` — 删除 `CookDemoShaders` 块；根 CMakeLists 删除对应 `add_dependencies` 行
-- [ ] 9. `docs/architecture.md` — 更新 "Custom Shading Models" 章节（4 步注册流程改为：运行时 Cook + RegisterTypesFromShaderDir）；"Build-Time Pipeline" 注明 dispatch 生成已迁移至运行时
+- [ ] `tools/mesh_tool/main.cpp` — CLI 入口（subcommand: split / merge / export）
+- [ ] `tools/mesh_tool/MeshSplit.hpp/.cpp`
+- [ ] `tools/mesh_tool/MeshMerge.hpp/.cpp`
+- [ ] `tools/mesh_tool/MeshExportGlb.hpp/.cpp`（依赖 tinygltf write path）
+- [ ] `CMakeLists.txt` 添加 `add_subdirectory(tools/mesh_tool)`
 
-### 边界情况与约束
+---
 
-| 场景 | 处理 |
-|------|------|
-| `GLSLC_PATH` 为空（用户未安装 Vulkan SDK）| `Cook()` 提前 return `{success=false}`；`SA_LOG_WARN` 提示；项目只能使用内置 PBR，不崩溃 |
-| `.saglsl` 编译错误 | `StellarAliaShaderCook` 仍生成 `cook_errors.txt` 并继续处理其他 model；`Cook()` 读取错误文本放入 `result.errors`，由 EditorMode 转发至 `SA_LOG_WARN` |
-| 项目无 `.saglsl` 文件 | `HasSaglslFiles` 返回 false，直接跳过，`deferredLightDirty=false` |
-| `.saglsl` 文件未变化（二次加载同一项目）| mtime 比对命中，跳过所有 spawn，`deferredLightDirty=false` |
-| ID 稳定性 | `StellarAliaShaderCook` 已按字母顺序分配 ID，与构建时行为完全一致 |
-| 项目切换时旧 MaterialType 残留 | `ClearProjectTypes()` 在 `RegisterTypesFromShaderDir` 前调用；WaitIdle 由步骤 3.5 的 `ClearProjectAssets()` 保证 |
-| `deferred_lighting.frag.spv` 缺失于 cook_cache | `DeferredLightingFeature::OnInit` fallback 到内置 `.spv`；项目 `.saglsl` model 不可用（需要 Cook 成功后才注册） |
-| `ShaderProgram::Reload` 时 GPU 仍在使用旧 pipeline | WaitIdle 前置（LoadProject 步骤 3.5）保证安全 |
-| Windows 路径传给 glslc `-I` 参数 | 使用 `path.generic_string()` 输出正斜杠，避免 MSVC shell 转义问题 |
-| `ENGINE_SHADER_SRC_DIR` 在发布包中不存在 | 当前 issue 针对编辑器开发场景；发布包的 GLSL 源码打包策略是独立 issue |
-| PlayState != Editing | `LoadProject` 现有 guard 阻止进入，无需额外保护 |
+## Issue #61 — ShaderVariantCache（G-Buffer 宏变体系统）
 
-**不做**：文件监视器（修改 `.saglsl` 自动触发 Cook）；Playing 状态热加载；非 `.saglsl` shader 的运行时 cook；`sa_cook_directory`（非 shader 资产）的运行时化（已由编辑器运行时 cook 处理）。
+**优先级：中（GPU Skinning 已通过独立 SkinnedMesh 路径实现；触发条件：alpha cutout 植物材质、profiling 显示 geometry pass 无效分支开销显著时）**
 
-### 受益 issues
+### 目标
 
-- **demo_project 去 CMake 化**：删除 `CookDemoShaders` 块后，`demo_project/CMakeLists.txt` 仅剩 `sa_cook_directory`，最终可完全移除
-- **#28 .saglsl 图标**：AssetsPanel 对 `.saglsl` 文件可区分 cook 状态（未 cook / cook 成功 / 编译错误）
-- **未来 #N shader 文件监视**：`RuntimeShaderCook::Cook()` 接口可直接复用，仅需加 FileWatcher 触发
+为 G-Buffer fill 阶段（`deferred_geometry.vert/.frag`）引入 macro bitmask 变体系统，Cook 时预编译所有合法组合，运行时 `ShaderVariantCache` 按需加载对应 SPIR-V，消除 shader 内的动态分支。
+
+### 变体位定义
+
+| bit | 宏 | 意义 |
+|-----|----|------|
+| 0 | `HAS_ALBEDO_MAP` | 有 albedo 贴图，否则纯色 |
+| 1 | `HAS_NORMAL_MAP` | 有法线贴图，否则插值法线（跳过 TBN 计算）|
+| 2 | `HAS_METALLIC_ROUGHNESS_MAP` | 有金属/粗糙贴图 |
+| 3 | `HAS_EMISSIVE_MAP` | 有自发光贴图 |
+| 4 | `HAS_SKINNING` | 骨骼蒙皮（顶点着色器）|
+| 5 | `HAS_ALPHA_CUTOUT` | 镂空透明（discard）|
+
+### 设计（方案 B：Cook 时预编译）
+
+Cook 工具枚举合法 bitmask 组合，编译为 `deferred_geometry.<mask>.vert.spv`（和 `.frag.spv`）。运行时 `ShaderVariantCache` 持有 `map<uint32_t, ShaderProgram>`，`GetOrCreate(mask)` 按需加载。`SceneRenderer::BuildDrawList` 按实体资源状态（是否有各贴图、是否 skinned、是否 alpha cutout）计算 mask 并选择对应变体。
+
+> **与自定义 shading model 的关系**：着色模型派发（`*.lighting.glsl` + `shading_dispatch.glsl`）作用于 deferred lighting 阶段，与本 issue 正交，互不替代。
+
+### 实施步骤
+
+- [ ] 定义 `ShaderFeatureMask` 枚举（`src/function/renderer/ShaderVariantCache.hpp`）
+- [ ] Cook shader 工具枚举变体，输出 `deferred_geometry.<mask>.vert.spv` / `.frag.spv`
+- [ ] 实现 `ShaderVariantCache`：`map<uint32_t, ShaderProgram>` + `GetOrCreate(mask)`
+- [ ] `BuildDrawList` 按实体资源计算 mask，`DrawItem` 携带对应变体引用
+- [ ] GBufferFeature::AddPasses 使用 DrawItem 内的变体 ShaderProgram 替代固定 program

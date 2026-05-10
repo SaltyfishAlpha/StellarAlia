@@ -487,6 +487,34 @@ private:
         RHI::RHIDescSetHandle m_compositeDescSet;
     };
 
+    // Depth of Field: CoC from depth → separable near/far blur → composite.
+    // Runs after Bloom and before Tonemap; when disabled is a zero-cost no-op.
+    class DoFFeature final : public RenderFeature {
+    public:
+        void OnInit    (const FeatureInitContext& ctx) override;
+        void OnShutdown(RHI::IRHIDevice* device)       override;
+        void AddPasses (SceneRenderer& renderer, const FrameContext& ctx,
+                        const RendererHandles& handles, const entt::registry& reg,
+                        uint32_t w, uint32_t h) override;
+
+        // Set by AddPasses; RenderFrame redirects handles.hdr to this when valid.
+        RGTextureHandle m_outputHandle;
+
+        bool  m_enabled     = false;
+        float m_focusDist   = 5.0f;
+        float m_aperture    = 1.4f;
+        float m_focalLength = 50.0f;
+        int   m_samples     = 16;
+        float m_maxCocPx    = 20.0f;
+    private:
+        MaterialType*         m_cocMat       = nullptr;
+        MaterialType*         m_blurMat      = nullptr;
+        MaterialType*         m_compositeMat = nullptr;
+        RHI::RHIDescSetHandle m_cocDescSet;
+        RHI::RHIDescSetHandle m_blurDescSets[4]; // near-H, near-V, far-H, far-V
+        RHI::RHIDescSetHandle m_compositeDescSet;
+    };
+
     // GPU histogram → exponential-smoothing exposure adaptation.
     // Runs after DeferredLighting on the raw HDR buffer; skipped when disabled.
     class AutoExposureFeature final : public RenderFeature {
@@ -559,6 +587,7 @@ private:
     SSAOFeature*          m_ssaoFeature    = nullptr;
     TAAFeature*           m_taaFeature     = nullptr;
     AutoExposureFeature*  m_aeFeature      = nullptr;
+    DoFFeature*           m_dofFeature     = nullptr;
     RenderFeature*        m_tonemapFeature = nullptr;  // either TonemapFeature or LutTonemapFeature
 
     // ── Solid-color ambient environment ──────────────────────────────────────

@@ -119,6 +119,26 @@ void PostProcessPanel::OnDraw() {
 
     ImGui::Spacing();
 
+    // ── Depth of Field ────────────────────────────────────────────────────────
+    if (ImGui::CollapsingHeader("Depth of Field")) {
+        if (ImGui::Checkbox("Enabled##dof", &pp.dofEnabled))
+            liveUpdate = true;
+        ImGui::BeginDisabled(!pp.dofEnabled);
+        if (ImGui::DragFloat("Focus Distance (m)##dof", &pp.focusDistance, 0.1f, 0.1f, 1000.f, "%.2f"))
+            liveUpdate = true;
+        if (ImGui::DragFloat("Aperture (f/)##dof", &pp.aperture, 0.1f, 0.5f, 22.f, "f/%.1f"))
+            liveUpdate = true;
+        if (ImGui::DragFloat("Focal Length (mm)##dof", &pp.focalLength, 1.f, 12.f, 200.f, "%.0f mm"))
+            liveUpdate = true;
+        if (ImGui::SliderInt("Samples##dof", &pp.dofSamples, 4, 32))
+            liveUpdate = true;
+        if (ImGui::SliderFloat("Max CoC (px)##dof", &pp.maxCocPx, 2.f, 40.f, "%.0f"))
+            liveUpdate = true;
+        ImGui::EndDisabled();
+    }
+
+    ImGui::Spacing();
+
     // ── TAA (Temporal AA) ─────────────────────────────────────────────────────
     if (ImGui::CollapsingHeader("Temporal Anti-Aliasing (TAA)")) {
         if (ImGui::Checkbox("Enabled##taa", &pp.taaEnabled))

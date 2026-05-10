@@ -239,27 +239,23 @@ Reflection sidecar (.refl)
 Both files are output to `<build>/bin/assets/shaders/builtin/`.
 CMake `DEPENDS` tracking ensures a changed source triggers recompilation.
 
-### Custom Shading Model Dispatch (Build-Time)
+### Shading Dispatch Stub (Build-Time)
 
-Each material type beyond PBR is defined by a `*.lighting.glsl` evaluator file.
-`cmake/GenerateShadingDispatch.cmake` assembles them into two generated GLSL headers:
+`cmake/GenerateShadingDispatch.cmake::generate_shading_dispatch()` produces two GLSL headers
+into `generated/shaders/` with an **empty evaluator list**:
 
 ```
-assets/shaders/builtin/simple_albedo.lighting.glsl
-        │
-        ▼  register_lighting_evaluator() + generate_shading_dispatch()
-generated/shaders/shading_model_ids.glsl   — #define SHADING_MODEL_SIMPLE_ALBEDO 1u
-generated/shaders/shading_dispatch.glsl    — #include per-model + DispatchShadingModel()
-generated/shaders/evaluators/simple_albedo.lighting.glsl  (build-time copy)
+generated/shaders/shading_model_ids.glsl   — #define SHADING_MODEL_PBR 0u  (only PBR)
+generated/shaders/shading_dispatch.glsl    — DispatchShadingModel() stub returning false
 ```
 
-`DispatchShadingModel(modelID, gbuf, out_color)` is called by `deferred_lighting.frag`;
-it switches on `modelID` and invokes the appropriate `Evaluate_<Name>()` function.
+`deferred_lighting.frag` `#include`s both files at build time so the engine compiles cleanly.
+The real dispatch (with project custom models) is generated at editor runtime by `ShaderCookLib`
+and written into `cook_cache/generated/shaders/`; `deferred_lighting.frag` is then recompiled
+against that output — see [Custom Shading Models](#custom-shading-models).
 
-**Dependency tracking:** evaluator copies are `add_custom_command` build steps (not
-configure-time `configure_file`). Editing a `*.lighting.glsl` triggers a file copy and
-therefore SPV recompilation without a CMake re-run. Adding or removing evaluator files
-still requires a CMake re-run to regenerate the dispatch switch and model-ID defines.
+No `*.lighting.glsl` source files exist in `assets/shaders/`; evaluator files are intermediate
+outputs produced by `ShaderCookLib` from `.saglsl` sources and placed in `cook_cache/`.
 
 ---
 
@@ -539,8 +535,17 @@ struct PostProcessSettings {
     float aeLowPercent   =  0.45f;
     float aeHighPercent  =  0.95f;
 
-    // Future-effect placeholders (disabled; no pass implementation yet)
-    bool dofEnabled = false, motionBlurEnabled = false;
+    // Depth of Field (DoF)
+    bool  dofEnabled    = false;
+    float focusDistance = 5.0f;   // view-space focus plane distance (meters)
+    float aperture      = 1.4f;   // f-number (lower = shallower DoF)
+    float focalLength   = 50.0f;  // mm
+    int   dofSamples    = 16;     // blur kernel sample count [4, 32]
+    bool  autoFocus     = false;  // Phase 2: GPU depth readback (not yet implemented)
+    float maxCocPx      = 20.0f;  // max CoC radius in pixels
+
+    // Future-effect placeholder
+    bool motionBlurEnabled = false;
 };
 ```
 
@@ -561,7 +566,7 @@ struct WorldSettings {
     AssetID brdfLut;
     AssetID skyboxCubemap;
 
-    PostProcessSettings pp;  // bloom + tonemap + future-effect params
+    PostProcessSettings pp;  // bloom + tonemap + SSAO + TAA + DoF + future-effect params
 };
 ```
 
@@ -569,7 +574,7 @@ struct WorldSettings {
 SH L0 ambient term and writes it to a 1×1 solid-colour cubemap used as `t_PrefilteredEnv`.
 
 **PostProcess hot-swap:** `ApplyWorldSettings(ws, updateIBL=false)` updates `BloomFeature`
-runtime fields (`m_enabled/threshold/strength/radius`), SSAO/TAA/AutoExposure parameters,
+runtime fields (`m_enabled/threshold/strength/radius`), SSAO/TAA/AutoExposure/DoF parameters,
 and tonemap parameters instantly from `ws.pp` without a device stall. `pp.tonemapMode` switching
 retains the WaitIdle feature-slot replacement for `LutTonemapFeature`. `pp.bloomMipLevels`
 change is **deferred** — set `m_pendingBloomMipCount`; actual GPU rebuild happens at the
@@ -1186,6 +1191,7 @@ Normal encoding uses **Octahedral Normal Encoding** (OctEncode/OctDecode).
 | `TAAFeature` | always registered; disabled → passes `handles.hdr` through | TAA-resolved into ping-pong history; `handles.taaResolved` | `taa_resolve.frag` |
 | `AutoExposureFeature` | always registered; skips if `pp.autoExposureEnabled==false` | 256-bin log-lum histogram → weighted percentile EV → exponential-smoothing exposure; 1-frame CPU readback via staging; reads `handles.hdr` (pre-TAA content) | `postfx_histogram.comp`, `postfx_exposure_adapt.comp` |
 | `BloomFeature` | always registered; skips if `pp.bloomEnabled==false` | threshold reads `taaResolved`; composite writes back to `handles.hdr` | `bloom_*.frag` |
+| `DoFFeature` | always registered; skips if `pp.dofEnabled==false` | CoC from depth → separable near/far Gaussian blur (H+V × 2) → smoothstep composite; sets `handles.hdr` to DoF output | `dof_coc.frag`, `dof_blur.frag`, `dof_composite.frag` |
 | `TonemapFeature` | always registered; active when `pp.tonemapMode==Builtin` | swapchain LDR | `postfx_tonemap.frag` (ACES + optional parametric CG LUT via `sampler3D`); rebakes 32³ LUT via `ImmediateCompute` when `ColorGradingSettings` changes |
 | `LutTonemapFeature` | hot-swapped in when `pp.tonemapMode==LUT` | swapchain LDR | `postfx_lut_tonemap.frag` |
 | `SelectionOutlineFeature` | always | outline on swapchain | `selection_outline_dilate.frag` + composite |
@@ -1193,7 +1199,7 @@ Normal encoding uses **Octahedral Normal Encoding** (OctEncode/OctDecode).
 | `DebugOverlayFeature` | always | debug lines on swapchain | `debug_line.vert/.frag` |
 | user `RenderFeature`s | `AddFeature(...)` | custom | custom |
 
-`BloomFeature` and `TAAFeature` are always in the feature list; their `AddPasses` early-returns when disabled.
+`BloomFeature`, `TAAFeature`, and `DoFFeature` are always in the feature list; their `AddPasses` early-returns when disabled.
 `TonemapFeature` ↔ `LutTonemapFeature` hot-swapped at runtime by `ApplyWorldSettings` (WaitIdle + slot replace).
 
 ```cpp
@@ -1221,7 +1227,10 @@ GBuffer(jittered proj) → DeferredLighting → TAAFeature
   TAA_Resolve: Read(handles.hdr, historyRead, depth) → Write(historyWrite)
   handles.taaResolved = rgHistoryWrite
 → BloomThreshold reads handles.taaResolved (anti-aliased pre-bloom)
-→ BloomComposite writes handles.hdr (transient, idle after TAA read)
+→ BloomComposite writes handles.hdr
+→ DoFFeature reads handles.hdr (bloom-composited) + handles.depth
+  DoF_CoC / DoF_NearH / DoF_NearV / DoF_FarH / DoF_FarV / DoF_Composite
+  handles.hdr = dofOutput (RGBA16F transient)
 → Tonemap reads handles.hdr
 ```
 
@@ -1296,18 +1305,25 @@ When the editor loads a project with `.saglsl` files, `EditorMode::LoadProject` 
 
 ```
 EditorMode::LoadProject()
-  ├─ ShaderCook::CookDirectory()      ← parse .saglsl, generate dispatch GLSL,
-  │                                      compile *.gbuffer.frag → .spv + .refl
-  ├─ ShaderCook::RecompileDeferredLighting()  ← recompile deferred_lighting.frag
-  │                                      with the project dispatch (glslc subprocess)
+  ├─ ShaderCook::HasSaglslFiles()     ← skip entirely if no .saglsl present
+  ├─ ShaderCook::CookDirectory()      ← mtime-based incremental cook:
+  │     compare each .saglsl mtime vs .shader_manifest.json; skip unchanged files
+  │     parse .saglsl, generate dispatch GLSL (shading_model_ids.glsl +
+  │     shading_dispatch.glsl), compile *.gbuffer.frag → .spv + .refl,
+  │     inject @ShadingModel / @VertShader into .refl (ShaderReflection metadata)
+  ├─ ShaderCook::RecompileDeferredLighting()  ← only if dispatch changed;
+  │     recompile deferred_lighting.frag with the project dispatch (glslc subprocess)
+  │     using -I ENGINE_SHADER_SRC_DIR -I cook_cache/generated/shaders/
   ├─ ClearProjectAssets() / ClearProjectInstances()  ← WaitIdle inside
   └─ ApplyProjectShaderTypes(cookedShaderDir)
        ├─ MaterialManager::ClearProjectTypes()
        ├─ DeferredLightingFeature::ReloadShaders()   ← hot-swap frag SPV
        └─ MaterialManager::RegisterTypesFromShaderDir(isProjectType=true)
+             reads ShaderReflection::shadingModel / vertShader to auto-register types
 ```
 
 Outputs land in `cook_cache/shaders/` (SPV + refl) and `cook_cache/generated/shaders/` (dispatch GLSL).
+`cook_cache/.shader_manifest.json` records per-file mtime for incremental cook on subsequent loads.
 
 ### Key Properties
 
@@ -1315,6 +1331,8 @@ Outputs land in `cook_cache/shaders/` (SPV + refl) and `cook_cache/generated/sha
 - `SHADING_MODEL_PBR = 0` is always reserved; custom models are assigned IDs 1..N in alphabetical order.
 - The vertex shader (`deferred_geometry.vert`) is shared — only the fragment shader differs.
 - `StellarAliaShaderCookLib` (`tools/shader_cook/`) is a static library linked by the editor, analogous to `StellarAliaImporter`.
+- **ShaderReflection metadata:** after compiling a `.saglsl` to `.refl`, `ShaderCookLib` injects `ShaderReflection::shadingModel` (from `@ShadingModel`) and `ShaderReflection::vertShader` (from `@VertShader`) into the sidecar file. `RegisterTypesFromShaderDir` reads these fields to auto-register each compiled shader as a `MaterialType` without any hardcoded list.
+- **Cook config constants** (`ApplicationPath.hpp.in`): `GLSLC_PATH`, `BIN_DIR` (location of `ShaderReflectTool`), and `ENGINE_SHADER_SRC_DIR` (`@CMAKE_SOURCE_DIR@/assets/shaders`) are baked in at configure time and used by `EditorMode` to invoke `ShaderCookLib` at runtime.
 
 ---
 
@@ -1356,7 +1374,8 @@ Phase 2: GPU
    SelectionMaskFeature::AddPasses()
    TAAFeature::AddPasses()            ← jittered resolve; sets handles.taaResolved
    AutoExposureFeature::AddPasses()   ← histogram(hdr) + adapt; 1-frame readback feeds tonemap exposure
-   BloomFeature::AddPasses()          ← threshold reads taaResolved
+   BloomFeature::AddPasses()          ← threshold reads taaResolved; composite writes handles.hdr
+   DoFFeature::AddPasses()            ← 6 passes (CoC+4×blur+composite); sets handles.hdr = dofOutput when enabled
    TonemapFeature::AddPasses()
    SelectionOutlineFeature::AddPasses()
    InfiniteGridFeature::AddPasses()
@@ -1402,7 +1421,7 @@ Phase 2: GPU
 | `AssetsPanel` | Two-pane Explorer layout: left dir tree (`DrawDirPane`, 200 px) + right file pane (`DrawFilePane`); list/card view toggle (FA `LIST`/`BORDER_ALL` buttons); icon-size slider (16–96 px); FA6 type glyphs per file extension + lazy-loaded LRU thumbnail preview for image files; multi-select (Ctrl-toggle / Shift-range / Ctrl+A); native file picker import (nfd-extended, multi-select); drag-to-viewport drop; Create Material/Shader/Folder; `SetProjectDir` for runtime project switch; per-frame thumbnail budget (`kMaxThumbLoadsPerFrame=4`); `CanLoadThumbnail()` guard prevents LRU eviction thrashing |
 | `ProjectBrowserPanel` | Standalone startup modal (not registered in EditorUI); three sections: Create / Open / Recent; uses NFD for folder+file picking |
 | `WorldSettingsPanel` | Scene background (SolidColor/Skybox) and IBL asset pickers only |
-| `PostProcessPanel` | Bloom (enabled/mipLevels/threshold/strength/radius) + Tonemap (mode/exposure/LUT picker/lutStrength) + Color Grading (enabled/Lift/Midtone/Gain/Saturation/Contrast; Builtin mode only) + SSAO (GTAO) (enabled/radius/strength/bias/directions/steps/blurSharpness); calls `ApplyWorldSettings(ws, false)` on any change; default open |
+| `PostProcessPanel` | Bloom (enabled/mipLevels/threshold/strength/radius) + Tonemap (mode/exposure/LUT picker/lutStrength) + Color Grading (enabled/Lift/Midtone/Gain/Saturation/Contrast; Builtin mode only) + SSAO (GTAO) (enabled/radius/strength/bias/directions/steps/blurSharpness) + Depth of Field (enabled/focusDistance/aperture/focalLength/samples/maxCocPx) + TAA (enabled/blendStatic/blendMotion/antiGhosting); calls `ApplyWorldSettings(ws, false)` on any change; default open |
 | `PlaybackPanel` | Play / Pause / Stop buttons; triggers `Application::SetPlayState` |
 | `ConsolePanel` | Two-tab panel: **Diagnostics** (action-required events from `EditorDiagnostics`) + **Engine Logs** (real-time `SA_LOG_*` stream via `EditorLogCapture`, per-level filter) |
 | `SettingsPanel` | UI scale, overlay toggles (grid/axes/gizmo/outline/skeleton), physics debug toggles (shapes/AABBs/velocity/contacts) |
@@ -1588,6 +1607,7 @@ individual set reclamation.
 | AE histogram buffer | RG slot pool (transient) | Cleared each frame via `clearOnCreate=true`; aliasable |
 | AE exposure SSBO | `AutoExposureFeature` | Persistent float; imported into RG as StorageWrite each frame |
 | AE exposure staging | `AutoExposureFeature` | CPU-visible CopyDst; read via `ReadBufferData` after fence wait (1-frame latency) |
+| DoF intermediates (CoC R32F + 5× RGBA16F) | RG slot pool (transient) | Created via `CreateTexture` each frame; 5 of 6 participate in slot aliasing (`dofOutput` lives until Tonemap) |
 | CG LUT (32³ RGBA16F) | `TonemapFeature` | Persistent 3D texture; baked via `ImmediateCompute` on param change; destroyed in `OnShutdown` |
 | GpuIblBake | SceneRenderer | One-shot renderer operation |
 | White 1×1 | ResourceManager | `GetBuiltin(BuiltinTexture::White1x1)` |

@@ -14,10 +14,6 @@ target_include_directories(MaterialTestDemo
         ${CMAKE_CURRENT_BINARY_DIR}
 )
 
-# Shaders and materials live in demo_project/; no local assets to cook.
-# CookDemoShaders   — compiles .saglsl → .spv + .refl, writes dispatch GLSL
-# StellarAliaBuiltinShaders — already depends on CookDemoShaders (root CMakeLists)
+# Shaders and materials live in demo_project/; .saglsl files are compiled at
+# runtime by the editor via ShaderCookLib, not at CMake build time.
 add_dependencies(MaterialTestDemo CookAssets StellarAliaBuiltinShaders)
-if(TARGET CookDemoShaders)
-    add_dependencies(MaterialTestDemo CookDemoShaders)
-endif()

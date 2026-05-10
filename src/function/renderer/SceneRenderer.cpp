@@ -171,6 +171,12 @@ bool SceneRenderer::Init(const Desc& desc) {
         m_features.insert(m_features.begin(), std::move(tf));
     }
     {
+        // DoF runs after Bloom but before Tonemap: inserted between them.
+        auto dofF = std::make_unique<DoFFeature>();
+        m_dofFeature = dofF.get();
+        m_features.insert(m_features.begin(), std::move(dofF));
+    }
+    {
         auto bf = std::make_unique<BloomFeature>(m_bloomMipCount);
         m_bloomFeature = bf.get();
         m_features.insert(m_features.begin(), std::move(bf));
@@ -433,6 +439,16 @@ void SceneRenderer::ApplyWorldSettings(WorldSettings& ws, bool updateIBL)
         m_aeFeature->m_adaptSpeed = pp.aeAdaptSpeed;
         m_aeFeature->m_lowPct     = pp.aeLowPercent;
         m_aeFeature->m_highPct    = pp.aeHighPercent;
+    }
+
+    // Depth of Field — update runtime parameters.
+    if (m_dofFeature) {
+        m_dofFeature->m_enabled     = pp.dofEnabled;
+        m_dofFeature->m_focusDist   = pp.focusDistance;
+        m_dofFeature->m_aperture    = pp.aperture;
+        m_dofFeature->m_focalLength = pp.focalLength;
+        m_dofFeature->m_samples     = pp.dofSamples;
+        m_dofFeature->m_maxCocPx    = pp.maxCocPx;
     }
 
     // TAA — update runtime parameters; reset history on enable/disable toggle.
@@ -1227,15 +1243,15 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
     ctx.frameSet = m_frameDescSet;
     ctx.device   = m_device;
 
-    // ── All passes: [Shadow, Skybox, GBuffer, SSAO, DeferredLighting, SelectionMask, TAA, Bloom, Tonemap, ...] ─
-    // After TAAFeature runs, redirect handles.taaResolved to the TAA history output so that
-    // BloomThreshold reads the anti-aliased (pre-bloom) frame.
-    // handles.hdr stays as m_rgHdr throughout: BloomComposite rewrites it with bloom+anti-aliased,
-    // and Tonemap reads from it directly — no extra RT needed.
+    // ── All passes: [Shadow, Skybox, GBuffer, SSAO, DeferredLighting, SelectionMask, TAA, Bloom, DoF, Tonemap, ...] ─
+    // After TAAFeature: redirect handles.taaResolved to TAA history output (BloomThreshold reads it).
+    // After DoFFeature: redirect handles.hdr to DoF output (Tonemap reads the DoF-processed frame).
     for (auto& f : m_features) {
         f->AddPasses(*this, ctx, handles, scene.Registry(), w, h);
         if (m_taaFeature && f.get() == m_taaFeature && m_taaFeature->m_outputHandle.IsValid())
             handles.taaResolved = m_taaFeature->m_outputHandle;
+        if (m_dofFeature && f.get() == m_dofFeature && m_dofFeature->m_outputHandle.IsValid())
+            handles.hdr = m_dofFeature->m_outputHandle;
     }
 
     // ── Compile + Execute + Present ───────────────────────────────────────────
@@ -2036,6 +2052,218 @@ void SceneRenderer::TAAFeature::AddPasses(SceneRenderer& /*renderer*/,
     m_outputHandle = rgHistoryWrite;
     m_historyIndex = currIndex;
     m_historyValid = true;
+}
+
+// ── DoFFeature ────────────────────────────────────────────────────────────────
+
+void SceneRenderer::DoFFeature::OnInit(const FeatureInitContext& ctx)
+{
+    ctx.matMgr->RegisterTypeFromShaders(
+        {"DoF_CoC", "fullscreen_tri", "dof_coc",
+         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque, RHI::RHITopology::TriangleList, false, false, true}, ctx);
+    ctx.matMgr->RegisterTypeFromShaders(
+        {"DoF_Blur", "fullscreen_tri", "dof_blur",
+         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque, RHI::RHITopology::TriangleList, false, false, true}, ctx);
+    ctx.matMgr->RegisterTypeFromShaders(
+        {"DoF_Composite", "fullscreen_tri", "dof_composite",
+         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque, RHI::RHITopology::TriangleList, false, false, true}, ctx);
+
+    m_cocMat       = ctx.matMgr->GetType("DoF_CoC");
+    m_blurMat      = ctx.matMgr->GetType("DoF_Blur");
+    m_compositeMat = ctx.matMgr->GetType("DoF_Composite");
+    if (!m_cocMat || !m_blurMat || !m_compositeMat) {
+        SA_LOG_WARN("DoFFeature: shader load failed — DoF disabled");
+        return;
+    }
+
+    m_cocDescSet      = ctx.device->AllocateDescriptorSet(m_cocMat->shader.GetMaterialLayout());
+    for (int i = 0; i < 4; ++i)
+        m_blurDescSets[i] = ctx.device->AllocateDescriptorSet(m_blurMat->shader.GetMaterialLayout());
+    m_compositeDescSet = ctx.device->AllocateDescriptorSet(m_compositeMat->shader.GetMaterialLayout());
+}
+
+void SceneRenderer::DoFFeature::OnShutdown(RHI::IRHIDevice* /*device*/)
+{
+    m_cocDescSet = {};
+    for (int i = 0; i < 4; ++i) m_blurDescSets[i] = {};
+    m_compositeDescSet = {};
+    m_cocMat = m_blurMat = m_compositeMat = nullptr;
+}
+
+void SceneRenderer::DoFFeature::AddPasses(SceneRenderer& /*renderer*/,
+                                           const FrameContext& ctx,
+                                           const RendererHandles& handles,
+                                           const entt::registry& /*reg*/,
+                                           uint32_t w, uint32_t h)
+{
+    SA_PROFILE_SCOPE_N("DoF::AddPasses");
+    if (!m_enabled || !m_cocMat || !m_cocDescSet.IsValid()) {
+        m_outputHandle = {};
+        return;
+    }
+
+    // ── Transient intermediates ───────────────────────────────────────────────
+    RHI::RHITextureDesc r32fDesc{};
+    r32fDesc.width     = w;
+    r32fDesc.height    = h;
+    r32fDesc.format    = RHI::RHIFormat::R32F;
+    r32fDesc.usage     = RHI::RHITextureUsage::RenderTarget | RHI::RHITextureUsage::Sampled;
+    r32fDesc.debugName = "DoF_CoC";
+    const RGTextureHandle rgCoc = ctx.rg->CreateTexture("DoF_CoC", r32fDesc);
+
+    RHI::RHITextureDesc rgbaDesc{};
+    rgbaDesc.width     = w;
+    rgbaDesc.height    = h;
+    rgbaDesc.format    = RHI::RHIFormat::RGBA16F;
+    rgbaDesc.usage     = RHI::RHITextureUsage::RenderTarget | RHI::RHITextureUsage::Sampled;
+    rgbaDesc.debugName = "DoF_NearH";
+    const RGTextureHandle rgNearH   = ctx.rg->CreateTexture("DoF_NearH",  rgbaDesc);
+    rgbaDesc.debugName = "DoF_Near";
+    const RGTextureHandle rgNear    = ctx.rg->CreateTexture("DoF_Near",   rgbaDesc);
+    rgbaDesc.debugName = "DoF_FarH";
+    const RGTextureHandle rgFarH    = ctx.rg->CreateTexture("DoF_FarH",   rgbaDesc);
+    rgbaDesc.debugName = "DoF_Far";
+    const RGTextureHandle rgFar     = ctx.rg->CreateTexture("DoF_Far",    rgbaDesc);
+    rgbaDesc.debugName = "DoF_Output";
+    const RGTextureHandle rgOutput  = ctx.rg->CreateTexture("DoF_Output", rgbaDesc);
+    m_outputHandle = rgOutput;
+
+    // ── Descriptor bindings (transient handles resolved by FlushBindings) ─────
+    ctx.BindTexture(m_cocDescSet, 0, handles.depth);
+
+    // Blur near-H: src=hdr, V: src=nearH; far-H: src=hdr, V: src=farH
+    ctx.BindTexture(m_blurDescSets[0], 0, handles.hdr);  ctx.BindTexture(m_blurDescSets[0], 1, rgCoc);
+    ctx.BindTexture(m_blurDescSets[1], 0, rgNearH);      ctx.BindTexture(m_blurDescSets[1], 1, rgCoc);
+    ctx.BindTexture(m_blurDescSets[2], 0, handles.hdr);  ctx.BindTexture(m_blurDescSets[2], 1, rgCoc);
+    ctx.BindTexture(m_blurDescSets[3], 0, rgFarH);       ctx.BindTexture(m_blurDescSets[3], 1, rgCoc);
+
+    ctx.BindTexture(m_compositeDescSet, 0, handles.hdr);
+    ctx.BindTexture(m_compositeDescSet, 1, rgCoc);
+    ctx.BindTexture(m_compositeDescSet, 2, rgNear);
+    ctx.BindTexture(m_compositeDescSet, 3, rgFar);
+
+    // ── Attachment keys ───────────────────────────────────────────────────────
+    AttachmentKey cocKey{};
+    cocKey.colorCount      = 1;
+    cocKey.colorFormats[0] = RHI::RHIFormat::R32F;
+    cocKey.depthFormat     = RHI::RHIFormat::Undefined;
+
+    AttachmentKey hdrKey{};
+    hdrKey.colorCount      = 1;
+    hdrKey.colorFormats[0] = RHI::RHIFormat::RGBA16F;
+    hdrKey.depthFormat     = RHI::RHIFormat::Undefined;
+
+    const RHI::RHIPipelineHandle cocPipeline       = m_cocMat->GetOrCreatePipeline(ctx.device, cocKey);
+    const RHI::RHIPipelineHandle blurPipeline      = m_blurMat->GetOrCreatePipeline(ctx.device, hdrKey);
+    const RHI::RHIPipelineHandle compositePipeline = m_compositeMat->GetOrCreatePipeline(ctx.device, hdrKey);
+
+    const RHI::RHIDescSetHandle frameSet       = ctx.frameSet;
+    const RHI::RHIDescSetHandle cocDs          = m_cocDescSet;
+    const RHI::RHIDescSetHandle blurDs0        = m_blurDescSets[0];
+    const RHI::RHIDescSetHandle blurDs1        = m_blurDescSets[1];
+    const RHI::RHIDescSetHandle blurDs2        = m_blurDescSets[2];
+    const RHI::RHIDescSetHandle blurDs3        = m_blurDescSets[3];
+    const RHI::RHIDescSetHandle compositeDs    = m_compositeDescSet;
+
+    const RGTextureHandle rgHdr   = handles.hdr;
+    const RGTextureHandle rgDepth = handles.depth;
+
+    // Push constant values captured per-pass
+    struct DofCocPC  { float focusDist; float aperture; float focalLength; float maxCocPx; };
+    struct DofBlurPC { int isHorizontal; int isNear; float maxCocPx; int samples; };
+    struct DofCompPC { float maxCocPx; float nearTransition; float farTransition; float _pad; };
+
+    const DofCocPC  cocPC { m_focusDist, m_aperture, m_focalLength, m_maxCocPx };
+    const float nearTrans = m_maxCocPx * 0.25f;  // blend start at 25% of max CoC
+    const float farTrans  = m_maxCocPx * 0.25f;
+    const DofCompPC compPC{ m_maxCocPx, nearTrans, farTrans, 0.f };
+
+    // ── Pass 1: CoC ────────────────────────────────────────────────────────────
+    {
+        ctx.rg->AddPass("DoF_CoC",
+            [rgDepth, rgCoc](RGPassBuilder& b) { b.Read(rgDepth); b.Write(rgCoc); },
+            [cocPipeline, frameSet, cocDs, cocPC, rgCoc, w, h]
+            (RHI::IRHICommandList& cmd, const RGResources& res)
+            {
+                RHI::RHIRenderPassDesc rp{};
+                rp.colorAttachmentCount            = 1;
+                rp.colorAttachments[0].texture     = res.Get(rgCoc);
+                rp.colorAttachments[0].clearOnLoad = true;
+                rp.width = w; rp.height = h;
+                cmd.BeginRenderPass(rp);
+                cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
+                cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
+                cmd.SetPipeline(cocPipeline);
+                cmd.SetDescriptorSet(0, frameSet);
+                cmd.SetDescriptorSet(1, cocDs);
+                cmd.SetPushConstants(&cocPC, sizeof(cocPC), RHI::RHIShaderStage::Fragment);
+                cmd.Draw(3, 1, 0, 0);
+                cmd.EndRenderPass();
+            });
+    }
+
+    // ── Passes 2–5: Blur (near H, near V, far H, far V) ──────────────────────
+    auto addBlurPass = [&](const char* name, int isH, int isN,
+                            const RHI::RHIDescSetHandle& ds,
+                            RGTextureHandle rgSrc, RGTextureHandle rgDst)
+    {
+        const DofBlurPC blurPC{ isH, isN, m_maxCocPx, m_samples };
+        ctx.rg->AddPass(name,
+            [rgSrc, rgCoc, rgDst](RGPassBuilder& b) {
+                b.Read(rgSrc); b.Read(rgCoc); b.Write(rgDst);
+            },
+            [blurPipeline, frameSet, ds, blurPC, rgDst, w, h]
+            (RHI::IRHICommandList& cmd, const RGResources& res)
+            {
+                RHI::RHIRenderPassDesc rp{};
+                rp.colorAttachmentCount            = 1;
+                rp.colorAttachments[0].texture     = res.Get(rgDst);
+                rp.colorAttachments[0].clearOnLoad = true;
+                rp.width = w; rp.height = h;
+                cmd.BeginRenderPass(rp);
+                cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
+                cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
+                cmd.SetPipeline(blurPipeline);
+                cmd.SetDescriptorSet(0, frameSet);
+                cmd.SetDescriptorSet(1, ds);
+                cmd.SetPushConstants(&blurPC, sizeof(blurPC), RHI::RHIShaderStage::Fragment);
+                cmd.Draw(3, 1, 0, 0);
+                cmd.EndRenderPass();
+            });
+    };
+
+    addBlurPass("DoF_NearH", 1, 1, blurDs0, rgHdr,   rgNearH);
+    addBlurPass("DoF_NearV", 0, 1, blurDs1, rgNearH, rgNear);
+    addBlurPass("DoF_FarH",  1, 0, blurDs2, rgHdr,   rgFarH);
+    addBlurPass("DoF_FarV",  0, 0, blurDs3, rgFarH,  rgFar);
+
+    // ── Pass 6: Composite ─────────────────────────────────────────────────────
+    {
+        ctx.rg->AddPass("DoF_Composite",
+            [rgHdr, rgCoc, rgNear, rgFar, rgOutput](RGPassBuilder& b) {
+                b.Read(rgHdr); b.Read(rgCoc);
+                b.Read(rgNear); b.Read(rgFar);
+                b.Write(rgOutput);
+            },
+            [compositePipeline, frameSet, compositeDs, compPC, rgOutput, w, h]
+            (RHI::IRHICommandList& cmd, const RGResources& res)
+            {
+                RHI::RHIRenderPassDesc rp{};
+                rp.colorAttachmentCount            = 1;
+                rp.colorAttachments[0].texture     = res.Get(rgOutput);
+                rp.colorAttachments[0].clearOnLoad = true;
+                rp.width = w; rp.height = h;
+                cmd.BeginRenderPass(rp);
+                cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
+                cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
+                cmd.SetPipeline(compositePipeline);
+                cmd.SetDescriptorSet(0, frameSet);
+                cmd.SetDescriptorSet(1, compositeDs);
+                cmd.SetPushConstants(&compPC, sizeof(compPC), RHI::RHIShaderStage::Fragment);
+                cmd.Draw(3, 1, 0, 0);
+                cmd.EndRenderPass();
+            });
+    }
 }
 
 // ── AutoExposureFeature ───────────────────────────────────────────────────────

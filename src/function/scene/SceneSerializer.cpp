@@ -151,6 +151,12 @@ bool SceneSerializer::SaveToFile(const Scene& scene,
             ppj["aeAdaptSpeed"]     = pp.aeAdaptSpeed;
             ppj["aeLowPercent"]     = pp.aeLowPercent;
             ppj["aeHighPercent"]    = pp.aeHighPercent;
+            ppj["dofEnabled"]       = pp.dofEnabled;
+            ppj["focusDistance"]    = pp.focusDistance;
+            ppj["aperture"]         = pp.aperture;
+            ppj["focalLength"]      = pp.focalLength;
+            ppj["dofSamples"]       = pp.dofSamples;
+            ppj["maxCocPx"]         = pp.maxCocPx;
             wj["postProcess"]       = std::move(ppj);
         }
         root["world"] = std::move(wj);
@@ -408,6 +414,12 @@ bool SceneSerializer::LoadFromFile(Scene& scene,
             pp.aeAdaptSpeed     = ppj.value("aeAdaptSpeed",     pp.aeAdaptSpeed);
             pp.aeLowPercent     = ppj.value("aeLowPercent",     pp.aeLowPercent);
             pp.aeHighPercent    = ppj.value("aeHighPercent",    pp.aeHighPercent);
+            pp.dofEnabled       = ppj.value("dofEnabled",       pp.dofEnabled);
+            pp.focusDistance    = ppj.value("focusDistance",    pp.focusDistance);
+            pp.aperture         = ppj.value("aperture",         pp.aperture);
+            pp.focalLength      = ppj.value("focalLength",      pp.focalLength);
+            pp.dofSamples       = ppj.value("dofSamples",       pp.dofSamples);
+            pp.maxCocPx         = ppj.value("maxCocPx",         pp.maxCocPx);
         } else {
             // Backward compat: read old top-level tonemap keys from pre-#40 scenes.
             pp.tonemapMode = (wj.value("tonemapMode", "Builtin") == "LUT")

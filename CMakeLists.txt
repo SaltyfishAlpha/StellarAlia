@@ -73,16 +73,6 @@ include(cmake/GenerateShadingDispatch.cmake)
 set_property(GLOBAL PROPERTY SHADER_OUTPUTS "")
 set_property(GLOBAL PROPERTY SHADING_EVALUATORS "")
 
-# Auto-register builtin *.lighting.glsl evaluators.
-# Custom evaluators in examples/ or other subdirectories call
-# register_lighting_evaluator() from their own CMakeLists.txt.
-file(GLOB _builtin_evals CONFIGURE_DEPENDS
-    "${CMAKE_SOURCE_DIR}/assets/shaders/*.lighting.glsl"
-)
-foreach(_eval ${_builtin_evals})
-    register_lighting_evaluator("${_eval}")
-endforeach()
-
 # Add third-party dependencies
 add_subdirectory(third_party)
 
@@ -139,9 +129,9 @@ add_subdirectory(examples/physics_demo)
 add_subdirectory(examples/scene_renderer_demo)
 add_subdirectory(examples/input_demo)
 
-# Generate shading dispatch GLSL after all add_subdirectory() calls so every
-# register_lighting_evaluator() call (from any subdirectory) is collected first.
-# Re-run CMake to pick up newly added *.lighting.glsl files.
+# Generate stub shading dispatch GLSL (empty evaluator list).
+# deferred_lighting.frag includes these files at build time; the real dispatch
+# is produced at runtime by ShaderCookLib from the project's .saglsl files.
 generate_shading_dispatch("${CMAKE_BINARY_DIR}/generated/shaders")
 
 # Tool layer source files

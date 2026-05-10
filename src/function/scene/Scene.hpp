@@ -74,8 +74,16 @@ struct PostProcessSettings {
     float aeLowPercent   =  0.45f;  // histogram low-cut percentile
     float aeHighPercent  =  0.95f;  // histogram high-cut percentile
 
-    // ── Future effects (placeholder — no pass implementation yet) ─────────────
-    bool dofEnabled        = false;
+    // ── Depth of Field (DoF) ─────────────────────────────────────────────────
+    bool  dofEnabled      = false;
+    float focusDistance   = 5.0f;   // view-space focus plane distance (meters)
+    float aperture        = 1.4f;   // f-number (lower = shallower DoF)
+    float focalLength     = 50.0f;  // mm (affects CoC scale with aperture)
+    int   dofSamples      = 16;     // blur kernel sample count [4, 32]
+    bool  autoFocus       = false;  // Phase 2: GPU depth readback
+    float maxCocPx        = 20.0f;  // max CoC radius in pixels
+
+    // ── Future effects ────────────────────────────────────────────────────────
     bool motionBlurEnabled = false;
 };
 
