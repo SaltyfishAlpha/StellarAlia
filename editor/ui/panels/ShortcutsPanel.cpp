@@ -1,17 +1,12 @@
 #include "ui/panels/ShortcutsPanel.hpp"
 
+#include "ApplicationPath.hpp"
 #include "config/EditorShortcutConfig.hpp"
 #include "input/EditorInputMaps.hpp"
-#include "function/input/InputSystem.hpp"
 
 #include <imgui.h>
 #include <filesystem>
 #include <string>
-
-#if __has_include(<nfd.h>)
-#include <nfd.h>
-#define SA_SHORTCUTS_NFD 1
-#endif
 
 namespace StellarAlia::Editor {
 
@@ -105,10 +100,13 @@ std::string ShortcutsPanel::FormatBinding(const BindingDef& b) {
 
 // ── Construction ──────────────────────────────────────────────────────────────
 
-ShortcutsPanel::ShortcutsPanel(EditorShortcutConfig& config, InputSystem& input,
-                               std::filesystem::path defaultConfigPath)
-    : m_config(config), m_input(input),
-      m_defaultConfigPath(std::move(defaultConfigPath)) { isOpen = false; }
+ShortcutsPanel::ShortcutsPanel(EditorContext& ctx, ShortcutsPresenter& presenter)
+    : m_presenter(presenter)
+    , m_config(*ctx.shortcuts)
+    , m_defaultConfigPath(std::filesystem::path(StellarAliaApp::BIN_DIR) / "editor_shortcuts.json")
+{
+    isOpen = false;
+}
 
 void ShortcutsPanel::BuildEntries() {
     if (!m_entries.empty()) return;
@@ -136,63 +134,35 @@ void ShortcutsPanel::OnDraw() {
         ImGui::SetTooltip("Clear all overrides (restore code defaults)");
     ImGui::SameLine();
     if (ImGui::Button("Default")) {
-        m_config.Load(m_defaultConfigPath);
-        m_input.RegisterMaps(m_config.ApplyTo(MakeViewportMaps()));
+        m_presenter.RequestDefault();
         m_awaitingRow = -1;
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Switch back to the built-in config file and reload it");
     ImGui::SameLine();
     if (ImGui::Button("Reload")) {
-        m_config.Reload();
-        m_input.RegisterMaps(m_config.ApplyTo(MakeViewportMaps()));
+        m_presenter.RequestReload();
         m_awaitingRow = -1;
     }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Discard unsaved changes, reload from the current config file");
     ImGui::SameLine();
-    if (ImGui::Button("Import...")) {
-#ifdef SA_SHORTCUTS_NFD
-        NFD_Init();
-        nfdchar_t* outPath = nullptr;
-        const nfdfilteritem_t filter[] = { { "Shortcut config", "json" } };
-        if (NFD_OpenDialogU8(&outPath, filter, 1, nullptr) == NFD_OKAY && outPath) {
-            m_config.ImportFrom(std::filesystem::path(outPath));
-            m_input.RegisterMaps(m_config.ApplyTo(MakeViewportMaps()));
-            NFD_FreePathU8(outPath);
-        }
-        NFD_Quit();
-#endif
-    }
+    if (ImGui::Button("Import..."))
+        m_presenter.RequestNFDImport();
     ImGui::SameLine();
-    if (ImGui::Button("Export...")) {
-#ifdef SA_SHORTCUTS_NFD
-        NFD_Init();
-        nfdchar_t* outPath = nullptr;
-        const nfdfilteritem_t filter[] = { { "Shortcut config", "json" } };
-        if (NFD_SaveDialogU8(&outPath, filter, 1, nullptr, "shortcuts.json") == NFD_OKAY && outPath) {
-            m_config.ExportTo(std::filesystem::path(outPath));
-            NFD_FreePathU8(outPath);
-        }
-        NFD_Quit();
-#endif
-    }
+    if (ImGui::Button("Export..."))
+        m_presenter.RequestNFDExport();
     ImGui::SameLine();
     const float rightWidth = 120.f;
     ImGui::SetCursorPosX(ImGui::GetCursorPosX()
                          + ImGui::GetContentRegionAvail().x - rightWidth);
-    if (ImGui::Button("Apply")) {
-        m_input.RegisterMaps(m_config.ApplyTo(MakeViewportMaps()));
-        m_config.ClearDirty();
-    }
+    if (ImGui::Button("Apply"))
+        m_presenter.RequestApply();
     ImGui::SameLine();
     const bool isDefault = (m_config.GetConfigPath() == m_defaultConfigPath);
     ImGui::BeginDisabled(isDefault);
-    if (ImGui::Button("Save")) {
-        m_input.RegisterMaps(m_config.ApplyTo(MakeViewportMaps()));
-        m_config.Save();
-        m_config.ClearDirty();
-    }
+    if (ImGui::Button("Save"))
+        m_presenter.RequestSave();
     if (isDefault && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ImGui::SetTooltip("Built-in config is read-only — use Export... to save a copy");
     ImGui::EndDisabled();

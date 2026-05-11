@@ -10,8 +10,9 @@ namespace StellarAlia::Editor {
 
 struct LogEntry {
     spdlog::level::level_enum level;
-    std::string               timeStr;   // "HH:MM:SS"
-    std::string               message;   // raw user payload
+    std::string               timeStr;    // "HH:MM:SS"
+    std::string               message;    // raw user payload
+    std::string               loggerName; // spdlog logger_name (e.g. "script", "" for default)
 };
 
 // Custom spdlog sink: collects entries into m_pending under base_sink's mutex.

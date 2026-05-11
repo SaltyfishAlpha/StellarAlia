@@ -9,6 +9,8 @@
 
 #include "ui/IEditorWindow.hpp"
 #include "ui/DoubleClickClassifier.hpp"
+#include "EditorContext.hpp"
+#include "ui/presenters/SceneHierarchyPresenter.hpp"
 #include <entt/entt.hpp>
 #include <glm/vec3.hpp>
 
@@ -16,6 +18,7 @@ namespace StellarAlia { class Scene; }
 namespace StellarAlia { class InputSystem; }
 namespace StellarAlia::Resource { class AssetRegistry; }
 namespace StellarAlia::Editor { class EntityTemplateRegistry; }
+namespace StellarAlia::Editor { class CommandManager; }
 
 namespace StellarAlia::Editor {
 
@@ -45,33 +48,20 @@ namespace StellarAlia::Editor {
 // ─────────────────────────────────────────────────────────────────────────────
 class SceneHierarchyPanel : public IEditorWindow {
 public:
-    using SceneLoadCallback     = std::function<void(const std::filesystem::path&)>;
-    using FocusEntityCallback   = std::function<void(glm::vec3)>;
-
-    SceneHierarchyPanel(Scene& scene, InputSystem& input)
-        : m_scene(&scene), m_input(&input) {}
-
-    // Optional: provide asset registry for asset-drop mesh instantiation.
-    void SetRegistry(const Resource::AssetRegistry* registry);
-
-    // Optional: provide template registry to drive the spawn menu.
-    void SetTemplateRegistry(const EntityTemplateRegistry* tmplRegistry);
-
-    // Optional: called when a .sascene is dropped onto the panel.
-    void SetSceneLoadCallback(SceneLoadCallback cb);
-
-    // Optional: called on short double-click with the entity's world position.
-    void SetFocusEntityCallback(FocusEntityCallback cb);
+    SceneHierarchyPanel(EditorContext& ctx, SceneHierarchyPresenter& presenter)
+        : m_scene(ctx.scene)
+        , m_input(ctx.input)
+        , m_registry(ctx.assetReg)
+        , m_tmplRegistry(ctx.templateReg)
+        , m_selectionCtx(ctx.selection)
+        , m_cmdMgr(ctx.cmdMgr)
+        , m_onSceneLoad(ctx.onSceneLoad)
+        , m_onFocusEntity(ctx.onFocusEntity)
+        , m_presenter(presenter) {}
 
     std::string_view GetName()    const override { return "Scene Hierarchy"; }
     ImGuiWindowFlags GetWindowFlags() const override { return ImGuiWindowFlags_HorizontalScrollbar; }
     void OnDraw() override;
-
-    // Primary selected entity raw bits (~0u = none).
-    uint32_t GetSelectedEntity() const { return m_primarySelected; }
-
-    // All currently selected entity raw bits.
-    const std::unordered_set<uint32_t>& GetSelectedEntities() const { return m_selection; }
 
     // Called from the top menu bar Entity entries to create at scene root.
     void RequestCreateEmpty();
@@ -91,16 +81,18 @@ private:
     // using the previous frame's visual draw order.
     void SelectRange(uint32_t to);
 
-    // Copies all value-type components from src to a new entity.
-    // Children are recursively duplicated and re-parented.
-    entt::entity DuplicateEntity(entt::entity src);
+    // Push current m_selection / m_primarySelected state to EditorSelection.
+    void SyncSelectionToCtx();
 
     Scene*                           m_scene          = nullptr;
     InputSystem*                     m_input          = nullptr;
     const Resource::AssetRegistry*   m_registry       = nullptr;
     const EntityTemplateRegistry*    m_tmplRegistry   = nullptr;
-    SceneLoadCallback                m_onSceneLoad;
-    FocusEntityCallback              m_onFocusEntity;
+    EditorSelection*                 m_selectionCtx   = nullptr;
+    CommandManager*                  m_cmdMgr         = nullptr;
+    std::function<void(const std::filesystem::path&)> m_onSceneLoad;
+    std::function<void(glm::vec3)>                    m_onFocusEntity;
+    SceneHierarchyPresenter&         m_presenter;
 
     // ── Selection state ────────────────────────────────────────────────────
     std::unordered_set<uint32_t>  m_selection;                // all selected entities
@@ -121,36 +113,7 @@ private:
     // ── Rename state ───────────────────────────────────────────────────────
     uint32_t m_renamingEntity  = ~0u;
     char     m_renameBuffer[256] = {};
-    bool     m_renameFocusNext = false; // focus the InputText on the next frame it appears
-
-    // ── Deferred create operation ──────────────────────────────────────────
-    struct CreateOp {
-        enum Kind : uint8_t { None, Empty, Template } kind = None;
-        std::filesystem::path templatePath;   // for Template kind
-        entt::entity          parent = entt::null;  // entt::null = scene root
-    };
-    CreateOp m_pendingCreate;
-
-    // ── Deferred operations (applied after tree traversal) ─────────────────
-    std::vector<entt::entity> m_pendingDeletes;
-    std::vector<entt::entity> m_pendingDuplicates;
-
-    // ── Drag-and-drop ──────────────────────────────────────────────────────
-    struct DnDOp {
-        std::vector<entt::entity> dragged;             // one or many (multi-select drag)
-        entt::entity              target = entt::null; // entt::null = detach to root
-        enum Mode : uint8_t { AsChild, BeforeSibling, AfterSibling } mode = AsChild;
-        bool valid = false;
-    };
-    DnDOp m_pendingDnD;
-
-    struct AssetDropOp {
-        std::filesystem::path assetPath;
-        entt::entity          parent   = entt::null;  // entt::null = create at root
-        glm::vec3             spawnPos = {};
-        bool                  valid    = false;
-    };
-    AssetDropOp m_pendingAssetDrop;
+    bool     m_renameFocusNext = false;
 };
 
 } // namespace StellarAlia::Editor

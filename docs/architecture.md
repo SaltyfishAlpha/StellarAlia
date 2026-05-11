@@ -9,20 +9,21 @@
 6. [ECS — Scene & Components](#ecs--scene--components)
 7. [Animation System](#animation-system)
 8. [Physics System](#physics-system)
-9. [Input System](#input-system)
-10. [Platform Layer — RHI](#platform-layer--rhi)
-11. [Resource Layer — Material System](#resource-layer--material-system)
-12. [Function Layer — RenderGraph](#function-layer--rendergraph)
-13. [Compute Pipeline & ComputeProgram](#compute-pipeline--computeprogram)
-14. [GPU IBL Bake (Runtime)](#gpu-ibl-bake-runtime)
-15. [Deferred Rendering Pipeline](#deferred-rendering-pipeline)
-16. [CPU Frustum Culling & BVH](#cpu-frustum-culling--bvh)
-17. [Custom Shading Models](#custom-shading-models)
-18. [Frame Loop](#frame-loop)
-19. [Editor Architecture](#editor-architecture)
-20. [Key Design Decisions](#key-design-decisions)
-21. [Profiler](#profiler)
-22. [GPU Performance Notes](#gpu-performance-notes)
+9. [Scripting System](#scripting-system)
+10. [Input System](#input-system)
+11. [Platform Layer — RHI](#platform-layer--rhi)
+12. [Resource Layer — Material System](#resource-layer--material-system)
+13. [Function Layer — RenderGraph](#function-layer--rendergraph)
+14. [Compute Pipeline & ComputeProgram](#compute-pipeline--computeprogram)
+15. [GPU IBL Bake (Runtime)](#gpu-ibl-bake-runtime)
+16. [Deferred Rendering Pipeline](#deferred-rendering-pipeline)
+17. [CPU Frustum Culling & BVH](#cpu-frustum-culling--bvh)
+18. [Custom Shading Models](#custom-shading-models)
+19. [Frame Loop](#frame-loop)
+20. [Editor Architecture](#editor-architecture)
+21. [Key Design Decisions](#key-design-decisions)
+22. [Profiler](#profiler)
+23. [GPU Performance Notes](#gpu-performance-notes)
 
 ---
 
@@ -72,6 +73,7 @@
 │  Scene / SceneSerializer                                         │
 │    UpdateTransforms(): BFS topo-sort → world matrices            │
 │    SetParent / CreateEntity / DestroyEntity                      │
+│    GetRootOrder() → user-ordered root list; MoveRootBefore/After │
 │    View<C...>() → EnTT view wrapper                             │
 │    SceneSerializer::SpawnFromTemplate() — entity template spawn  │
 │                                                                  │
@@ -148,11 +150,18 @@ Application::Shutdown() → mode.OnDetach()
 
 **Play state machine** (`EnginePlayState`):
 - `Editing` — overlays active, physics frozen, scene freely editable
-- `Playing` — physics stepping, animation ticking, overlays suppressed
-- `Paused`  — physics frozen, animation frozen, scene inspectable
+- `Playing` — physics stepping, animation ticking, scripts running, overlays suppressed
+- `Paused`  — physics frozen, animation frozen, scripts paused, scene inspectable
 
 `Application` calls `mode.OnPlayStateChanged(newState)` immediately after the transition
 so the mode can swap input maps, reset physics, etc.
+
+**PIE dual-scene isolation** (`Application::SetPlayState`):
+- `Editing → Playing`: `m_scene` snapshotted via `SceneSerializer::SerializeToJson` → `m_pieSnapshot` (compact JSON string); `m_gameScene` created and populated via `SceneSerializer::DeserializeFromJson`; `m_animSystem.Shutdown` clears editor-scene GPU entries (entity-ID collision avoidance); `PrepareAnimatedEntities` allocates GPU skinning buffers for the game copy; `ScriptSystem::OnPlayStart(*m_gameScene)` redirects `g_ctx.scene` to the game copy
+- `GetActiveScene()` → `*m_gameScene` while Playing/Paused, `*m_scene` while Editing
+- `GetEditorScene()` → always `*m_scene` (used by Save, scene load — unaffected by play state)
+- `Playing → Editing`: `ScriptSystem::OnPlayStop`, `PhysicsSystem::Reset`, `AnimationSystem::Shutdown` on game copy; `m_gameScene.reset()` destroys the copy; editor scene is untouched — no deserialization restore needed
+- `EditorContext.scene*` / `.registry*` are live-patched by `EditorMode::OnPlayStateChanged`; `ScriptSystem`'s `g_ctx.scene` is patched by `OnPlayStart`
 
 ---
 
@@ -430,6 +439,7 @@ storage. `Scene` wraps an `entt::registry` and exposes `View<C...>()`.
 | `AreaLightComponent` | color, intensity, size (W×H), twoSided, emissiveScale; LTC-evaluated PBR |
 | `RigidBodyComponent` | Physics body: `Type` (Static/Kinematic/Dynamic), mass, friction, restitution, `bodyId` |
 | `ColliderComponent` | Collision shape: `Shape` (Box/Sphere/Capsule), extents, offset, rotation |
+| `ScriptComponent` | C# script binding: `scriptPath` (relative to project root), `className` (derived from filename if empty) |
 | `StaticGeometryTag` | Hint: entity never moves (future culling / lightmap / BVH) |
 
 IBL and skybox are **not** ECS components — they are global scene settings in `WorldSettings`.
@@ -727,6 +737,72 @@ to its authored transform positions.
 `DrawDebug(PhysicsDebugSettings, scene)` draws collider wireframes into `DebugDraw`
 directly from `ColliderComponent` ECS data (no Jolt debug callback needed). Toggles:
 `shapes`, `aabbs`, `velocity`, `contacts`. Exposed via `SettingsPanel` → Physics Debug.
+
+---
+
+## Scripting System
+
+**Locations:**
+- `src/function/script/ScriptSystem.hpp/.cpp` — C++ driver; owned by `Application`
+- `src/function/script/ScriptApiExports.hpp/.cpp` — flat C API + `ScriptApiFunctionTable`
+- `managed/StellarAlia.Runtime/` — C# engine API surface (`ScriptBase`, `Entity`, `Debug`, `Time`, `Input`, `AnimatorProxy`, `NativeApi`)
+- `managed/StellarAlia.ScriptBridge/` — Roslyn compiler (`ScriptCompiler`), collectible ALC loader (`ScriptLoader`), unmanaged entry points (`ScriptBridgeEntry`)
+- `demo_project/assets/scripts/` — user `.cs` scripts
+
+### Hosting Model
+
+`ScriptSystem::Init` loads `hostfxr` at runtime, initialises a .NET host context pointing at `StellarAlia.ScriptBridge.runtimeconfig.json`, and retrieves six function-pointer delegates via `get_function_pointer`:
+
+```
+Initialize | Compile | Instantiate | InvokeLifecycle | RemoveInstance | Unload
+```
+
+`Initialize` receives a `ScriptApiFunctionTable*` — a plain struct of C function pointers covering transforms, input, debug draw, logging, and time. The managed `NativeApi` class stores this table and calls through it; this avoids making `StellarAlia.Runtime` a native shared library.
+
+### Play Lifecycle
+
+```
+OnPlayStart(Scene& gameScene)
+  └─ SA_Script_SetContext({&gameScene, …})  ← redirect g_ctx.scene to game copy
+     └─ Compile(sourcePaths[])  ← Roslyn in-memory → byte[] assembly
+        └─ Load(bytes)          ← CollectibleALC.LoadFromStream
+           └─ for each ScriptComponent entity:
+                Instantiate(entityId, className)
+                InvokeLifecycle(entityId, OnAttach, 0)
+                InvokeLifecycle(entityId, OnStart,  0)
+
+per-frame (Application, Playing only, via GetActiveScene().Registry()):
+  ScriptSystem::FixedUpdate  → InvokeLifecycle(…, OnFixedUpdate, fixedDt)
+  ScriptSystem::Update       → InvokeLifecycle(…, OnUpdate, dt)
+  ScriptSystem::LateUpdate   → InvokeLifecycle(…, OnLateUpdate, dt)
+
+OnPlayStop(reg)
+  └─ InvokeLifecycle(…, OnStop, 0) + InvokeLifecycle(…, OnDetach, 0) for all instances
+     └─ ScriptLoader::Unload()  ← CollectibleALC.Unload() (GC-collectible)
+```
+
+`g_ctx.scene` after `OnPlayStop` points to the now-destroyed `m_gameScene`, but `m_playing = false` guards all `InvokeAll` calls, so the dangling pointer is never dereferenced. The next `OnPlayStart` overwrites it before any managed code runs.
+
+`OnSceneAboutToChange` calls `Unload` before `scene.Clear()` to release managed entity refs.
+
+### Compilation — Roslyn Reference Assembly Strategy
+
+`ScriptCompiler.BuildReferences()` builds the Roslyn `MetadataReference` list:
+
+1. **SDK reference pack** (`packs/Microsoft.NETCore.App.Ref/<ver>/ref/net8.0/`) is located by traversing 3 levels up from `typeof(object).Assembly.Location` to reach the dotnet root. Ref-pack DLLs are added first (pure managed API surface, no native blobs).
+2. **AppDomain assemblies** (including `StellarAlia.Runtime`) are added for any name not already covered by the ref pack; assemblies whose path falls inside the runtime dir are excluded to prevent CS0433 duplicate-type conflicts (`Vector3` defined in both `System.Numerics.Vectors` ref and `System.Private.CoreLib` runtime).
+
+### Dependency Resolution — Cross-ALC Search
+
+`CollectibleALC.Load()` resolves dependencies by searching `AppDomain.CurrentDomain.GetAssemblies()` rather than `AssemblyLoadContext.Default.Assemblies`. `hostfxr` loads `StellarAlia.Runtime` into its own isolated ALC (not Default), so using Default would fail to find it.
+
+### ECS Integration
+
+`ScriptComponent` carries `scriptPath` (relative to project root) and `className` (defaults to the file name stem). `ScriptSystem` subscribes to `entt::registry::on_destroy<ScriptComponent>` to call `RemoveInstance` when an entity is destroyed during play.
+
+### Script Log Routing
+
+`SA_Log_Info/Warn/Error` (called from C# via the function table) use a lazy-initialized `"script"` named spdlog logger that shares all sinks of the default logger. `EditorLogSink` captures `msg.logger_name` into `LogEntry::loggerName`; `ConsolePanelPresenter` routes entries with `loggerName == "script"` to `m_scriptEntries`, which appear automatically in the Diagnostics tab under a `--- Script ---` separator — no explicit `EditorDiagnostics::Push()` required.
 
 ---
 
@@ -1344,10 +1420,13 @@ Outputs land in `cook_cache/shaders/` (SPV + refl) and `cook_cache/generated/sha
 window->PollEvents()
 input.Poll()                               // snapshot devices + evaluate active map
 mode.OnUpdate(dt)                          // editor camera / gameplay logic
-  physics.SyncIn / Step / SyncOut (fixedDt accumulator)
-  animSystem.Update(dt)
-scene.UpdateTransforms()                   // BFS propagate dirty transforms
-renderer.RenderFrame(scene, w, h)          // full frame — all phases internal
+[Playing] physics.SyncIn / Step / SyncOut (fixedDt accumulator, GetActiveScene())
+[Playing] scriptSystem.FixedUpdate(fixedDt, GetActiveScene().Registry())
+[Playing] animSystem.Update(dt, GetActiveScene().Registry())
+[Playing] scriptSystem.Update(dt, GetActiveScene().Registry())
+[Playing] scriptSystem.LateUpdate(dt, GetActiveScene().Registry())
+GetActiveScene().UpdateTransforms()        // BFS propagate dirty transforms
+renderer.RenderFrame(GetActiveScene(), w, h)  // full frame — all phases internal
 mode.OnRenderUI(cmd)                       // ImGui draw calls (editor panels, gizmo)
 
 ── Inside RenderFrame ────────────────────────────────────────────────────────
@@ -1397,6 +1476,253 @@ Phase 2: GPU
 
 `EditorMode` owns all editor-specific state and drives the editor per-frame logic.
 
+### EditorContext — Dependency Injection Container
+
+`editor/EditorContext.hpp` defines a plain non-owning struct that bundles every
+dependency a panel may need:
+
+```cpp
+struct EditorContext {
+    // Engine systems (owned by Application)
+    Application*               app;
+    Scene*                     scene;
+    entt::registry*            registry;
+    Resource::AssetRegistry*   assetReg;
+    MaterialManager*           matMgr;
+    Resource::ResourceManager* resMgr;
+    InputSystem*               input;
+
+    // Editor systems (owned by EditorMode)
+    EditorSelection*           selection;        // centralised entity/asset selection
+    EditorDiagnostics*         diagnostics;
+    EditorLogCapture*          logCapture;
+    EditorIconCache*           iconCache;
+    ImFont*                    iconFont;
+    EditorShortcutConfig*      shortcuts;
+    EditorOverlaySettings*     overlaySettings;
+    EntityTemplateRegistry*    templateReg;
+    ProjectManager*            projectMgr;
+    ComponentDrawerRegistry*   drawerRegistry;   // owned by EditorMode::m_drawerRegistry
+    EditorActionRegistry*      actionReg;        // unified action dispatch (Issue #66)
+    CommandManager*            cmdMgr;           // Undo/Redo stack (Issue #66)
+
+    std::filesystem::path      projectDir;
+
+    // Callbacks set by BuildContext()
+    std::function<void(const std::filesystem::path&)> onSceneLoad;
+    std::function<void(glm::vec3)>                    onFocusEntity;
+    std::function<void()>                             onAssetsImport;
+    std::function<void()>                             onCookShaders;
+    std::function<void(std::filesystem::path)>        onProjectSelected;
+};
+```
+
+`EditorMode::BuildContext(app)` fills all fields and is called in `OnAttach` after
+`EditorIconCache::Init` (so `iconCache`/`iconFont` are valid at panel construction time)
+and before any panel is constructed. It also:
+- registers all 14 built-in component drawers into `m_drawerRegistry` → `ctx.drawerRegistry`
+- registers all built-in `EditorAction` entries into `m_actionRegistry` → `ctx.actionReg`
+- wires `ctx.cmdMgr = &m_commandManager`
+
+Every panel constructor takes `EditorContext&` as its sole parameter — there are no
+`SetXxx` initialization setters anywhere in the panel layer.
+
+**Construction order in OnAttach (enforced):**
+```
+m_ui.Init(...)
+m_iconCache->Init(...)      ← must precede BuildContext
+BuildContext(app)
+SceneHierarchyPanel(ctx)    ← writes ctx.selection on every user interaction
+AssetsPanel(ctx)            ← writes ctx.selection on asset click
+InspectorPanel(ctx)         ← reads ctx.selection only; no panel cross-refs
+```
+
+### EditorSelection — Centralised Selection State
+
+`editor/EditorSelection.hpp` owns the single source of truth for what the user has
+selected. All panels that need to know the selection read from it; all panels that
+change the selection write to it.
+
+```
+EditorSelectionType { None, Entity, Asset }
+
+Write path:
+  SceneHierarchyPanel  → SelectEntities() / SelectEntity() / Clear()
+  AssetsPanel          → SelectAsset() / Clear()           (via SetSelectedPath helper)
+  EditorMode viewport  → SelectEntity() / Clear()          (picking + gizmo)
+  EditorMode PIE stop  → Clear()                           (game IDs invalidated)
+
+Read path:
+  InspectorPanel       → GetType() / GetPrimaryEntity() / GetSelectedAsset()
+  EditorMode overlays  → GetPrimaryEntity()                (gizmo, billboard, outline)
+```
+
+`SceneHierarchyPanel` retains its own `m_selection` / `m_primarySelected` for rendering
+(highlight, rename, drag-drop) and calls `SyncSelectionToCtx()` after every mutation to
+push the canonical state into `EditorSelection`. `AssetsPanel` uses a private
+`SetSelectedPath(p)` helper that writes `m_selectedPath` and forwards to
+`SelectAsset(p)` in one call. `InspectorPanel` holds only `const EditorSelection*` and
+reads `GetType()` each frame to decide whether to show an entity inspector or an asset
+inspector — the former `const SceneHierarchyPanel* m_hierarchy` and `const AssetsPanel*
+m_assetsPanel` cross-panel pointer fields are removed.
+
+### ComponentDrawerRegistry — Component Drawer Pipeline
+
+`editor/ui/drawers/ComponentDrawerRegistry` owns the ordered list of
+`IComponentDrawer` instances and drives the per-entity Inspector render:
+
+```cpp
+// IComponentDrawer (editor/ui/IComponentDrawer.hpp)
+virtual bool TryDraw(entt::registry&, entt::entity, Scene&, EditorContext&) = 0;
+// Returns true if the component was present; drawers access engine resources via ctx.
+
+// ComponentDrawerRegistry (editor/ui/drawers/ComponentDrawerRegistry.hpp)
+void Register(unique_ptr<IComponentDrawer>);
+void DrawAll(entt::registry&, entt::entity, Scene&, EditorContext&);
+```
+
+Each drawer lives in its own `.hpp`/`.cpp` file under `editor/ui/drawers/`:
+
+| Drawer | Component |
+|--------|-----------|
+| `TagDrawer` | `TagComponent` — entity name field |
+| `TransformDrawer` | `TransformComponent` — position/rotation/scale; proportional-scale lock button; calls `MarkDirty` + `MarkMaterialDirty` on any change so BVH stays in sync |
+| `CameraDrawer` | `CameraComponent` |
+| `DirectionalLightDrawer`, `PointLightDrawer`, `SpotLightDrawer`, `AreaLightDrawer` | all four light types (in `LightDrawers.cpp`) |
+| `StaticMeshDrawer` | `StaticMeshComponent` |
+| `MeshRendererDrawer` | `MeshRendererComponent` |
+| `AnimatorDrawer` | `AnimatorComponent` |
+| `SkinnedMeshDrawer` | `SkinnedMeshComponent` |
+| `MaterialOverrideDrawer` | `MaterialOverrideComponent` |
+| `RigidBodyDrawer` | `RigidBodyComponent` |
+| `ColliderDrawer` | `ColliderComponent` |
+| `ScriptDrawer` | `ScriptComponent` — script path + class name fields |
+
+Shared inline helpers (`DrawAssetIDField`, `RemoveButton`, `HeaderFlags`) live in
+`editor/ui/drawers/DrawerHelpers.hpp`. The monolithic `editor/ui/ComponentDrawers.hpp`
+is deleted. Registration order in `BuildContext` equals the display order in the
+Inspector.
+
+`InspectorPanel` no longer owns a `vector<IComponentDrawer>` — it delegates
+`DrawEntityInspector` to `ctx.drawerRegistry->DrawAll(...)`.
+
+### Presenter Layer (MVP)
+
+Each non-trivial panel has a companion `Presenter` class that owns all write
+operations on engine state. The `Panel::OnDraw()` method is a **View**: it may read
+engine data directly (Scene, Registry, RenderGraph) but must route every mutation
+through a `RequestXxx()` call. The `Presenter::Update(float dt)` is called from
+`EditorMode::OnUpdate` and drains the pending-operation queue.
+
+```
+IPresenter (virtual Update(float dt) = 0)
+  ├── SceneHierarchyPresenter  — CreateEntity/DestroyEntity/SetParent/DuplicateEntity/Reparent/AssetDrop
+  ├── AssetsPresenter          — NFD import, ImportFile (fs::copy_file), drop queue
+  ├── PlaybackPresenter        — app->SetPlayState()
+  ├── WorldSettingsPresenter   — ApplyWorldSettings() / RebakeIBL() (priority: rebake > apply-IBL > apply)
+  ├── PostProcessPresenter     — ApplyWorldSettings(ws, false) on live parameter change
+  ├── ShortcutsPresenter       — RegisterMaps() + NFD import/export + config file I/O
+  └── ProjectBrowserPresenter  — CreateProject() + ConsumeCreateSuccess/Error result channels
+```
+
+All presenters are created in `EditorMode::BuildContext(app)` and updated every frame:
+
+```cpp
+// EditorMode::OnUpdate
+m_hierPresenter->Update(dt);
+m_assetsPresenter->Update(dt);
+m_playbackPresenter->Update(dt);
+m_worldPresenter->Update(dt);
+m_ppPresenter->Update(dt);
+m_shortcutsPresenter->Update(dt);
+m_projectBrowserPresenter->Update(dt);
+```
+
+**Invariant:** `OnDraw()` contains no `scene.CreateEntity`, `DestroyEntity`,
+`SetParent`, `SetPlayState`, `ApplyWorldSettings`, `RebakeIBL`, `RegisterMaps`,
+`filesystem::copy`, or NFD file-picker calls. `PerformancePanel`, `SettingsPanel`,
+have no Presenter (they are already pure View or make only negligible toggle writes).
+
+**AssetsPresenter specifics:**
+- `RequestNFDImport(const fs::path& destDir = {})` — sets `m_pendingNFDImport = true`
+  and stores `destDir` as the NFD default directory hint and import destination.
+  If `destDir` is empty, `RunNFDImport()` derives the destination from `EditorSelection`.
+- `AssetsPanel::RequestImport()` passes `GetCurrentDestDir()` to `RequestNFDImport()`
+  so the dialog opens at the panel's currently focused directory.
+- `AssetsPanel::MarkFilePaneDirty()` — public method; called by `EditorMode` after
+  `SaveScene` to refresh the file pane listing when a new scene file is written.
+
+### EditorActionRegistry — Unified Action Dispatch
+
+`editor/action/EditorActionRegistry.hpp` declares:
+
+```cpp
+struct EditorAction {
+    std::string                       id;
+    std::function<bool(EditorContext&)> canExecute;  // nullptr = always true
+    std::function<void(EditorContext&)> execute;
+};
+
+class EditorActionRegistry {
+    void Register(EditorAction);
+    void Trigger(const std::string& id, EditorContext&);        // UI dispatch
+    void PollAndDispatch(InputSystem&, EditorContext&);          // input dispatch
+};
+```
+
+`BuildContext` registers all built-in actions (NewScene, SaveScene, SaveSceneAs,
+Undo, Redo, EntityDelete, EntityDuplicate, EntityRename, EntityReparent, EntityFocus,
+TogglePanels, etc.). `EditorMode::OnUpdate` replaces the former 10+ if-chain with a
+single call:
+
+```cpp
+m_actionRegistry.PollAndDispatch(*m_input, ctx);
+```
+
+Menus call `m_actionRegistry.Trigger(id, ctx)` directly (e.g. from the Edit menu for
+Undo/Redo). The `canExecute` predicate gates both the menu item (greyed out when false)
+and the input dispatch.
+
+**Deferred SaveScene:** `SaveScene()` checks `m_currentScenePath` — if empty *or* the
+file no longer exists on disk — it sets `m_pendingSaveAs = true` and returns. `OnUpdate`
+runs the NFD Save dialog when `m_pendingSaveAs` is true, writes the file, and calls
+`m_assetsPanel->MarkFilePaneDirty()` on success. This keeps NFD out of the render phase.
+
+### CommandManager — Undo/Redo Stack
+
+`editor/command/CommandManager.hpp`:
+
+```cpp
+class IEditorCommand {
+    virtual void Execute(EditorContext&) = 0;
+    virtual void Undo(EditorContext&)    = 0;
+    virtual std::string GetDescription() const = 0;
+    virtual bool IsBoundary() const { return false; }  // play-boundary marker
+};
+
+class CommandManager {
+    void Execute(unique_ptr<IEditorCommand>, EditorContext&);
+    void Undo(EditorContext&);
+    void Redo(EditorContext&);
+    void PushPlayBoundary();  // called on PIE start
+    void PopPlayBoundary();   // called on PIE stop
+};
+```
+
+The stack is a `std::deque` capped at 50 entries. Undo stops at a
+`PlayBoundaryMarker` sentinel inserted by `PushPlayBoundary()` (prevents undoing past
+play/edit transitions). `PopPlayBoundary()` removes the marker on PIE stop.
+
+Built-in commands (`editor/command/commands/`):
+
+| Command | Undo behavior |
+|---------|--------------|
+| `DeleteEntityCommand` | Serialises entity subtree before delete; re-spawns from JSON on Undo |
+| `RenameEntityCommand` | Swaps `TagComponent::name` back |
+| `ReparentEntityCommand` | Restores old parent + sibling order |
+| `TransformCommand` | Stores pre/post `TransformComponent`; writes back on Undo/Redo |
+| `CreateMeshEntityCommand` | Destroys on Undo; re-creates on Redo |
+
 ### Systems Owned by EditorMode
 
 | System | Purpose |
@@ -1404,26 +1730,30 @@ Phase 2: GPU
 | `EditorCamera` | Free-flying orbit camera; driven by mouse look + WASD; `FocusOn(target)` repositions along current forward vector (yaw/pitch unchanged) |
 | `EditorUI` | ImGui lifecycle (NewFrame / Render / backend); dockspace layout |
 | `EditorOverlaySettings` | Visibility toggles for all overlay symbols |
-| `EntityTemplateRegistry` | Scans `templates/entities/` for spawn menu |
+| `EntityTemplateRegistry` | Scans `templates/entities/` for spawn menu; `DefaultScenePath()` returns the new-scene template path; used by `AssetsPanel::CreateNewFile(Scene)` |
 | `ProjectManager` | Create/open/recent-projects logic; persists `recent_projects.json` |
 | `ProjectBrowserPanel` | Startup modal (shown when no project loaded); not an `IEditorWindow` — driven directly from `OnRenderUI` |
 | `EditorShortcutConfig` | JSON-backed user shortcut overrides (`editor_shortcuts.json`); `Load`/`Save`/`Reload`/`ImportFrom`/`ExportTo`; `ApplyTo(defaults)` replaces `bindings[0]` for overridden actions; built-in path is read-only (Save disabled in panel) |
 | `EditorDiagnostics` | Collects warnings/errors for ConsolePanel Diagnostics tab (action-required events only) |
-| `EditorLogCapture` | RAII spdlog sink; passively mirrors all `SA_LOG_*` calls into a ring buffer for ConsolePanel Engine Logs tab |
+| `EditorLogCapture` | RAII spdlog sink; passively mirrors all `SA_LOG_*` calls into a ring buffer (`LogEntry { level, timeStr, message, loggerName }`); `loggerName` carries the spdlog logger name (e.g. `"script"`) for downstream routing |
 | `EditorIconCache` | LRU-bounded ImGui texture cache (`kMaxThumbnails=256`): one permanent engine-logo texture + per-path thumbnail entries (lazy GPU upload via `ImageLoader` + `VulkanDevice::CreateTexture`); evict callback frees `VkDescriptorSet` + GPU texture; `IsThumbnailCached()` / `CanLoadThumbnail()` let callers gate loads without touching the cache; `ClearAllThumbnails()` must be called before `ResourceManager::ClearProjectAssets()` on project switch |
+| `ComponentDrawerRegistry` | Ordered list of `IComponentDrawer` instances (one per component type); `Register(unique_ptr<IComponentDrawer>)` + `DrawAll(reg, entity, scene, ctx)`; registration order = Inspector display order; owned by `EditorMode::m_drawerRegistry`, exposed via `EditorContext::drawerRegistry` |
+| `EditorActionRegistry` | Declarative action registry; `Register(EditorAction)` maps id → `{canExecute, execute}`; `PollAndDispatch(input, ctx)` replaces `OnUpdate` if-chain; `Trigger(id, ctx)` for UI dispatch (menus, buttons) |
+| `CommandManager` | 50-entry deque Undo/Redo stack; `Execute(cmd, ctx)` runs + pushes; `Undo/Redo` walk the stack; `PushPlayBoundary/PopPlayBoundary` insert/remove a sentinel that prevents Undo from crossing PIE transitions |
+| `ConsolePanelPresenter` | Drains `EditorLogSink` once per second; level-filters; routes entries with `loggerName=="script"` to `m_scriptEntries`; exposes `GetEngineEntries()`, `GetScriptEntries()`, unread count, and level-show toggles to `ConsolePanel` |
 
 ### Panels
 
 | Panel | Purpose |
 |-------|---------|
 | `SceneHierarchyPanel` | Entity tree; multi-select (Ctrl-toggle / Shift-range / Ctrl+A all); data-driven spawn menu from `EntityTemplateRegistry`; Ctrl+D duplicate; drag-reparent; short double-click → `FocusEntityCallback` pans camera; long double-click (hold > 0.20 s) → inline rename |
-| `InspectorPanel` | Component editor for selected entity; auto-generated drawers per component type; `IAssetInspector` for `.mat`/`.satex`/`.samesh` selection |
-| `AssetsPanel` | Two-pane Explorer layout: left dir tree (`DrawDirPane`, 200 px) + right file pane (`DrawFilePane`); list/card view toggle (FA `LIST`/`BORDER_ALL` buttons); icon-size slider (16–96 px); FA6 type glyphs per file extension + lazy-loaded LRU thumbnail preview for image files; multi-select (Ctrl-toggle / Shift-range / Ctrl+A); native file picker import (nfd-extended, multi-select); drag-to-viewport drop; Create Material/Shader/Folder; `SetProjectDir` for runtime project switch; per-frame thumbnail budget (`kMaxThumbLoadsPerFrame=4`); `CanLoadThumbnail()` guard prevents LRU eviction thrashing |
+| `InspectorPanel` | Reads `EditorSelection` to decide entity vs. asset view; delegates entity component rendering to `ctx.drawerRegistry->DrawAll()`; owns `IAssetInspector` map for `.mat`/`.sascene`/model/image asset inspection; drives "Add Component" popup from registered `ComponentDescriptor` list |
+| `AssetsPanel` | Two-pane Explorer layout: left dir tree (`DrawDirPane`, 200 px) + right file pane (`DrawFilePane`); list/card view toggle (FA `LIST`/`BORDER_ALL` buttons); icon-size slider (16–96 px); FA6 type glyphs per file extension + lazy-loaded LRU thumbnail preview for image files; multi-select (Ctrl-toggle / Shift-range / Ctrl+A); native file picker import (nfd-extended, multi-select) via `AssetsPresenter::RequestNFDImport(GetCurrentDestDir())`; drag-to-viewport drop; Create Material/Shader/Scene/Folder (right-click context menu); `UpdateProjectDir` for runtime project switch; per-frame thumbnail budget (`kMaxThumbLoadsPerFrame=4`); `CanLoadThumbnail()` guard prevents LRU eviction thrashing; `MarkFilePaneDirty()` for external refresh (called after SaveScene); DnD empty-space targets: left pane → `m_assetsRoot`, right pane → `m_selectedDir` (`BeginDragDropTargetCustom` after each `EndChild`) |
 | `ProjectBrowserPanel` | Standalone startup modal (not registered in EditorUI); three sections: Create / Open / Recent; uses NFD for folder+file picking |
 | `WorldSettingsPanel` | Scene background (SolidColor/Skybox) and IBL asset pickers only |
 | `PostProcessPanel` | Bloom (enabled/mipLevels/threshold/strength/radius) + Tonemap (mode/exposure/LUT picker/lutStrength) + Color Grading (enabled/Lift/Midtone/Gain/Saturation/Contrast; Builtin mode only) + SSAO (GTAO) (enabled/radius/strength/bias/directions/steps/blurSharpness) + Depth of Field (enabled/focusDistance/aperture/focalLength/samples/maxCocPx) + TAA (enabled/blendStatic/blendMotion/antiGhosting); calls `ApplyWorldSettings(ws, false)` on any change; default open |
-| `PlaybackPanel` | Play / Pause / Stop buttons; triggers `Application::SetPlayState` |
-| `ConsolePanel` | Two-tab panel: **Diagnostics** (action-required events from `EditorDiagnostics`) + **Engine Logs** (real-time `SA_LOG_*` stream via `EditorLogCapture`, per-level filter) |
+| `PlaybackPanel` | Play / Pause / Stop buttons; triggers `Application::SetPlayState` via `PlaybackPresenter` |
+| `ConsolePanel` | Two-tab panel (pure View, driven by `ConsolePanelPresenter`): **Diagnostics** (action-required events from `EditorDiagnostics` + auto-routed `loggerName=="script"` entries) + **Engine Logs** (full `SA_LOG_*` stream, per-level filter) |
 | `SettingsPanel` | UI scale, overlay toggles (grid/axes/gizmo/outline/skeleton), physics debug toggles (shapes/AABBs/velocity/contacts) |
 | `PerformancePanel` | Display (viewport size, FPS/frame-time); Memory (GPU VRAM progress bar from `RHIMemoryStats`, CPU process RAM); Render Stats (RGStats: imported + transient counts/MB, physical savings, per-texture detail table). Default closed. |
 | `ShortcutsPanel` | Lists all `userConfigurable` Button actions; [Change] enters key-capture mode (next non-modifier key + held Ctrl/Shift/Alt → new binding); [×] clears override; [Default] reloads built-in config; [Reload] discards unsaved changes; [Import...]/[Export...] switch or copy the active config file via NFD; [Apply] rebuilds input maps; [Save] writes to active config file (disabled for built-in path); active config filename shown below toolbar |
@@ -1451,7 +1781,7 @@ Phase 2: GPU
      matMgr.ClearProjectInstances()  — evict cached MaterialInstances; types survive
      m_diagnostics.ClearSource(Runtime) — clear stale runtime warnings from previous project
 4. m_assetRegistry->Scan(projectDir/"assets", engineAssetsDir)
-5. m_assetsPanel->SetProjectDir(projectDir/"assets")
+5. m_assetsPanel->UpdateProjectDir(projectDir/"assets")
 6. LoadSaProject → load startupScene (warns if missing, continues with empty scene)
 7. renderer.ApplyWorldSettings(scene.GetWorldSettings())
 8. PrepareAnimatedEntities + RebuildDrawList
@@ -1485,17 +1815,21 @@ keyboard-nav focus, so WASD camera movement still works when panels are focused.
 6. Detects drag-end (`wasUsing && !m_gizmoIsUsing`) → calls `Scene::MarkMaterialDirty()` to
    rebuild the BVH after a gizmo transform, keeping ray-picking AABBs in sync
 
+`TransformDrawer` uses the same pattern: it calls both `MarkDirty(entity)` and
+`MarkMaterialDirty()` whenever position/rotation/scale changes via the Inspector, so
+clicking on a scaled entity in the viewport always uses the updated AABB.
+
 ### Viewport Interaction (HandleViewportInteraction)
 
 `EditorMode::HandleViewportInteraction()` is called from `OnRenderUI` after `DrawImGuizmo`. It:
 1. Creates a transparent full-screen `##viewport_interact` ImGui window (`NoBringToFrontOnFocus | NoFocusOnAppearing | NoDocking`) as a drop target and picking receiver
 2. Calls `ImGuizmo::SetAlternativeWindow(currentWindow)` so ImGuizmo's `IsHoveringWindow()` check accepts this window as valid — without this, the full-screen overlay makes `g.HoveredWindow` non-null and non-gizmo, causing `mbMouseOver=false` and disabling all gizmo handle hit-tests
 3. `BeginDragDropTarget` — accepts `"SAASSET"` `.glb/.gltf` drops; computes world spawn position via `RayHitHorizontalPlane(ray, 0)` (or 10-unit fallback), calls `SceneHierarchyPanel::TriggerAssetDrop(path, spawnPos)`
-4. Left-click picking: guarded by `!m_gizmoIsUsing && !ImGuizmo::IsOver() && IsWindowHovered()`; fires `SceneRenderer::RaycastScene(ray)` → `SceneHierarchyPanel::SetSelection` or `ClearSelection`
+4. Left-click picking: guarded by `!m_gizmoIsUsing && !ImGuizmo::IsOver() && IsWindowHovered()`; fires `SceneRenderer::RaycastScene(ray)` → `SceneHierarchyPanel::SetSelection(e)` or `ClearSelection()`, which in turn write into `EditorSelection`
 
 `ScreenToWorldRay(sx, sy)` unprojects NDC via `inverse(proj * view)` at depth 0 and 1; `cam.proj` already has the Vulkan Y-flip so `ndcY = (sy/sh)*2−1` is used directly.
 
-`SceneHierarchyPanel` gained three public methods: `SetSelection(entity)`, `ClearSelection()`, `TriggerAssetDrop(assetPath, spawnPos)`. `AssetDropOp` gained a `spawnPos` field applied to the spawned entity's `TransformComponent::position`.
+`SceneHierarchyPanel` public interface: `SetSelection(entity)`, `ClearSelection()`, `TriggerAssetDrop(assetPath, spawnPos)`. `AssetDropOp` has a `spawnPos` field applied to the spawned entity's `TransformComponent::position`.
 
 ### EditorOverlaySettings
 
@@ -1550,9 +1884,13 @@ ComputeProgram owns all its sets; set=0 may be a caller-supplied frame layout.
 Set=2 is only bound for `isSkinned` draw items; static mesh pipelines declare no set=2 layout.
 
 ### HierarchyComponent Is Optional
-Only parented entities carry `HierarchyComponent`. `UpdateTransforms()` uses
-`TransformComponent` presence (not `HierarchyComponent`) to identify entities
-that need world matrix computation.
+Only parented entities carry `HierarchyComponent`. Child ordering within a parent
+is maintained by `HierarchyComponent::children` (a `vector<entt::entity>`).
+Root-level ordering is maintained by `Scene::m_rootOrder` (a `vector<entt::entity>`),
+which is updated by `CreateEntity`, `DestroyEntity`, `SetParent`, and `Clear`.
+`GetRootOrder()` returns this list; `MoveRootBefore/After` reorder entries.
+`SceneHierarchyPanel` and `SceneSerializer` iterate roots via `GetRootOrder()` rather
+than `reg.view<TagComponent>()` to preserve user-defined display and save order.
 
 ### AnimatedTransformComponent Overrides, Never Replaces
 `AnimationSystem` writes `AnimatedTransformComponent` each frame;
@@ -1576,8 +1914,17 @@ baking knowledge of parameter names into the component system.
 a `Pimpl` struct. Callers never include Jolt headers, keeping compile times fast and
 the physics backend swappable.
 
+### Scripting: Function Table Instead of Shared Library
+`StellarAlia.Runtime` is a managed-only assembly. The C++ side exposes engine APIs through `ScriptApiFunctionTable` — a plain struct of function pointers passed to `Initialize`. This avoids requiring `StellarAlia.Runtime` to P/Invoke into a named native DLL, keeping the build simple (no `SHARED` target) and the pointer table stable across reloads.
+
+### Scripting: SDK Reference Pack for Roslyn
+Roslyn compilation references the .NET SDK reference assembly pack (`Microsoft.NETCore.App.Ref`) rather than the runtime implementation assemblies. This mirrors Unity/Godot's approach: ref-pack DLLs expose only the managed API surface with no native blobs, preventing CS0433 duplicate-type errors that arise when both ref-pack and runtime assemblies define the same types (e.g. `Vector3`).
+
+### Scripting: CollectibleALC for Hot-Reload Isolation
+User scripts are loaded into a `CollectibleAssemblyLoadContext` so they can be GC-collected after `Unload()`. Dependency resolution searches `AppDomain.CurrentDomain` (not `AssemblyLoadContext.Default`) because `hostfxr` loads `StellarAlia.Runtime` into its own isolated ALC that Default cannot see.
+
 ### AppMode Is the Only Customisation Point
-Application systems (Scene, Renderer, Physics, Animation, Input) are fixed.
+Application systems (Scene, Renderer, Physics, Animation, Input, Script) are fixed.
 Per-project logic lives entirely in an `AppMode` subclass. This keeps the engine
 core stable and the editor and game runtimes cleanly separated.
 

@@ -168,6 +168,14 @@ public:
     [[nodiscard]] const WorldSettings& GetWorldSettings() const { return m_worldSettings; }
     WorldSettings& GetWorldSettings() { return m_worldSettings; }
 
+    // Returns root entities in user-defined order.  Use this for hierarchy
+    // display and serialization instead of reg.view<TagComponent>().
+    [[nodiscard]] const std::vector<entt::entity>& GetRootOrder() const { return m_rootOrder; }
+
+    // Reorder root entities.  entity must already be a root.
+    void MoveRootBefore(entt::entity entity, entt::entity before);
+    void MoveRootAfter (entt::entity entity, entt::entity after);
+
     // ── Systems ───────────────────────────────────────────────────────────
 
     // Recomputes WorldTransformComponent for every dirty entity.
@@ -193,6 +201,9 @@ private:
     std::string    m_name;
     WorldSettings  m_worldSettings;
     entt::registry m_registry;
+
+    // User-defined root order.  Maintained by CreateEntity / DestroyEntity / SetParent / Clear.
+    std::vector<entt::entity> m_rootOrder;
 
     // Cached BFS traversal order — parents always appear before their children.
     // Rebuilt lazily whenever m_hierarchyDirty is set.

@@ -18,8 +18,9 @@ void EditorLogSink::sink_it_(const spdlog::details::log_msg& msg) {
         return;
 
     LogEntry e;
-    e.level   = msg.level;
-    e.message = std::string(msg.payload.begin(), msg.payload.end());
+    e.level      = msg.level;
+    e.message    = std::string(msg.payload.begin(), msg.payload.end());
+    e.loggerName = std::string(msg.logger_name.begin(), msg.logger_name.end());
 
     // Format wall-clock time as HH:MM:SS
     auto secs  = std::chrono::time_point_cast<std::chrono::seconds>(msg.time);

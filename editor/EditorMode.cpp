@@ -32,6 +32,25 @@
 #include "function/animation/AnimationSystem.hpp"
 #include "shader_cook/ShaderCookLib.hpp"
 #include "ui/EditorIcons.hpp"
+#include "ui/drawers/TagDrawer.hpp"
+#include "ui/drawers/TransformDrawer.hpp"
+#include "ui/drawers/CameraDrawer.hpp"
+#include "ui/drawers/LightDrawers.hpp"
+#include "ui/drawers/StaticMeshDrawer.hpp"
+#include "ui/drawers/MeshRendererDrawer.hpp"
+#include "ui/drawers/AnimatorDrawer.hpp"
+#include "ui/drawers/SkinnedMeshDrawer.hpp"
+#include "ui/drawers/MaterialOverrideDrawer.hpp"
+#include "ui/drawers/RigidBodyDrawer.hpp"
+#include "ui/drawers/ColliderDrawer.hpp"
+#include "ui/drawers/ScriptDrawer.hpp"
+#include "command/commands/EntityCommands.hpp"
+#include "command/commands/TransformCommand.hpp"
+
+#if __has_include(<nfd.h>)
+#include <nfd.h>
+#define SA_HAS_NFD 1
+#endif
 
 #include <GLFW/glfw3.h>
 #include <algorithm>
@@ -120,65 +139,42 @@ void EditorMode::OnAttach(Application& app) {
     if (!m_ui.Init(glfwWin, &app.GetVulkanDevice(), app.GetDesc().engineAssetsDir))
         SA_LOG_WARN("EditorMode: UI init failed — editor panels unavailable");
 
-    // Register built-in panels.
-    // The hierarchy panel is registered first; the inspector holds a raw pointer
-    // to it (safe — both are owned by m_ui and live for the same duration).
+    // ── EditorIconCache (must be after ImGui Vulkan backend init) ────────────
+    m_iconCache = std::make_unique<EditorIconCache>();
+    m_iconCache->Init(&app.GetVulkanDevice(),
+                      &app.GetResourceManager(),
+                      app.GetDesc().engineAssetsDir);
+
+    // ── Build dependency context ───────────────────────────────────────────────
+    BuildContext(app);
+
+    // ── Register built-in panels ───────────────────────────────────────────────
     m_ui.SetDiagnostics(&m_diagnostics);
-    m_ui.RegisterWindow(std::make_unique<PlaybackPanel>(app, &m_diagnostics));
-    auto hierarchyOwned = std::make_unique<SceneHierarchyPanel>(scene, input);
-    hierarchyOwned->SetRegistry(m_assetRegistry);
-    hierarchyOwned->SetTemplateRegistry(&m_templateRegistry);
-    hierarchyOwned->SetSceneLoadCallback([this](const fs::path& path) {
-        LoadScene(path);
-    });
-    m_hierarchyPanel = hierarchyOwned.get();
-    hierarchyOwned->SetFocusEntityCallback([this](glm::vec3 worldPos) {
-        m_camera.FocusOn(worldPos);
-    });
-    m_ui.RegisterWindow(std::move(hierarchyOwned));
+    m_ui.RegisterWindow(std::make_unique<PlaybackPanel>(m_ctx, *m_playbackPresenter));
     {
-        auto inspOwned = std::make_unique<InspectorPanel>(scene, *m_hierarchyPanel,
-                                                         m_assetRegistry,
-                                                         app.GetRenderer().GetMaterialManager());
-        m_inspectorPanel = inspOwned.get();
-        m_ui.RegisterWindow(std::move(inspOwned));
+        auto hierarchyOwned = std::make_unique<SceneHierarchyPanel>(m_ctx, *m_hierPresenter);
+        m_hierarchyPanel = hierarchyOwned.get();
+        m_ui.RegisterWindow(std::move(hierarchyOwned));
     }
-    m_ui.RegisterWindow(std::make_unique<SettingsPanel>(
-        &m_overlaySettings, &app.GetPhysicsDebugSettings()));
-    m_ui.RegisterWindow(std::make_unique<PerformancePanel>(
-        &app.GetRenderer().GetRenderGraph(), &app.GetVulkanDevice()));
-    m_ui.RegisterWindow(std::make_unique<WorldSettingsPanel>(scene, app.GetRenderer(), m_assetRegistry));
-    m_ui.RegisterWindow(std::make_unique<PostProcessPanel>(scene, app.GetRenderer(), m_assetRegistry));
+    m_ui.RegisterWindow(std::make_unique<SettingsPanel>(m_ctx));
+    m_ui.RegisterWindow(std::make_unique<PerformancePanel>(m_ctx));
+    m_ui.RegisterWindow(std::make_unique<WorldSettingsPanel>(m_ctx, *m_worldPresenter));
+    m_ui.RegisterWindow(std::make_unique<PostProcessPanel>(m_ctx, *m_ppPresenter));
     {
-        auto assetsOwned = std::make_unique<AssetsPanel>(
-            projectDir, app.GetDesc().cookCacheDir, m_assetRegistry);
+        auto assetsOwned = std::make_unique<AssetsPanel>(m_ctx, *m_assetsPresenter);
         m_assetsPanel = assetsOwned.get();
-        m_assetsPanel->SetSceneLoadCallback([this](const fs::path& path) {
-            LoadScene(path);
-        });
-        // After import: rescan registry with both dirs so the Inspector picker updates.
-        m_assetsPanel->SetImportCallback([this]() {
-            const std::string& pd = m_app->GetDesc().projectDir;
-            m_assetRegistry->Scan(
-                pd.empty() ? fs::path{} : fs::path(pd) / "assets",
-                m_app->GetDesc().engineAssetsDir);
-        });
-        m_assetsPanel->SetInput(&input);
-        m_assetsPanel->SetCookShadersCallback([this]() { CookProjectShaders(); });
-        m_assetsPanel->SetDiagnostics(&m_diagnostics);
-        m_assetsPanel->SetMaterialManager(app.GetRenderer().GetMaterialManager());
         // Eagerly scan and cook project assets before the first frame so the
         // Inspector's material picker is populated on startup.
         m_assetsPanel->RunInitialScan();
         m_ui.RegisterWindow(std::move(assetsOwned));
     }
-
-    if (m_inspectorPanel) m_inspectorPanel->SetAssetsPanel(m_assetsPanel);
-
-    m_ui.RegisterWindow(std::make_unique<ConsolePanel>(m_diagnostics, m_logCapture->GetSink()));
-    m_ui.RegisterWindow(std::make_unique<ShortcutsPanel>(
-        m_shortcutConfig, input,
-        fs::path(StellarAliaApp::BIN_DIR) / "editor_shortcuts.json"));
+    {
+        auto inspOwned = std::make_unique<InspectorPanel>(m_ctx);
+        m_inspectorPanel = inspOwned.get();
+        m_ui.RegisterWindow(std::move(inspOwned));
+    }
+    m_ui.RegisterWindow(std::make_unique<ConsolePanel>(m_ctx, *m_consolePresenter));
+    m_ui.RegisterWindow(std::make_unique<ShortcutsPanel>(m_ctx, *m_shortcutsPresenter));
 
     // ── GLFW drop callback (import via drag-and-drop from Explorer) ────────────
     // GLFWWindow already owns the window user pointer for resize events, so we
@@ -187,6 +183,11 @@ void EditorMode::OnAttach(Application& app) {
     glfwSetDropCallback(glfwWin, [](GLFWwindow*, int count, const char** paths) {
         if (s_dropTarget) s_dropTarget->EnqueueDroppedPaths(count, paths);
     });
+
+    // ── Edit menu (Undo/Redo) ─────────────────────────────────────────────────
+    m_ui.SetCommandManager(&m_commandManager,
+        [this]() { m_commandManager.Undo(m_ctx); },
+        [this]() { m_commandManager.Redo(m_ctx); });
 
     // ── File menu callbacks ───────────────────────────────────────────────────
     m_ui.SetFileCallbacks({
@@ -208,28 +209,161 @@ void EditorMode::OnAttach(Application& app) {
     m_recentsConfigPath   = binDir / "recent_projects.json";
     m_projectManager.LoadRecents(m_recentsConfigPath);
 
-    m_projectBrowserPanel = std::make_unique<ProjectBrowserPanel>(
-        m_projectManager, app.GetDesc().engineAssetsDir);
-    m_projectBrowserPanel->SetOnProjectSelected([this](const fs::path& path) {
-        m_pendingProjectLoad = path;
-    });
+    m_projectBrowserPanel = std::make_unique<ProjectBrowserPanel>(m_ctx, *m_projectBrowserPresenter);
 
     if (projectDir.empty() || projFile.empty())
         m_showProjectBrowser = true;
-
-    // ── EditorIconCache (must be after ImGui Vulkan backend init) ────────────
-    m_iconCache = std::make_unique<EditorIconCache>();
-    m_iconCache->Init(&app.GetVulkanDevice(),
-                      &app.GetResourceManager(),
-                      app.GetDesc().engineAssetsDir);
-    if (m_assetsPanel)    m_assetsPanel->SetIconCache(m_iconCache.get(), m_ui.GetIconFont());
-    if (m_inspectorPanel) m_inspectorPanel->SetIconCache(m_iconCache.get());
-    if (m_inspectorPanel) m_inspectorPanel->SetIconFont(m_ui.GetIconFont());
 
     SA_LOG_INFO("EditorMode: attached");
     SA_LOG_INFO("  RMB + Mouse / Right stick — Look");
     SA_LOG_INFO("  WASD / Left stick         — Move");
     SA_LOG_INFO("  Left Shift / LB           — Sprint");
+}
+
+void EditorMode::BuildContext(Application& app) {
+    const std::string& pd = app.GetDesc().projectDir;
+
+    m_ctx.app         = &app;
+    m_ctx.scene       = &app.GetScene();
+    m_ctx.registry    = &app.GetScene().Registry();
+    m_ctx.assetReg    = m_assetRegistry;
+    m_ctx.matMgr      = app.GetRenderer().GetMaterialManager();
+    m_ctx.resMgr      = &app.GetResourceManager();
+    m_ctx.input       = &app.GetInputSystem();
+
+    m_ctx.selection       = &m_selection;
+    m_ctx.diagnostics     = &m_diagnostics;
+    m_ctx.logCapture      = m_logCapture.get();
+    m_ctx.iconCache       = m_iconCache.get();
+    m_ctx.iconFont        = m_ui.GetIconFont();
+    m_ctx.shortcuts       = &m_shortcutConfig;
+    m_ctx.overlaySettings = &m_overlaySettings;
+    m_ctx.templateReg     = &m_templateRegistry;
+    m_ctx.projectMgr      = &m_projectManager;
+
+    // Registration order == display order in Inspector.
+    m_drawerRegistry.Register(std::make_unique<TagDrawer>());
+    m_drawerRegistry.Register(std::make_unique<TransformDrawer>());
+    m_drawerRegistry.Register(std::make_unique<CameraDrawer>());
+    m_drawerRegistry.Register(std::make_unique<DirectionalLightDrawer>());
+    m_drawerRegistry.Register(std::make_unique<PointLightDrawer>());
+    m_drawerRegistry.Register(std::make_unique<SpotLightDrawer>());
+    m_drawerRegistry.Register(std::make_unique<AreaLightDrawer>());
+    m_drawerRegistry.Register(std::make_unique<StaticMeshDrawer>());
+    m_drawerRegistry.Register(std::make_unique<MeshRendererDrawer>());
+    m_drawerRegistry.Register(std::make_unique<AnimatorDrawer>());
+    m_drawerRegistry.Register(std::make_unique<SkinnedMeshDrawer>());
+    m_drawerRegistry.Register(std::make_unique<MaterialOverrideDrawer>());
+    m_drawerRegistry.Register(std::make_unique<RigidBodyDrawer>());
+    m_drawerRegistry.Register(std::make_unique<ColliderDrawer>());
+    m_drawerRegistry.Register(std::make_unique<ScriptDrawer>());
+    m_ctx.drawerRegistry  = &m_drawerRegistry;
+    m_ctx.actionReg       = &m_actionRegistry;
+    m_ctx.cmdMgr          = &m_commandManager;
+
+    m_ctx.projectDir = pd.empty() ? fs::path{} : fs::path(pd);
+
+    m_ctx.onSceneLoad     = [this](const fs::path& path) { LoadScene(path); };
+    m_ctx.onFocusEntity   = [this](glm::vec3 worldPos) { m_camera.FocusOn(worldPos); };
+    m_ctx.onAssetsImport  = [this]() {
+        const std::string& p = m_app->GetDesc().projectDir;
+        m_assetRegistry->Scan(
+            p.empty() ? fs::path{} : fs::path(p) / "assets",
+            m_app->GetDesc().engineAssetsDir);
+    };
+    m_ctx.onCookShaders   = [this]() { CookProjectShaders(); };
+    m_ctx.onProjectSelected = [this](fs::path path) { m_pendingProjectLoad = std::move(path); };
+
+    // ── Register editor actions ───────────────────────────────────────────────
+    m_actionRegistry.Register({
+        .id      = "NewScene",
+        .label   = "New Scene",
+        .execute = [this](EditorContext&) { NewScene(); },
+    });
+    m_actionRegistry.Register({
+        .id      = "SaveScene",
+        .label   = "Save Scene",
+        .execute = [this](EditorContext&) { SaveScene(); },
+    });
+    m_actionRegistry.Register({
+        .id      = "TogglePanels",
+        .label   = "Toggle Panels",
+        .execute = [this](EditorContext&) { m_ui.TogglePanelsHidden(); },
+    });
+    m_actionRegistry.Register({
+        .id      = "GizmoTranslate",
+        .label   = "Gizmo: Translate",
+        .execute = [this](EditorContext&) { m_overlaySettings.gizmoMode = GizmoMode::Translate; },
+    });
+    m_actionRegistry.Register({
+        .id      = "GizmoRotate",
+        .label   = "Gizmo: Rotate",
+        .execute = [this](EditorContext&) { m_overlaySettings.gizmoMode = GizmoMode::Rotate; },
+    });
+    m_actionRegistry.Register({
+        .id         = "GizmoScale",
+        .label      = "Gizmo: Scale",
+        .canExecute = [this](const EditorContext& ctx) {
+            return ctx.input && !ctx.input->IsActive("MouseLook");
+        },
+        .execute = [this](EditorContext&) { m_overlaySettings.gizmoMode = GizmoMode::Scale; },
+    });
+    m_actionRegistry.Register({
+        .id          = "EntityDelete",
+        .label       = "Delete Entity",
+        .canExecute  = [](const EditorContext& ctx) {
+            return ctx.selection && ctx.selection->HasEntity();
+        },
+        .makeCommand = [](EditorContext& ctx) -> std::unique_ptr<IEditorCommand> {
+            const auto& entitySet = ctx.selection->GetEntitySet();
+            if (entitySet.size() == 1) {
+                entt::entity e = static_cast<entt::entity>(*entitySet.begin());
+                return std::make_unique<DeleteEntityCommand>(e);
+            }
+            // Multi-select delete: non-undoable direct batch delete
+            for (uint32_t bits : entitySet) {
+                entt::entity e = static_cast<entt::entity>(bits);
+                if (ctx.registry->valid(e)) ctx.scene->DestroyEntity(e);
+            }
+            ctx.selection->Clear();
+            return nullptr;
+        },
+    });
+    m_actionRegistry.Register({
+        .id         = "EntityDuplicate",
+        .label      = "Duplicate Entity",
+        .canExecute = [](const EditorContext& ctx) {
+            return ctx.selection && ctx.selection->HasEntity();
+        },
+        .execute = [this](EditorContext& ctx) {
+            if (!m_hierPresenter) return;
+            std::vector<entt::entity> es;
+            const auto& entitySet = ctx.selection->GetEntitySet();
+            es.reserve(entitySet.size());
+            for (uint32_t bits : entitySet)
+                es.push_back(static_cast<entt::entity>(bits));
+            m_hierPresenter->RequestDuplicate(std::move(es));
+        },
+    });
+    m_actionRegistry.Register({
+        .id      = "Undo",
+        .label   = "Undo",
+        .execute = [this](EditorContext& ctx) { m_commandManager.Undo(ctx); },
+    });
+    m_actionRegistry.Register({
+        .id      = "Redo",
+        .label   = "Redo",
+        .execute = [this](EditorContext& ctx) { m_commandManager.Redo(ctx); },
+    });
+
+    m_hierPresenter          = std::make_unique<SceneHierarchyPresenter>(m_ctx);
+    m_assetsPresenter        = std::make_unique<AssetsPresenter>(m_ctx);
+    m_playbackPresenter      = std::make_unique<PlaybackPresenter>(m_ctx);
+    m_worldPresenter         = std::make_unique<WorldSettingsPresenter>(m_ctx);
+    m_ppPresenter            = std::make_unique<PostProcessPresenter>(m_ctx);
+    m_shortcutsPresenter     = std::make_unique<ShortcutsPresenter>(m_ctx);
+    m_projectBrowserPresenter = std::make_unique<ProjectBrowserPresenter>(m_ctx);
+    m_consolePresenter        = std::make_unique<ConsolePanelPresenter>(m_ctx);
 }
 
 void EditorMode::OnDetach() {
@@ -279,6 +413,55 @@ void EditorMode::OnUpdate(float dt) {
         return;   // skip this frame's input/camera update; next frame will be the new project
     }
 
+    // Deferred Save As — open NFD dialog here (update phase), not in render phase.
+    if (m_pendingSaveAs) {
+        m_pendingSaveAs = false;
+#ifdef SA_HAS_NFD
+        fs::path defaultDir;
+        if (m_assetsPanel) defaultDir = m_assetsPanel->GetCurrentDir();
+        if (defaultDir.empty()) {
+            const std::string& pd = m_app->GetDesc().projectDir;
+            if (!pd.empty()) defaultDir = fs::path(pd) / "assets";
+        }
+        const nfdu8filteritem_t filters[] = { { "Scene", "sascene" } };
+        const std::string defaultDirStr = defaultDir.empty() ? std::string{} : defaultDir.string();
+        nfdu8char_t* outPath = nullptr;
+        if (NFD_Init() != NFD_OKAY) {
+            SA_LOG_WARN("EditorMode: NFD init failed — cannot open save dialog");
+        } else {
+            const nfdresult_t res = NFD_SaveDialogU8(
+                &outPath, filters, 1,
+                defaultDirStr.empty() ? nullptr
+                    : reinterpret_cast<const nfdu8char_t*>(defaultDirStr.c_str()),
+                reinterpret_cast<const nfdu8char_t*>("untitled.sascene"));
+            NFD_Quit();
+            if (res == NFD_OKAY && outPath) {
+                m_currentScenePath = fs::path(reinterpret_cast<const char*>(outPath));
+                if (m_currentScenePath.extension() != ".sascene")
+                    m_currentScenePath += ".sascene";
+                NFD_FreePathU8(outPath);
+                if (SceneSerializer::SaveToFile(m_app->GetScene(), m_currentScenePath)) {
+                    SA_LOG_INFO("EditorMode: saved scene '{}'", m_currentScenePath.string());
+                    if (m_assetsPanel) m_assetsPanel->MarkFilePaneDirty();
+                } else {
+                    SA_LOG_ERROR("EditorMode: failed to save scene '{}'", m_currentScenePath.string());
+                }
+            }
+        }
+#else
+        SA_LOG_WARN("EditorMode: no scene path set (NFD not available — cannot open Save dialog)");
+#endif
+    }
+
+    if (m_hierPresenter)            m_hierPresenter->Update(dt);
+    if (m_assetsPresenter)          m_assetsPresenter->Update(dt);
+    if (m_playbackPresenter)        m_playbackPresenter->Update(dt);
+    if (m_worldPresenter)           m_worldPresenter->Update(dt);
+    if (m_ppPresenter)              m_ppPresenter->Update(dt);
+    if (m_shortcutsPresenter)       m_shortcutsPresenter->Update(dt);
+    if (m_projectBrowserPresenter)  m_projectBrowserPresenter->Update(dt);
+    if (m_consolePresenter)         m_consolePresenter->Update(dt);
+
     InputSystem&         input    = m_app->GetInputSystem();
     Platform::GLFWInputProvider& provider = m_app->GetInputProvider();
 
@@ -310,23 +493,8 @@ void EditorMode::OnUpdate(float dt) {
     else if (input.WasDeactivated("MouseLook"))
         provider.SetCursorCapture(false);
 
-    // File shortcuts — Ctrl+N / Ctrl+S; composite bindings also prevent N/S from
-    // leaking into camera WASD or gizmo-scale when the modifier is held.
-    if (input.WasActivated("NewScene"))
-        NewScene();
-    else if (input.WasActivated("SaveScene"))
-        SaveScene();
-
-    if (input.WasActivated("TogglePanels"))
-        m_ui.TogglePanelsHidden();
-
-    // Gizmo mode shortcuts — T / R / S; guard S with !mouseLook to avoid WASD conflict.
-    if (input.WasActivated("GizmoTranslate"))
-        m_overlaySettings.gizmoMode = GizmoMode::Translate;
-    else if (input.WasActivated("GizmoRotate"))
-        m_overlaySettings.gizmoMode = GizmoMode::Rotate;
-    else if (!mouseLook && input.WasActivated("GizmoScale"))
-        m_overlaySettings.gizmoMode = GizmoMode::Scale;
+    // Dispatch all registered editor actions (shortcuts + undoable commands).
+    m_actionRegistry.PollAndDispatch(input, m_ctx);
 
     m_camera.Update(input, dt, mouseLook);
     DrawOverlays();
@@ -343,9 +511,8 @@ void EditorMode::DrawOverlays() {
     Scene&     scene = m_app->GetScene();
     auto&      reg   = scene.Registry();
 
-    const entt::entity selected = m_hierarchyPanel
-        ? static_cast<entt::entity>(m_hierarchyPanel->GetSelectedEntity())
-        : entt::null;
+    const entt::entity selected = m_ctx.selection
+        ? m_ctx.selection->GetPrimaryEntity() : entt::null;
 
     m_app->GetRenderer().SetInfiniteGrid(m_overlaySettings.drawGrid);
 
@@ -556,16 +723,28 @@ void EditorMode::OnPlayStateChanged(EnginePlayState newState) {
     InputSystem&                 input    = m_app->GetInputSystem();
     Platform::GLFWInputProvider& provider = m_app->GetInputProvider();
 
+
     if (newState != EnginePlayState::Editing) {
-        // Entering game / paused mode: release cursor and stop driving the
-        // editor camera so it doesn't move while the player uses the game view.
+        // Switch EditorContext to game copy so all panels read/write game entities.
+        m_ctx.scene    = &m_app->GetActiveScene();
+        m_ctx.registry = &m_ctx.scene->Registry();
+
         if (m_viewportActive) {
             provider.SetCursorCapture(false);
             input.PopMap();
             m_viewportActive = false;
         }
+        m_commandManager.PushPlayBoundary();
     } else {
         // Returning to edit mode: restore the viewport input map.
+        // Clear selection first — game-scene entity IDs are now invalid.
+        m_selection.Clear();
+        m_commandManager.PopPlayBoundary();
+
+        // Switch EditorContext back to editor scene.
+        m_ctx.scene    = &m_app->GetEditorScene();
+        m_ctx.registry = &m_ctx.scene->Registry();
+
         if (!m_viewportActive) {
             input.PushMap("Viewport");
             m_viewportActive = true;
@@ -643,6 +822,7 @@ void EditorMode::LoadProject(const fs::path& saprojectPath) {
 
     // Update Application paths
     m_app->UpdateProjectPaths(projectDir, cookCacheDir);
+    m_ctx.projectDir = projectDir;
 
     m_app->GetResourceManager().ClearProjectAssets();
     m_app->GetMaterialManager().ClearProjectInstances();
@@ -659,7 +839,7 @@ void EditorMode::LoadProject(const fs::path& saprojectPath) {
 
     // Update AssetsPanel root
     if (m_assetsPanel)
-        m_assetsPanel->SetProjectDir(projectDir / "assets");
+        m_assetsPanel->UpdateProjectDir(projectDir / "assets");
 
     // Load startup scene
     SaProject proj;
@@ -722,13 +902,23 @@ void EditorMode::NewScene() {
 
 void EditorMode::SaveScene() {
     if (m_currentScenePath.empty()) {
-        SA_LOG_WARN("EditorMode: no scene path — use Save As (not yet implemented)");
+        // Defer: NFD must not be called from the render phase.
+        m_pendingSaveAs = true;
         return;
     }
-    if (SceneSerializer::SaveToFile(m_app->GetScene(), m_currentScenePath))
+    // If the file was deleted externally, fall back to Save As.
+    std::error_code ec;
+    if (!fs::exists(m_currentScenePath, ec)) {
+        m_currentScenePath.clear();
+        m_pendingSaveAs = true;
+        return;
+    }
+    if (SceneSerializer::SaveToFile(m_app->GetScene(), m_currentScenePath)) {
         SA_LOG_INFO("EditorMode: saved scene '{}'", m_currentScenePath.string());
-    else
+        if (m_assetsPanel) m_assetsPanel->MarkFilePaneDirty();
+    } else {
         SA_LOG_ERROR("EditorMode: failed to save scene '{}'", m_currentScenePath.string());
+    }
 }
 
 void EditorMode::CookProjectShaders() {
@@ -840,9 +1030,8 @@ void EditorMode::DrawBillboardIcons() {
     const auto camData  = m_camera.GetCameraData(aspect);
     const glm::mat4 vp  = camData.proj * camData.view;
 
-    const entt::entity selected = m_hierarchyPanel
-        ? static_cast<entt::entity>(m_hierarchyPanel->GetSelectedEntity())
-        : entt::null;
+    const entt::entity selected = m_ctx.selection
+        ? m_ctx.selection->GetPrimaryEntity() : entt::null;
 
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
 
@@ -893,9 +1082,8 @@ void EditorMode::DrawImGuizmo() {
         return;
     }
 
-    const entt::entity selected = m_hierarchyPanel
-        ? static_cast<entt::entity>(m_hierarchyPanel->GetSelectedEntity())
-        : entt::null;
+    const entt::entity selected = m_ctx.selection
+        ? m_ctx.selection->GetPrimaryEntity() : entt::null;
     if (selected == entt::null) { m_gizmoIsUsing = false; return; }
 
     Scene& scene = m_app->GetScene();
@@ -941,8 +1129,10 @@ void EditorMode::DrawImGuizmo() {
     const bool wasUsing = m_gizmoIsUsing;
     const bool changed  = ImGuizmo::Manipulate(viewArr, projArr, op, mode, matArr);
     m_gizmoIsUsing = ImGuizmo::IsUsing();
-    if (wasUsing && !m_gizmoIsUsing)
-        scene.MarkMaterialDirty();
+
+    // Capture transform at the start of each drag for undo snapshot.
+    if (!wasUsing && m_gizmoIsUsing)
+        m_gizmoDragStart = *tc;
 
     if (changed) {
         // Convert manipulated world matrix back to local space
@@ -967,6 +1157,17 @@ void EditorMode::DrawImGuizmo() {
         mutableTc->rotation = glm::quat(glm::radians(glm::vec3(r[0], r[1], r[2])));
         mutableTc->scale    = { s[0], s[1], s[2] };
         scene.MarkDirty(selected);
+    }
+
+    if (wasUsing && !m_gizmoIsUsing) {
+        scene.MarkMaterialDirty();
+        // Emit an undoable command for the completed drag.
+        const auto* finalTc = reg.try_get<TransformComponent>(selected);
+        if (finalTc && m_ctx.cmdMgr) {
+            m_ctx.cmdMgr->Execute(
+                std::make_unique<ModifyTransformCommand>(selected, m_gizmoDragStart, *finalTc),
+                m_ctx);
+        }
     }
 #else
     m_gizmoIsUsing = false;

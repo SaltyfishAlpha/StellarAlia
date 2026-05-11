@@ -79,6 +79,23 @@ add_subdirectory(third_party)
 # Add runtime library subdirectory
 add_subdirectory(src)
 
+# Managed C# projects (StellarAlia.Runtime + StellarAlia.ScriptBridge)
+# Output goes to bin/managed/ so ScriptSystem can locate the DLLs at runtime.
+find_program(DOTNET dotnet)
+if(DOTNET)
+    set(MANAGED_OUTPUT_DIR "${CMAKE_BINARY_DIR}/bin/managed")
+    add_custom_target(managed_build ALL
+        COMMAND ${DOTNET} publish "${CMAKE_SOURCE_DIR}/managed/StellarAlia.ScriptBridge"
+                -c $<CONFIG> --nologo -v q
+                -o "${MANAGED_OUTPUT_DIR}"
+        COMMENT "Publishing managed C# projects → bin/managed/ (includes NuGet deps)"
+        VERBATIM)
+    add_dependencies(managed_build StellarAliaRuntime)
+    message(STATUS "dotnet found: ${DOTNET} — managed_build target enabled")
+else()
+    message(WARNING "dotnet not found — managed C# projects will not be built")
+endif()
+
 # Importer library (mesh/texture/material cook + sidecar generation).
 # Must come before tools/cook and editor since both link it.
 add_subdirectory(tools/importer)
@@ -159,6 +176,32 @@ target_link_libraries(${PROJECT_NAME}
     PRIVATE StellarAliaRuntime
     $<$<BOOL:${STELLAR_BUILD_EDITOR}>:StellarAliaEditor>
 )
+
+# nethost.dll must be alongside the exe at runtime (nethost.lib is an import library).
+# Search order: lib/nethost/ → .NET SDK packs.
+if(WIN32)
+    set(_NETHOST_DLL "${CMAKE_SOURCE_DIR}/lib/nethost/nethost.dll")
+    if(NOT EXISTS "${_NETHOST_DLL}" AND DOTNET)
+        get_filename_component(_DOTNET_DIR "${DOTNET}" DIRECTORY)
+        file(GLOB _NETHOST_CANDIDATES
+            "${_DOTNET_DIR}/packs/Microsoft.NETCore.App.Host.win-x64/*/runtimes/win-x64/native/nethost.dll")
+        if(_NETHOST_CANDIDATES)
+            list(SORT _NETHOST_CANDIDATES ORDER DESCENDING)
+            list(GET _NETHOST_CANDIDATES 0 _NETHOST_DLL)
+        endif()
+    endif()
+    if(EXISTS "${_NETHOST_DLL}")
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_NETHOST_DLL}"
+                "$<TARGET_FILE_DIR:${PROJECT_NAME}>/nethost.dll"
+            COMMENT "Copying nethost.dll → bin/")
+        message(STATUS "nethost.dll: ${_NETHOST_DLL}")
+    else()
+        message(WARNING "nethost.dll not found — copy it manually to bin/. "
+            "Expected location: <dotnet-root>/packs/Microsoft.NETCore.App.Host.win-x64/<ver>/runtimes/win-x64/native/nethost.dll")
+    endif()
+endif()
 
 # Generated headers (ApplicationPath.hpp) are already on the path via
 # StellarAliaRuntime's PUBLIC include of CMAKE_BINARY_DIR/generated.

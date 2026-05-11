@@ -1,0 +1,73 @@
+using System.Numerics;
+
+namespace StellarAlia;
+
+/// <summary>
+/// Maps friendly key names to engine device paths (e.g. Key.W → "Keyboard/W").
+/// </summary>
+public enum Key
+{
+    A, B, C, D, E, F, G, H, I, J, K, L, M,
+    N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
+    Space, Enter, Escape, Tab, Backspace,
+    LeftShift, RightShift, LeftCtrl, RightCtrl, LeftAlt, RightAlt,
+    Up, Down, Left, Right,
+    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
+    Num0, Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9,
+}
+
+public enum MouseButton { Left, Right, Middle }
+
+public static class Input
+{
+    private static string KeyPath(Key k) => k switch {
+        Key.Space      => "Keyboard/Space",
+        Key.Enter      => "Keyboard/Enter",
+        Key.Escape     => "Keyboard/Escape",
+        Key.Tab        => "Keyboard/Tab",
+        Key.Backspace  => "Keyboard/Backspace",
+        Key.LeftShift  => "Keyboard/LeftShift",
+        Key.RightShift => "Keyboard/RightShift",
+        Key.LeftCtrl   => "Keyboard/LeftCtrl",
+        Key.RightCtrl  => "Keyboard/RightCtrl",
+        Key.LeftAlt    => "Keyboard/LeftAlt",
+        Key.RightAlt   => "Keyboard/RightAlt",
+        Key.Up         => "Keyboard/Up",
+        Key.Down       => "Keyboard/Down",
+        Key.Left       => "Keyboard/Left",
+        Key.Right      => "Keyboard/Right",
+        Key.F1  => "Keyboard/F1",  Key.F2  => "Keyboard/F2",
+        Key.F3  => "Keyboard/F3",  Key.F4  => "Keyboard/F4",
+        Key.F5  => "Keyboard/F5",  Key.F6  => "Keyboard/F6",
+        Key.F7  => "Keyboard/F7",  Key.F8  => "Keyboard/F8",
+        Key.F9  => "Keyboard/F9",  Key.F10 => "Keyboard/F10",
+        Key.F11 => "Keyboard/F11", Key.F12 => "Keyboard/F12",
+        Key.Num0 => "Keyboard/0",  Key.Num1 => "Keyboard/1",
+        Key.Num2 => "Keyboard/2",  Key.Num3 => "Keyboard/3",
+        Key.Num4 => "Keyboard/4",  Key.Num5 => "Keyboard/5",
+        Key.Num6 => "Keyboard/6",  Key.Num7 => "Keyboard/7",
+        Key.Num8 => "Keyboard/8",  Key.Num9 => "Keyboard/9",
+        _ => $"Keyboard/{k}"
+    };
+
+    /// Returns true while the key is held.
+    public static bool IsKeyDown(Key k) => NativeApi.SA_Input_GetKey(KeyPath(k)) > 0.5f;
+
+    /// Returns the raw analog value [0,1] for a key (useful for triggers/axes).
+    public static float GetKeyValue(Key k) => NativeApi.SA_Input_GetKey(KeyPath(k));
+
+    public static bool IsMouseButtonDown(MouseButton btn) {
+        string path = btn switch {
+            MouseButton.Left   => "Mouse/Left",
+            MouseButton.Right  => "Mouse/Right",
+            MouseButton.Middle => "Mouse/Middle",
+            _ => "Mouse/Left"
+        };
+        return NativeApi.SA_Input_GetKey(path) > 0.5f;
+    }
+
+    public static Vector2 GetMouseDelta() {
+        NativeApi.SA_Input_GetAxis2D("Mouse/Delta", out float x, out float y);
+        return new Vector2(x, y);
+    }
+}

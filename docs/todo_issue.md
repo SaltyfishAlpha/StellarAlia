@@ -5,7 +5,6 @@
     - **Reimport All 进度条**（难度中，最有实际价值）：`ReimportDir` 同步阻塞 UI。改法：将其拆成逐帧 N 个文件的状态机，`OnDraw` 期间推进并用 `ImGui::ProgressBar` + modal 显示；或移入工作线程 + 原子进度计数器。
     - 前置条件：依赖 `AssetsPanel` 暴露异步迭代接口；待项目素材量增大后再做。
 27. 美化编辑器：骨骼改用球+锥绘制而不是线
-28. 美化编辑器：灯光、相机等不可视物体添加icon贴图作为标识，素材由我提供;添加引擎logo，注册.saproject的图标为引擎logo；为各种引擎素材添加图标；asset panel可以显示文件对应图标并调节显示大小；
 29. 引入挂载脚本 并提炼现有运行时库暴露给脚本调用
 31. animator编辑器 imguizmo
 32. 材质可视化编程 imguizmo
@@ -29,13 +28,16 @@
 
 ---
 
-## Issue #19 — Phase 3 backlog（低优先级）
+## Issue #19 — （已拆分）Data Inheritance 并入 #68（ComponentSchema UI 层）和运行时单独实施
 
-- `SkinnedMeshComponent.skeletonAsset` picker（独立指定骨骼资产）
-- 多 mesh 共用同一骨骼
+> 本 issue 已拆分：UI 层骨骼 picker / AssetRef 字段 → #68（ComponentSchema）；.samesh v6 格式 / AnimationSystem 三级解析 / MeshTool CLI → 待单独运行时 issue 追踪。
 
 ---
 
+## Issue #29 — 脚本系统（C# Scripting） ✅ DONE
+<!-- hostfxr + Roslyn 编译 + CollectibleALC；ScriptApiFunctionTable 指针表替代 P/Invoke 共享库；SDK ref-pack 解决 CS0433；AppDomain 跨 ALC 搜索解决 StellarAlia.Runtime 找不到；ScriptComponent + 完整 OnAttach→OnStart→FixedUpdate/Update/LateUpdate→OnStop→OnDetach 生命周期已验证 -->
+
+---
 ## Issue #45 — Depth of Field（景深） ✅ DONE
 <!-- CoC 从深度重建（薄透镜公式）→ 分离式近/远高斯模糊（4 pass H+V）→ smoothstep 三层合成；DoFFeature 插入 Bloom 之后 Tonemap 之前，disabled 时零开销；参数序列化到 .sascene；Phase 2 路线：六边形 3-pass / Scatter-as-Gather 修复方形高光 -->
 
@@ -604,3 +606,522 @@ Cook 工具枚举合法 bitmask 组合，编译为 `deferred_geometry.<mask>.ver
 - [ ] 实现 `ShaderVariantCache`：`map<uint32_t, ShaderProgram>` + `GetOrCreate(mask)`
 - [ ] `BuildDrawList` 按实体资源计算 mask，`DrawItem` 携带对应变体引用
 - [ ] GBufferFeature::AddPasses 使用 DrawItem 内的变体 ShaderProgram 替代固定 program
+
+---
+
+## Issue #62 — EditorContext：统一依赖注入容器 ✅ DONE
+<!-- 新建 editor/EditorContext.hpp，提取 EditorMode::BuildContext()，全部 11 个面板构造函数统一改为 explicit Panel(EditorContext& ctx)，删除所有 SetXxx 初始化 setter；AssetsPanel::SetProjectDir 改名为 UpdateProjectDir -->
+
+---
+
+## Issue #63 — EditorSelection：集中化选择状态 ✅ DONE
+<!-- 新建 EditorSelection（entity/asset 统一选区 + 订阅通知），SceneHierarchyPanel/AssetsPanel 双写，InspectorPanel 移除跨面板指针改为读 EditorSelection，EditorMode PIE stop 时调用 Clear() -->
+
+---
+
+## Issue #64 — ComponentDrawers 拆分与注册化 ✅ DONE
+<!-- ComponentDrawers.hpp 拆为 editor/ui/drawers/ 下 14 个 drawer 对文件 + ComponentDrawerRegistry；IComponentDrawer::TryDraw 加 EditorContext& 参数；EditorMode::BuildContext 显式注册并设 ctx.drawerRegistry；InspectorPanel 改为委托 DrawAll -->
+
+---
+
+## Issue #65 — Panel MVP 重构：Presenter 层 ✅ DONE
+<!-- 为 7 个核心面板（SceneHierarchy/Assets/Playback/WorldSettings/PostProcess/Shortcuts/ProjectBrowser）新增 Presenter 类，所有引擎写操作从 OnDraw 迁移至 Presenter::Update()；EditorMode::BuildContext 统一创建并注册，OnUpdate 逐帧驱动 -->
+
+---
+
+## Issue #66 — EditorAction 系统：统一命令派发 + 快捷键 + Undo/Redo ✅ DONE
+<!-- EditorActionRegistry + CommandManager 实现；OnUpdate if-chain 替换为 PollAndDispatch；DeleteEntity/Rename/Reparent/Transform/CreateMesh 五类可撤销命令；Edit 菜单 Undo/Redo；Play 边界哨兵防穿越；SaveScene 延迟 NFD + AssetsPanel MarkFilePaneDirty + 已删除文件检测；AssetsPresenter::RequestNFDImport(destDir) 导入目录提示；AssetsPanel DnD 空白区域分左右窗格目标；右键新建 Scene 从模板拷贝。 -->
+
+---
+
+## Issue #67 — PIE（Play In Editor）：内存快照与双场景隔离 ✅ DONE
+<!-- Application 在 Editing→Playing 时用 SceneSerializer::SerializeToJson 快照编辑器场景并创建游戏副本 m_gameScene；GetActiveScene() 路由所有系统（脚本/物理/动画/渲染）到当前活跃场景；ScriptSystem::OnPlayStart(Scene&) 将 g_ctx.scene 重定向到游戏副本；Stop 时销毁副本，编辑器场景始终未被修改，无需还原。 -->
+
+---
+
+## Issue #68 — ComponentSchema：声明式组件字段元数据
+
+**优先级：中**（#64 ComponentDrawerRegistry 的"内容层"；吸收 #19 骨骼 picker 的 Editor 部分）
+
+### 目标
+
+引入声明式 `ComponentSchema`，将"某组件有哪些可编辑字段、字段类型是什么、如何渲染"从 C++ 代码逻辑中分离出来，以元数据驱动 `GenericComponentDrawer` 自动生成 ImGui 控件。目标：
+
+1. 内置组件（`TransformComponent`、`MeshComponent`、`SkinnedMeshComponent` 等）各有一份静态 schema，注册到 `ComponentSchemaRegistry`。
+2. `GenericComponentDrawer` 读取 schema，自动为每个字段渲染对应控件（slider、color picker、asset picker 等），无需手写 ImGui 代码。
+3. 骨骼 picker（原 #19 Section F）作为 `SkinnedMeshComponent.skeletonAsset` 的 `AssetRef` 字段在 schema 中声明，无需特殊 case。
+4. 自定义/游戏组件可在运行时调用 `ComponentSchemaRegistry::Register` 追加 schema，无需修改引擎代码。
+
+### 设计
+
+#### A. FieldType 枚举与 FieldDef
+
+```cpp
+// editor/schema/ComponentSchema.hpp
+
+enum class FieldType : uint8_t {
+    Bool,
+    Int32, SliderInt,          // SliderInt 需要 SliderMeta
+    Float, SliderFloat,        // SliderFloat 需要 SliderMeta
+    Vec2, Vec3, Vec4,
+    Quat,                      // 渲染为 Euler 角（degrees），内部转换
+    Color3, Color4,            // ImGui::ColorEdit3/4
+    String,
+    AssetRef,                  // 需要 AssetRefMeta{extension_filter}
+    Enum,                      // 需要 EnumMeta{values[]}
+    ReadOnly,                  // 只读文本显示，任意 POD（显示为 hex/decimal）
+};
+
+struct AssetRefMeta { std::string ext; };        // e.g. "saskel", "samat"
+struct EnumMeta    { std::vector<std::string> values; };
+struct SliderMeta  { float min = 0.f, max = 1.f; };
+using FieldMeta = std::variant<std::monostate, AssetRefMeta, EnumMeta, SliderMeta>;
+
+struct FieldDef {
+    std::string name;          // 序列化键名（snake_case，与 SceneSerializer 一致）
+    std::string label;         // ImGui 显示标签
+    FieldType   type;
+    FieldMeta   meta;          // std::monostate = 无附加元数据
+    std::string tooltip;       // 悬停提示，可为空
+    size_t      offset;        // offsetof(ComponentType, field)
+    size_t      size;          // sizeof(field)，ReadOnly 用
+};
+```
+
+#### B. ComponentSchema 与 ComponentSchemaRegistry
+
+```cpp
+// editor/schema/ComponentSchema.hpp（续）
+
+struct ComponentSchema {
+    std::string typeName;      // 与 entt reflect 键名一致，e.g. "TransformComponent"
+    std::string label;         // Inspector 分组标签，e.g. "Transform"
+    std::string category;      // "Add Component" 菜单分组，e.g. "Core"
+
+    std::vector<FieldDef> fields;
+
+    // 组件存在性 / 增删（编辑器 "Add Component" 按钮驱动）
+    std::function<bool(entt::registry&, entt::entity)>            hasComp;
+    std::function<void*(entt::registry&, entt::entity)>           getCompPtr;  // 返回组件裸指针，字段读写用 offset
+    std::function<void(entt::registry&, entt::entity, Scene&)>    addComp;
+    std::function<void(entt::registry&, entt::entity)>            removeComp;
+};
+
+// editor/schema/ComponentSchemaRegistry.hpp
+class ComponentSchemaRegistry {
+public:
+    void Register(ComponentSchema schema);
+    const ComponentSchema* FindByTypeName(std::string_view typeName) const;
+    const std::vector<ComponentSchema>& GetAll() const;
+
+private:
+    std::vector<ComponentSchema>                      m_schemas;
+    std::unordered_map<std::string, size_t>           m_index;   // typeName → index
+};
+```
+
+#### C. BuiltinSchemas — 静态注册
+
+```cpp
+// editor/schema/schemas/BuiltinSchemas.cpp
+
+void RegisterBuiltinSchemas(ComponentSchemaRegistry& reg) {
+
+    // TransformComponent
+    reg.Register({
+        .typeName = "TransformComponent",
+        .label    = "Transform",
+        .category = "Core",
+        .fields   = {
+            { "position", "Position", FieldType::Vec3,  {}, "", offsetof(TransformComponent, position), sizeof(glm::vec3) },
+            { "rotation", "Rotation", FieldType::Quat,  {}, "", offsetof(TransformComponent, rotation), sizeof(glm::quat) },
+            { "scale",    "Scale",    FieldType::Vec3,  {}, "", offsetof(TransformComponent, scale),    sizeof(glm::vec3) },
+        },
+        .hasComp    = [](auto& r, auto e) { return r.template any_of<TransformComponent>(e); },
+        .getCompPtr = [](auto& r, auto e) -> void* { return &r.template get<TransformComponent>(e); },
+        .addComp    = [](auto& r, auto e, auto&) { r.template emplace_or_replace<TransformComponent>(e); },
+        .removeComp = [](auto& r, auto e) { r.template remove<TransformComponent>(e); },
+    });
+
+    // SkinnedMeshComponent — 骨骼 picker（原 #19 Section F）
+    reg.Register({
+        .typeName = "SkinnedMeshComponent",
+        .label    = "Skinned Mesh",
+        .category = "Rendering",
+        .fields   = {
+            { "meshAsset",     "Mesh",     FieldType::AssetRef, AssetRefMeta{"samesh"}, "", offsetof(SkinnedMeshComponent, meshAsset),     sizeof(AssetID) },
+            { "skeletonAsset", "Skeleton", FieldType::AssetRef, AssetRefMeta{"saskel"}, "显式骨骼覆盖；空 = 从 mesh 文件头或 DeriveSkinID 推断", offsetof(SkinnedMeshComponent, skeletonAsset), sizeof(AssetID) },
+        },
+        // hasComp / getCompPtr / addComp / removeComp ...
+    });
+
+    // ... MeshComponent, LightComponent, CameraComponent 等
+}
+```
+
+#### D. GenericComponentDrawer
+
+```cpp
+// editor/ui/drawers/GenericComponentDrawer.hpp
+
+class GenericComponentDrawer : public IComponentDrawer {
+public:
+    explicit GenericComponentDrawer(const ComponentSchema& schema);
+
+    bool Accepts(entt::registry& reg, entt::entity e) const override;
+    void Draw(entt::registry& reg, entt::entity e,
+              Scene& scene, const EditorContext& ctx) const override;
+
+private:
+    void DrawField(void* compBase, const FieldDef& field,
+                   const EditorContext& ctx) const;
+
+    const ComponentSchema& m_schema;
+};
+```
+
+`Draw` 遍历 `m_schema.fields`，对每个 `FieldDef` 调用 `DrawField`。`DrawField` 按 `FieldType` switch：
+- `Vec3` → `ImGui::DragFloat3`
+- `Quat` → 转 Euler，`ImGui::DragFloat3`，写回时转 Quat
+- `AssetRef` → 显示 UUID 短显 + "Pick" 按钮，打开 modal 过滤 `AssetRefMeta.ext`
+- `SliderFloat` → `ImGui::SliderFloat(min, max)`
+- `Enum` → `ImGui::Combo`
+- `Color3/4` → `ImGui::ColorEdit3/4`
+- `ReadOnly` → `ImGui::Text`（格式化为十进制或 hex）
+
+#### E. EditorContext 扩展
+
+```cpp
+// editor/EditorContext.hpp（在 #62 基础上追加一个字段）
+struct EditorContext {
+    // ... 现有字段 ...
+    ComponentSchemaRegistry* schemaReg = nullptr;   // NEW
+};
+```
+
+#### F. 与 #64 ComponentDrawerRegistry 的关系
+
+```
+ComponentSchemaRegistry  ──(提供 schema)──►  ComponentDrawerRegistry
+                                              │
+                            ┌─────────────────┤
+                            │  GenericDrawer   │  手写 IComponentDrawer
+                            │  (schema-driven) │  (复杂组件保留手写)
+                            └────────────────►│
+                                              ▼
+                                         Inspector OnDraw
+```
+
+注册策略（在 `EditorMode::OnAttach` 或等价入口）：
+```cpp
+RegisterBuiltinSchemas(*m_ctx.schemaReg);
+
+// 对每个有 schema 的组件注册 GenericDrawer
+for (auto& schema : m_ctx.schemaReg->GetAll()) {
+    m_ctx.componentReg->Register(
+        std::make_unique<GenericComponentDrawer>(schema));
+}
+
+// 复杂组件手写覆盖（优先级更高，ComponentDrawerRegistry 先匹配手写）
+m_ctx.componentReg->Register(std::make_unique<AnimatorComponentDrawer>());
+```
+
+#### G. 文件结构
+
+```
+editor/schema/
+  ComponentSchema.hpp                    — FieldType, FieldDef, ComponentSchema, ComponentSchemaRegistry
+  ComponentSchemaRegistry.cpp            — Register / FindByTypeName / GetAll
+  schemas/
+    BuiltinSchemas.hpp                   — void RegisterBuiltinSchemas(ComponentSchemaRegistry&)
+    BuiltinSchemas.cpp                   — TransformComponent, MeshComponent, SkinnedMeshComponent, ...
+
+editor/ui/drawers/
+  GenericComponentDrawer.hpp/.cpp        — schema-driven IComponentDrawer 实现
+```
+
+### 实施步骤
+
+**— 阶段 1：数据结构（零 ImGui 依赖，可单元测试）—**
+
+- [ ] **Step 1** — 新建 `editor/schema/ComponentSchema.hpp`：定义 `FieldType`、`FieldDef`、`FieldMeta`、`ComponentSchema`；`ComponentSchemaRegistry` 类声明
+  - 验证：`ComponentSchema.hpp` 单独 include 无编译错误；`FieldDef` 字段完整
+- [ ] **Step 2** — 新建 `editor/schema/ComponentSchemaRegistry.cpp`：实现 `Register`、`FindByTypeName`、`GetAll`
+  - 验证：单测：Register 3 个 schema → GetAll 返回 3 个；FindByTypeName("TransformComponent") 返回非 null
+
+**— 阶段 2：内置 Schema 注册 —**
+
+- [ ] **Step 3** — 新建 `editor/schema/schemas/BuiltinSchemas.hpp/.cpp`：为 `TransformComponent`、`MeshComponent`、`DirectionalLightComponent`、`PointLightComponent`、`CameraComponent` 写 schema
+  - 验证：`RegisterBuiltinSchemas` 后 `GetAll().size() == 5`；每个 schema 的 `fields` 非空；`offsetof` 值合理（< sizeof(Component)）
+- [ ] **Step 4** — `SkinnedMeshComponent` schema：`meshAsset`（`AssetRef{"samesh"}`）+ `skeletonAsset`（`AssetRef{"saskel"}`）
+  - 验证：`FindByTypeName("SkinnedMeshComponent")` 返回 schema；fields[1].name == "skeletonAsset"
+
+**— 阶段 3：GenericComponentDrawer —**
+
+- [ ] **Step 5** — 新建 `editor/ui/drawers/GenericComponentDrawer.hpp/.cpp`：实现 `Accepts` + `Draw` + `DrawField`；支持 Vec3、Quat（Euler 转换）、Float、SliderFloat、Bool、Color3、String
+  - 验证：在 Inspector 中用 TransformComponent 的 GenericDrawer 替换手写抽屉，Position/Rotation/Scale 控件正常显示和编辑
+- [ ] **Step 6** — `DrawField` 支持 `AssetRef`：显示 UUID 短字符串 + "Pick" 按钮；点击后弹出 modal 列表，过滤 `AssetRefMeta.ext`；选中后写入字段
+  - 验证：`SkinnedMeshComponent` Inspector 显示 Skeleton 字段；可通过 Pick 选择 `.saskel` 资产；选中后 `skeletonAsset` UUID 变更
+
+**— 阶段 4：EditorContext 集成 —**
+
+- [ ] **Step 7** — `EditorContext` 追加 `schemaReg` 字段；`EditorMode::OnAttach` 创建 `ComponentSchemaRegistry`，调用 `RegisterBuiltinSchemas`，为每个 schema 注册 `GenericComponentDrawer`
+  - 验证：`EditorMode` 启动后 Inspector 中 TransformComponent 由 GenericDrawer 渲染，行为与之前手写抽屉一致
+- [ ] **Step 8** — 将 `ComponentDescriptor`（原 `InspectorPanel` 的 "Add Component" 数据）迁移到由 schema 驱动（`ComponentSchema::addComp` 替代 `ComponentDescriptor::addComp`）
+  - 验证："Add Component" 弹出菜单列出所有已注册 schema 的组件，点击后组件被正确 emplace
+
+### 边界情况与约束
+
+| 场景 | 处理 |
+|------|------|
+| 手写 Drawer 优先级 | `ComponentDrawerRegistry` 先查手写注册，再 fallback 到 `GenericDrawer`（按注册顺序）；`AnimatorComponentDrawer` 等复杂组件不受影响 |
+| `offsetof` 非 POD | C++17 起 `offsetof` 对 standard-layout struct 合法；`TransformComponent` / `MeshComponent` 均为 standard-layout；非标准布局组件（含虚函数）需手写 Drawer |
+| Quat → Euler 精度 | `glm::eulerAngles` 在 gimbal lock 附近不稳定；引入 `m_cachedEuler` per-entity 缓存（仅 Inspector 生命周期内），避免每帧反算 |
+| AssetRef modal 性能 | 每次打开 modal 调用 `AssetRegistry::EntriesByType(ext)` — registry 不大时可接受；>1000 资产时加搜索框 |
+| schema 序列化 | schema 本身不序列化到文件；`FieldDef.name` 须与 `SceneSerializer` 的 JSON 键名对齐，保证 Inspector 修改可被正确保存/加载 |
+| 运行时 schema 注册 | `ComponentSchemaRegistry::Register` 非线程安全；应在 `OnAttach`（主线程单次初始化）时调用 |
+| **不做** | 嵌套组件 schema（`FieldType::Struct`）— 第一版只支持 POD/AssetID/枚举字段；属性动画曲线编辑 — 独立 issue；schema 热重载 |
+
+### 受益 Issues
+
+- **#19（运行时部分）**：骨骼 picker 在 schema 中实现后，#19 的 `skeletonAsset` 编辑器支持完全解决，运行时三级解析逻辑可独立实施
+- **#64 ComponentDrawerRegistry**：GenericDrawer 作为 schema 驱动的通用 Drawer，与手写 Drawer 并存，减少未来新组件的 Drawer 编写成本
+- **#65 Panel MVP**：Inspector Presenter 无需枚举组件类型，只需调用 `schemaReg->GetAll()` 统一驱动，Presenter 代码更薄
+- **#29 脚本组件**：游戏脚本可调用 `ComponentSchemaRegistry::Register` 在 Editor 中暴露自定义字段，无需修改引擎 Inspector 代码
+
+---
+
+## Phase 4 roadmap（UI 重构全局）
+
+| Phase | Issues | 核心产出 |
+|-------|--------|---------|
+| Phase 1 | #62 EditorContext | 依赖注入容器；消除 setter 链 |
+| Phase 2 | #63 EditorSelection | 解耦跨面板选择；InspectorPanel 不再依赖 SceneHierarchyPanel |
+| Phase 3 | #64 ComponentDrawerRegistry | Drawer 动态注册；InspectorPanel.OnDraw() 瘦身 |
+| Phase 4 | #65 Panel MVP | Presenter 分层；OnDraw() 只含 ImGui 调用 |
+| Phase 5 | #66 EditorAction + CommandManager | 快捷键执行层；Undo/Redo；play boundary |
+| Phase 6 | #67 PIE | 场景内存快照；编辑器/游戏场景隔离 |
+| Phase 7 | #68 ComponentSchema | 声明式字段元数据；GenericDrawer；骨骼 picker |
+
+---
+
+## Issue #56 — Script 热编译（Editor 内无需重启即可重新编译脚本）
+
+**优先级：中（依赖 #29 已完成）**
+
+### 目标
+
+Editor 处于非 Playing 状态时，`.cs` 文件保存后自动（或手动触发）重新编译，并将诊断结果显示在 Inspector 中；Playing 状态下支持手动触发热重载（Unload → Compile → Instantiate），无需退出/重进 Play。
+
+### 设计
+
+**非 Playing — 后台编译（仅语法检查/诊断，不 Instantiate）**
+- `ScriptSystem` 添加 `RecompileAll(paths[])` 方法，只跑 Roslyn 编译、不执行 Instantiate，将 Diagnostic 存入 `m_compileErrors`
+- `AssetsPanel`：`.cs` 文件右键菜单新增 "Recompile Scripts"，调用 `Application::GetScriptSystem().RecompileAll(...)`
+- Inspector 的 `ScriptDrawer` 显示最新 `CompileErrors()`
+
+**Playing — ALC 热重载**
+- `ScriptSystem::HotReload(reg)` = `InvokeAll(OnStop) → InvokeAll(OnDetach) → m_fnUnload() → Compile → Instantiate → InvokeAll(OnAttach) → InvokeAll(OnStart)`
+- `WeakReference<ALC>` 等待旧 ALC GC 回收后再加载新程序集（超时 2s 打警告继续）
+- 字段值不保留（全量重建实例）；字段序列化保留属于 Phase 2
+
+**文件监听（可选 Phase 2）**
+- 平台 API：Windows `ReadDirectoryChangesW` / Linux `inotify`，轮询间隔 200ms
+- 检测到 `.cs` 变化 → 非 Playing 自动触发 `RecompileAll`
+
+### 边界
+
+- 热重载期间不暂停帧循环（最多一帧卡顿）
+- 编译失败时保持当前运行状态不变，仅更新诊断
+- 不支持添加/删除 ScriptComponent 后的热重载（需重新 OnPlayStart）
+
+---
+
+---
+
+## Issue #58 — 日志分层路由：Script 消息自动出现在 Diagnostics tab ✅ DONE
+<!-- "script" 命名 spdlog logger + LogEntry::loggerName + ConsolePanelPresenter（Drain/路由/状态）+ ConsolePanel 纯 View；移除 ScriptSystem::CompileErrors() 死代码 -->
+
+### 边界情况与约束
+
+- `ScriptLogger()` 懒初始化时复制 sinks 快照；EditorLogCapture 必须在首次 `SA_Log_*` 调用前已注入。Play 模式下成立：EditorMode 构造时即加入 sink，Play 开始才触发 `SA_Log_*`。
+- 不修改 EditorDiagnostics 用于 ShaderCook/Material/Scene 的路径——该路径提供 `assetPath` 链接，script logger 无法提供此功能。
+- `m_scriptEntries` 无持久化（Unload 时可选 `ClearScript()`），与 Engine Logs 行为一致。
+- #56 热编译 issue 中规划的 `ScriptDrawer` 显示编译错误依赖 `m_compileErrors`；删除前需确认 #56 是否改为读取 Diagnostics tab 内容。
+
+### 受益 issues
+
+- **#29**（脚本系统）：`Debug.Log` 正式可用，不再埋没于 Engine Logs 噪音中
+- **#56**（热编译）：编译错误自动出现在 Diagnostics，Inspector 仍可读 `m_compileErrors`（或改读 script logger）
+
+---
+
+## Issue #69 — Script Runtime Library（脚本运行时库扩展）
+
+**优先级：中（依赖 #29 已完成）**
+
+### 目标
+
+将 `StellarAlia.Runtime` 从薄包装层提升为功能完整的游戏脚本 API 库，覆盖 Mathf 数学工具、输入边沿检测、实体生命周期（Create/Destroy）、物理读写（Velocity/AddForce）、物理射线查询（Raycast）、灯光控制六个维度，使常见游戏逻辑可完全在脚本中实现而无需修改引擎 C++ 代码。
+
+### 架构现状与参照
+
+**现状**：`ScriptApiFunctionTable` 是一个平铺 C 结构体，C++ 与 C# 两侧依赖相同字段顺序。好处是直接函数指针调用、零额外开销、无需共享库；弱点是每增加一个 API 须同步修改五处（C++ 实现、C++ 表字段、C# 表字段、NativeApi 绑定、公开类）。
+
+**Unity**：`MonoBehaviour` API 通过 icall / P/Invoke `__Internal` 绑定，用户看到的是干净的 `UnityEngine.dll` 公开 API，底层 marshalling 完全隐藏。关键 API 层次：Mathf、GameObject.Instantiate/Destroy、GetComponent<T>、Input.GetKeyDown/Up、Physics.Raycast、Rigidbody.AddForce。
+
+**UE**：C++ Actor/Component 树，蓝图通过宏反射访问同一套对象，没有额外 marshalling 层。核心理念：用户操作的是 AActor/UActorComponent 实例，Get/SetActorLocation 直接修改世界状态。
+
+**StellarAlia 结论**：函数指针表机制本身合理，保持。改进方向：① 加 `version` 字段以快速捕捉两侧不同步；② 纯 managed 改动优先（不需 C++ recompile）；③ 字符串编码从 Latin-1 统一改为 UTF-8。分多个 phase 增量扩展，每 phase 独立可验证。
+
+### 设计
+
+#### 文件布局
+
+```
+managed/StellarAlia.Runtime/
+├─ ScriptBase.cs         ← 生命周期（不变）
+├─ Entity.cs             ← 新增 Destroy / static Create / Forward·Right·Up 属性
+├─ Input.cs              ← 新增 GetKeyJustPressed / GetKeyJustReleased（managed 帧状态）
+├─ Mathf.cs              ← 新增：Lerp·Clamp·Clamp01·PingPong·SmoothStep·Approximately
+├─ Physics.cs            ← 新增：Raycast → RaycastHit
+├─ RigidBodyProxy.cs     ← 扩展：Velocity·AddForce·AddImpulse
+├─ LightProxy.cs         ← 新增：PointLight/Directional intensity·color
+├─ Debug.cs / Time.cs    ← 不变
+└─ NativeApi.cs          ← 新增函数指针槽（version 字段首位）
+
+src/function/script/
+├─ ScriptApiExports.hpp  ← version 字段 + 新槽声明
+└─ ScriptApiExports.cpp  ← 新 extern "C" 函数实现
+```
+
+#### C++ 函数表扩展（version 字段首位，旧字段位置不动）
+
+```cpp
+struct ScriptApiFunctionTable {
+    uint32_t version = 2;                       // ← 新增，首位
+    // ── 原有字段（Block 1）— 位置不变 ─────────
+    void    (*Entity_GetPosition)    (uint64_t, float*, float*, float*);
+    // ... (所有现有字段) ...
+    float   (*Time_GetTotalTime)     ();
+    // ── Block 2 — v2 新增 ──────────────────────
+    void     (*Entity_Destroy)        (uint64_t id);
+    uint64_t (*Entity_Create)         (const char* name, float x, float y, float z);
+    void     (*RigidBody_GetVelocity) (uint64_t id, float*, float*, float*);
+    void     (*RigidBody_SetVelocity) (uint64_t id, float, float, float);
+    void     (*RigidBody_AddForce)    (uint64_t id, float, float, float);
+    void     (*RigidBody_AddImpulse)  (uint64_t id, float, float, float);
+    int32_t  (*Physics_Raycast)       (float ox, float oy, float oz,
+                                       float dx, float dy, float dz, float maxDist,
+                                       float* hitX, float* hitY, float* hitZ,
+                                       uint64_t* hitEntity);
+    void     (*Light_GetColor)        (uint64_t id, float*, float*, float*);
+    void     (*Light_SetColor)        (uint64_t id, float, float, float);
+    float    (*Light_GetIntensity)    (uint64_t id);
+    void     (*Light_SetIntensity)    (uint64_t id, float);
+};
+```
+
+#### C# Input 帧状态追踪（纯 managed，无 C++ 改动）
+
+```csharp
+// Input.cs — 新增字段（ScriptBridgeEntry.InvokeLifecycle 开头调 Input.BeginFrame()）
+internal static void BeginFrame() { /* swap prev/curr, sample all pressed keys */ }
+public static bool IsKeyJustPressed (Key k) => _curr.Contains(k) && !_prev.Contains(k);
+public static bool IsKeyJustReleased(Key k) => !_curr.Contains(k) && _prev.Contains(k);
+```
+
+#### C# RaycastHit
+
+```csharp
+public readonly struct RaycastHit {
+    public readonly Vector3 Point;
+    public readonly Entity  Entity;
+    public readonly bool    Hit;
+}
+// Physics.cs
+public static bool Raycast(Vector3 origin, Vector3 direction, out RaycastHit hit, float maxDistance = 1000f);
+```
+
+#### Entity 方向向量（纯 managed，依赖 System.Numerics）
+
+```csharp
+// Entity.cs
+public Quaternion GetRotation() { /* 通过 GetRotationEuler 反算，或新增 GetRotationQuat slot */ }
+public Vector3 Forward => Vector3.Transform(-Vector3.UnitZ, GetRotationQuat());
+public Vector3 Right   => Vector3.Transform( Vector3.UnitX, GetRotationQuat());
+public Vector3 Up      => Vector3.Transform( Vector3.UnitY, GetRotationQuat());
+```
+> 需要在 NativeApi 增加一个 `Entity_GetRotationQuat(id, w*, x*, y*, z*)` 槽，避免 Euler 往返引入万向节锁噪声。
+
+### 实施步骤
+
+- [ ] **Step 1 — Mathf 工具类**（纯 managed，`managed/StellarAlia.Runtime/Mathf.cs`）
+  - `Lerp(a,b,t)`、`Clamp(v,min,max)`、`Clamp01`、`PingPong(t,len)`、`SmoothStep(a,b,t)`、`Approximately(a,b,eps=1e-5f)`、`MoveTowards(cur,target,maxDelta)`
+  - 包装 `MathF.*`，不依赖任何 NativeApi 槽
+
+- [ ] **Step 2 — 字符串编码从 Latin-1 改为 UTF-8**（`NativeApi.cs` 全局替换）
+  - 将所有 `Encoding.Latin1.GetBytes(str + '\0')` 替换为 `Encoding.UTF8.GetBytes(str + '\0')`
+  - C++ 侧已是 UTF-8 字符串，无需修改
+  - 验证：实体名含中文/日文时 FindByName 仍可正确匹配
+
+- [ ] **Step 3 — Input 帧状态（GetKeyJustPressed/Released）**（纯 managed）
+  - `Input.cs` 添加 `static HashSet<Key> _prev, _curr`
+  - `internal static void BeginFrame()` 中 swap 两集合，重新采样 `IsKeyDown(k)` 填入 `_curr`
+  - `ScriptBridgeEntry.InvokeLifecycle` 在 `method == OnUpdate` 之前调用 `Input.BeginFrame()`（或统一在帧开始处）
+  - 暴露 `IsKeyJustPressed(Key)` / `IsKeyJustReleased(Key)`
+
+- [ ] **Step 4 — version 字段 + Entity_GetRotationQuat + Entity Forward/Right/Up**
+  - `ScriptApiFunctionTable` 首字段加 `uint32_t version = 2`（注意：C# 侧首字段同步加 `uint version`）
+  - 新增 `SA_Entity_GetRotationQuat(id, w*, x*, y*, z*)` C++ 实现 + 表槽 + C# 绑定
+  - `Entity.cs` 添加 `GetRotationQuat()` 私有方法，以及 `Forward`、`Right`、`Up` 属性
+
+- [ ] **Step 5 — Entity 生命周期：Destroy / Create**
+  - C++：`SA_Entity_Destroy(id)` — `g_ctx.scene->Registry().destroy(entity)`；`SA_Entity_Create(name, x, y, z)` — `EntityFactory::SpawnEmpty(scene, name, {x,y,z})`
+  - C# 侧：`Entity.Destroy()` 实例方法；`Entity.Create(string name, Vector3 pos)` 静态工厂
+  - 边界：非 Play 期间（`g_ctx.scene == nullptr`）返回 invalid entity / no-op
+  - 验证：脚本中 `Entity.Create("Bullet", pos)` → Stop 后层级面板无残留（因 Play 在游戏副本）
+
+- [ ] **Step 6 — RigidBodyProxy 扩展：Velocity / AddForce / AddImpulse**
+  - C++：通过 Jolt `PhysicsSystem::GetBodyInterface()` 读写速度、施力（需 PhysicsSystem 暴露 `GetBodyInterface()` 或新增 helper）
+  - `SA_RigidBody_GetVelocity` / `SetVelocity` / `AddForce` / `AddImpulse`
+  - `Entity.cs` 添加 `GetRigidBody()` → `RigidBodyProxy`（现有 GetAnimator 模式）
+  - `RigidBodyProxy.cs` 添加 `Velocity`（get/set Vector3）、`AddForce(Vector3, ForceMode)`、`AddImpulse(Vector3)`
+
+- [ ] **Step 7 — LightProxy：PointLight intensity / color**
+  - C++：`SA_Light_GetColor` / `SetColor` / `GetIntensity` / `SetIntensity`，通过 `try_get<PointLightComponent>` 操作
+  - `Entity.cs` 添加 `GetPointLight()` → `LightProxy`
+  - `LightProxy.cs`：`Color`（Vector3 get/set）、`Intensity`（float get/set）
+
+- [ ] **Step 8 — Physics.Raycast**
+  - C++：`SA_Physics_Raycast(...)` — 调用 Jolt `NarrowPhaseQuery::CastRay`；需 PhysicsSystem 暴露查询接口（pimpl 内添加 `bool Raycast(Ray, float, RaycastHit&)`）
+  - C# 侧：`Physics.Raycast(Vector3 origin, Vector3 dir, out RaycastHit hit, float maxDist)` 静态方法
+  - 边界：仅 Play 期间有效（Jolt 在 Editing 时已 Reset）；非 Play 返回 false
+
+### 边界情况与约束
+
+| 约束 | 说明 |
+|------|------|
+| `version` 字段位置 | 必须是结构体第一个字段（C# StructLayout.Sequential 依赖顺序），旧字段位置不可变 |
+| Entity_Create 场景上下文 | 非 Play 期间 `g_ctx.scene == nullptr`，直接返回 `~0ull`（invalid），不崩溃 |
+| Physics.Raycast Play-only | Jolt 在 `PhysicsSystem::Reset` 后无 body，Raycast 返回 false；非 Play 不暴露 crash 风险 |
+| LightProxy 仅 PointLight | DirectionalLight / SpotLight / AreaLight 暂不支持（类型区分逻辑留后） |
+| Input.BeginFrame 调用时机 | 必须在每帧第一个 `InvokeLifecycle(OnUpdate)` 前调用，否则首帧 JustPressed 可能漏帧 |
+| AddForce / AddImpulse | Jolt 要求在 Step 外调用（FixedUpdate 之前或之后），不可在 Step 内并发修改 body |
+| 不做：GetComponent<T>() 泛型 | 需要 C# 反射 + 引擎侧类型注册，复杂度高，属 #68 ComponentSchema 范围 |
+| 不做：Coroutine / Invoke(delay) | 需托管调度器，留 Phase 2 独立 issue |
+
+### 受益 issues
+
+- **#33**（贝塞尔曲线与相机移动）：Entity.Forward / Raycast / Mathf.Lerp 是脚本驱动相机的基础
+- **#56**（热编译）：Runtime API 稳定后热重载不会因 API 签名变更失效
+- **#29**（脚本系统）：`BouncingRotator.cs` 之类示例可升级为展示 Raycast + Physics 的完整游戏原型
+
+---
+
+### UI Bug Issues
+长双击重命名目前无法起效
+asset panel重命名缩略图会消失
+目前没有在asset panel空白处交互（右键创建文件， 点击选择等）的功能
+视角操作会影响ui
+~~场景继承树根节点拖拽排序无效~~ ✅ 已修：Scene::m_rootOrder 维护根节点用户定序，SceneHierarchyPresenter DnD 分支调用 MoveRootBefore/After，SceneHierarchyPanel 和 SceneSerializer 改用 GetRootOrder() 迭代

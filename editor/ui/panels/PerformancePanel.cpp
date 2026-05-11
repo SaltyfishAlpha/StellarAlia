@@ -1,9 +1,18 @@
 #include "ui/panels/PerformancePanel.hpp"
+#include "engine/Application.hpp"
+#include "platform/rhi/vulkan/VulkanDevice.hpp"
 
 #include <imgui.h>
 #include "platform/PlatformMemory.hpp"
 
 namespace StellarAlia::Editor {
+
+PerformancePanel::PerformancePanel(EditorContext& ctx)
+    : m_renderGraph(&ctx.app->GetRenderer().GetRenderGraph())
+    , m_device(&ctx.app->GetVulkanDevice())
+{
+    isOpen = true;
+}
 
 void PerformancePanel::OnDraw() {
     constexpr double kMB = 1.0 / (1024.0 * 1024.0);

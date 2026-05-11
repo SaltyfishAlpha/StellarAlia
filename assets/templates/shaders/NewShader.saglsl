@@ -1,0 +1,42 @@
+// @ShaderName "NewShader"
+// @ShadingModel SimpleAlbedo
+// @VertShader deferred_geometry
+
+#pragma sa_section gbuffer
+
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "common.glsl"
+#include "shading_models.glsl"
+#include "shading_model_ids.glsl"
+
+layout(set = 1, binding = 0) uniform MaterialParams {
+    vec4 baseColorFactor; // @Color4("Base Color") = 1,1,1,1
+} u_Mat;
+
+layout(set = 1, binding = 1) uniform sampler2D t_BaseColor; // @Texture("Albedo Map")
+
+layout(location = 1) in vec3 v_Normal;
+layout(location = 3) in vec2 v_TexCoord0;
+
+layout(location = 0) out vec4 out_GAlbedoOcclusion;
+layout(location = 1) out vec4 out_GNormalRoughness;
+layout(location = 2) out vec4 out_GData;
+
+void main() {
+    vec4 color = texture(t_BaseColor, v_TexCoord0) * u_Mat.baseColorFactor;
+    vec3 N = normalize(v_Normal);
+    out_GAlbedoOcclusion = vec4(color.rgb, 1.0);
+    out_GNormalRoughness  = vec4(OctEncode(N), 1.0, 0.0);
+    out_GData             = vec4(0.0, 0.0, 0.0, EncodeShadingFlags(SHADING_MODEL_SIMPLE_ALBEDO));
+}
+
+#pragma sa_end_section
+
+#pragma sa_section lighting
+
+vec3 EvaluateShading(GBufferData gbuf) {
+    return gbuf.albedo;
+}
+
+#pragma sa_end_section

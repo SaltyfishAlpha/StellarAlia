@@ -9,13 +9,31 @@ namespace StellarAlia::Editor {
 void EntityTemplateRegistry::Scan(const fs::path& engineAssetsDir) {
     m_entries.clear();
     m_defaultScene.clear();
+    m_scriptTemplate.clear();
+    m_matTemplate.clear();
+    m_shaderTemplate.clear();
 
-    const fs::path entitiesDir = engineAssetsDir / "templates" / "entities";
-    const fs::path scenesDir   = engineAssetsDir / "templates" / "scenes";
+    const fs::path entitiesDir  = engineAssetsDir / "templates" / "entities";
+    const fs::path scenesDir    = engineAssetsDir / "templates" / "scenes";
+    const fs::path scriptsDir   = engineAssetsDir / "templates" / "scripts";
+    const fs::path materialsDir = engineAssetsDir / "templates" / "materials";
+    const fs::path shadersDir   = engineAssetsDir / "templates" / "shaders";
 
     const fs::path candidate = scenesDir / "default.sascene";
     if (fs::exists(candidate))
         m_defaultScene = fs::absolute(candidate);
+
+    const fs::path scriptCandidate = scriptsDir / "NewScript.cs";
+    if (fs::exists(scriptCandidate))
+        m_scriptTemplate = fs::absolute(scriptCandidate);
+
+    const fs::path matCandidate = materialsDir / "PBR Default.samat";
+    if (fs::exists(matCandidate))
+        m_matTemplate = fs::absolute(matCandidate);
+
+    const fs::path shaderCandidate = shadersDir / "NewShader.saglsl";
+    if (fs::exists(shaderCandidate))
+        m_shaderTemplate = fs::absolute(shaderCandidate);
 
     if (!fs::exists(entitiesDir)) return;
 

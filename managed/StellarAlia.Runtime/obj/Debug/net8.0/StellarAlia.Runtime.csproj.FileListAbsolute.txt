@@ -1,0 +1,15 @@
+D:\ClionProjects\StellarAlia\managed\StellarAlia.Runtime\bin\Debug\net8.0\StellarAlia.Runtime.deps.json
+D:\ClionProjects\StellarAlia\managed\StellarAlia.Runtime\bin\Debug\net8.0\StellarAlia.Runtime.dll
+D:\ClionProjects\StellarAlia\managed\StellarAlia.Runtime\bin\Debug\net8.0\StellarAlia.Runtime.pdb
+D:\ClionProjects\StellarAlia\managed\StellarAlia.Runtime\obj\Debug\net8.0\StellarAlia.Runtime.GeneratedMSBuildEditorConfig.editorconfig
+D:\ClionProjects\StellarAlia\managed\StellarAlia.Runtime\obj\Debug\net8.0\StellarAlia.Runtime.AssemblyInfoInputs.cache
+D:\ClionProjects\StellarAlia\managed\StellarAlia.Runtime\obj\Debug\net8.0\StellarAlia.Runtime.AssemblyInfo.cs
+D:\ClionProjects\StellarAlia\managed\StellarAlia.Runtime\obj\Debug\net8.0\StellarAlia.Runtime.csproj.CoreCompileInputs.cache
+D:\ClionProjects\StellarAlia\managed\StellarAlia.Runtime\obj\Debug\net8.0\StellarAlia.Runtime.sourcelink.json
+D:\ClionProjects\StellarAlia\managed\StellarAlia.Runtime\obj\Debug\net8.0\StellarAlia.Runtime.dll
+D:\ClionProjects\StellarAlia\managed\StellarAlia.Runtime\obj\Debug\net8.0\refint\StellarAlia.Runtime.dll
+D:\ClionProjects\StellarAlia\managed\StellarAlia.Runtime\obj\Debug\net8.0\StellarAlia.Runtime.pdb
+D:\ClionProjects\StellarAlia\managed\StellarAlia.Runtime\obj\Debug\net8.0\ref\StellarAlia.Runtime.dll
+D:\ClionProjects\StellarAlia\cmake-build-debug\bin\managed\StellarAlia.Runtime.deps.json
+D:\ClionProjects\StellarAlia\cmake-build-debug\bin\managed\StellarAlia.Runtime.dll
+D:\ClionProjects\StellarAlia\cmake-build-debug\bin\managed\StellarAlia.Runtime.pdb

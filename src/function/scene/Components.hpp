@@ -199,6 +199,13 @@ struct ColliderComponent {
     glm::quat rotation = glm::quat{ 1.f, 0.f, 0.f, 0.f };
 };
 
+// ── Scripting ─────────────────────────────────────────────────────────────────
+
+struct ScriptComponent {
+    std::string scriptPath;   // relative to project root, e.g. "scripts/PlayerController.cs"
+    std::string className;    // C# class name — derived from filename if empty
+};
+
 // ── Marker tags ───────────────────────────────────────────────────────────────
 
 // Hint to culling/lightmap/BVH systems: this entity never moves.

@@ -1,48 +1,35 @@
 #pragma once
 
 #include "ui/IEditorWindow.hpp"
+#include "ui/presenters/ConsolePanelPresenter.hpp"
 #include "EditorDiagnostics.hpp"
-#include "EditorLogCapture.hpp"
-#include <vector>
-#include <memory>
+#include "EditorContext.hpp"
 
 namespace StellarAlia::Editor {
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ConsolePanel — two-tab console.
+// ConsolePanel — two-tab console (View only; all state lives in presenter).
 //
-// "Diagnostics" tab: editor-facing events that require user action
-//   (shader cook failures, material errors, scene errors …).
-//
-// "Engine Logs" tab: real-time mirror of SA_LOG_* via EditorLogSink.
-//   Only available when an EditorLogCapture is passed to the constructor.
+// "Diagnostics" tab: editor-facing events + script log entries (auto-routed).
+// "Engine Logs" tab: real-time mirror of SA_LOG_* via EditorLogCapture.
 // ─────────────────────────────────────────────────────────────────────────────
 class ConsolePanel : public IEditorWindow {
 public:
-    explicit ConsolePanel(EditorDiagnostics& diags,
-                          std::shared_ptr<EditorLogSink> logSink = nullptr)
-        : m_diags(&diags), m_logSink(std::move(logSink)) {}
+    ConsolePanel(EditorContext& ctx, ConsolePanelPresenter& presenter)
+        : m_diags(ctx.diagnostics)
+        , m_presenter(presenter) {}
 
     std::string_view GetName() const override { return "Console"; }
     void OnDraw() override;
 
 private:
-    // ── Diagnostics tab ───────────────────────────────────────────────────────
-    EditorDiagnostics* m_diags       = nullptr;
-    bool m_showErrors                = true;
-    bool m_showWarnings              = true;
-    bool m_showInfo                  = true;
-    size_t m_lastCount               = 0;
+    EditorDiagnostics*     m_diags     = nullptr;
+    ConsolePanelPresenter& m_presenter;
 
-    // ── Engine Logs tab ───────────────────────────────────────────────────────
-    std::shared_ptr<EditorLogSink> m_logSink;
-    std::vector<LogEntry>          m_logEntries;
-    int                            m_logUnread      = 0;
-    float                          m_logDrainTimer  = 0.f;  // drain once per second
-    // Indexed by spdlog::level::level_enum (0=trace … 5=critical)
-    bool m_logLevelShow[6] = { false, false, true, true, true, true };
-    static constexpr size_t  kMaxLogEntries  = 2000;
-    static constexpr float   kDrainInterval  = 1.f;
+    bool   m_showErrors   = true;
+    bool   m_showWarnings = true;
+    bool   m_showInfo     = true;
+    size_t m_lastDiagCount = 0;
 
     void DrawDiagnosticsTab();
     void DrawEngineLogsTab();

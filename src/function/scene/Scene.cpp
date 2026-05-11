@@ -27,6 +27,7 @@ entt::entity Scene::CreateEntity(std::string_view name) {
     m_registry.emplace<TagComponent>(e, std::string(name));
     m_registry.emplace<TransformComponent>(e);
     m_registry.emplace<WorldTransformComponent>(e);
+    m_rootOrder.push_back(e);
     m_hierarchyDirty = true;
     return e;
 }
@@ -34,6 +35,7 @@ entt::entity Scene::CreateEntity(std::string_view name) {
 void Scene::Clear() {
     m_registry.clear();
     m_worldSettings   = WorldSettings{};
+    m_rootOrder.clear();
     m_sortedEntities.clear();
     m_hierarchyDirty  = true;
     m_materialDirty      = false;
@@ -61,12 +63,19 @@ void Scene::DestroyEntity(entt::entity entity) {
         }
     }
 
+    m_rootOrder.erase(std::remove(m_rootOrder.begin(), m_rootOrder.end(), entity),
+                      m_rootOrder.end());
     m_registry.destroy(entity);
     m_hierarchyDirty = true;
 }
 
 void Scene::SetParent(entt::entity child, entt::entity parent) {
     if (!m_registry.valid(child)) return;
+
+    const bool wasRoot = [&]() -> bool {
+        const auto* h = m_registry.try_get<HierarchyComponent>(child);
+        return !h || h->parent == entt::null;
+    }();
 
     // Detach from current parent first
     if (auto* h = m_registry.try_get<HierarchyComponent>(child)) {
@@ -89,6 +98,14 @@ void Scene::SetParent(entt::entity child, entt::entity parent) {
             ph.children.push_back(child);
     }
 
+    const bool isNowRoot = (parent == entt::null);
+    if (wasRoot && !isNowRoot) {
+        m_rootOrder.erase(std::remove(m_rootOrder.begin(), m_rootOrder.end(), child),
+                          m_rootOrder.end());
+    } else if (!wasRoot && isNowRoot) {
+        m_rootOrder.push_back(child);
+    }
+
     m_hierarchyDirty = true;
     MarkDirty(child);
 }
@@ -98,13 +115,11 @@ void Scene::SetParent(entt::entity child, entt::entity parent) {
 void Scene::RebuildSortedOrder() {
     m_sortedEntities.clear();
 
-    // BFS from all root entities (no HierarchyComponent, or parent == null).
+    // BFS seeded from m_rootOrder to preserve user-defined root order.
     std::queue<entt::entity> q;
-    for (entt::entity e : m_registry.view<TransformComponent>()) {
-        const auto* h = m_registry.try_get<HierarchyComponent>(e);
-        if (!h || h->parent == entt::null)
+    for (entt::entity e : m_rootOrder)
+        if (m_registry.valid(e))
             q.push(e);
-    }
 
     while (!q.empty()) {
         entt::entity e = q.front();
@@ -164,6 +179,24 @@ void Scene::MarkDirtyRecursive(entt::entity entity) {
         for (entt::entity child : h->children)
             MarkDirtyRecursive(child);
     }
+}
+
+void Scene::MoveRootBefore(entt::entity entity, entt::entity before) {
+    auto it = std::find(m_rootOrder.begin(), m_rootOrder.end(), entity);
+    if (it == m_rootOrder.end()) return;
+    m_rootOrder.erase(it);
+    auto tgt = std::find(m_rootOrder.begin(), m_rootOrder.end(), before);
+    m_rootOrder.insert(tgt != m_rootOrder.end() ? tgt : m_rootOrder.end(), entity);
+    m_hierarchyDirty = true;
+}
+
+void Scene::MoveRootAfter(entt::entity entity, entt::entity after) {
+    auto it = std::find(m_rootOrder.begin(), m_rootOrder.end(), entity);
+    if (it == m_rootOrder.end()) return;
+    m_rootOrder.erase(it);
+    auto tgt = std::find(m_rootOrder.begin(), m_rootOrder.end(), after);
+    m_rootOrder.insert(tgt != m_rootOrder.end() ? std::next(tgt) : m_rootOrder.end(), entity);
+    m_hierarchyDirty = true;
 }
 
 } // namespace StellarAlia

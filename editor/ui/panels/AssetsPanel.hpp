@@ -1,7 +1,10 @@
 #pragma once
 
 #include "ui/IEditorWindow.hpp"
+#include "ui/presenters/AssetsPresenter.hpp"
 #include "EditorDiagnostics.hpp"
+#include "EditorContext.hpp"
+#include "EditorSelection.hpp"
 
 #include <filesystem>
 #include <functional>
@@ -13,6 +16,7 @@ namespace StellarAlia          { class MaterialManager; }
 namespace StellarAlia          { class InputSystem; }
 namespace StellarAlia::Resource { class AssetRegistry; }
 namespace StellarAlia::Editor   { class EditorIconCache; }
+namespace StellarAlia::Editor   { class EntityTemplateRegistry; }
 
 struct ImFont;
 
@@ -33,28 +37,11 @@ namespace StellarAlia::Editor {
 // ─────────────────────────────────────────────────────────────────────────────
 class AssetsPanel : public IEditorWindow {
 public:
-    using SceneLoadCallback    = std::function<void(const std::filesystem::path&)>;
-    // Called after a new asset is imported so the registry can rescan.
-    using ImportCallback       = std::function<void()>;
-    // Called when the user requests a shader cook from the context menu.
-    using CookShadersCallback  = std::function<void()>;
-
-    explicit AssetsPanel(std::string projectDir,
-                         std::string cookCacheDir,
-                         Resource::AssetRegistry* registry = nullptr);
+    AssetsPanel(EditorContext& ctx, AssetsPresenter& presenter);
 
     std::string_view GetName()    const override { return "Assets"; }
     ImGuiWindowFlags GetWindowFlags() const override { return 0; }
     void OnDraw() override;
-
-    // Register a callback invoked when the user double-clicks a .sascene file.
-    void SetSceneLoadCallback(SceneLoadCallback cb) { m_onSceneLoad = std::move(cb); }
-
-    // Register a callback invoked after a successful asset import.
-    void SetImportCallback(ImportCallback cb) { m_onImport = std::move(cb); }
-
-    // Register a callback invoked when the user selects "Cook Shader" on a .saglsl file.
-    void SetCookShadersCallback(CookShadersCallback cb) { m_onCookShaders = std::move(cb); }
 
     // Scans the assets root: generates missing .sameta, cooks materials, then
     // rescans the registry.  Call from EditorMode::OnAttach (after SetImportCallback)
@@ -68,24 +55,14 @@ public:
 
     // Returns the currently selected asset path (empty = none).
     const std::filesystem::path& GetSelectedPath() const { return m_selectedPath; }
+    // Returns the directory currently shown in the right pane.
+    const std::filesystem::path& GetCurrentDir()   const { return m_selectedDir; }
 
-    // Wire InputSystem for keyboard shortcuts (Delete, Ctrl+A).
-    void SetInput(InputSystem* input)               { m_input = input; }
+    // Marks the file pane for a rescan on the next draw (call after external file writes).
+    void MarkFilePaneDirty() { m_filePaneDirty = true; }
 
-    // Optional wiring — enables type-registration guard in CreateMatFromShader
-    // and diagnostic reporting for cook/material errors.
-    void SetMaterialManager(MaterialManager* mm)    { m_matMgr      = mm; }
-    void SetDiagnostics(EditorDiagnostics* diags)   { m_diagnostics = diags; }
-
-    // Switch to a new project at runtime.
-    // assetsRoot should be the new project's assets/ directory.
-    // Triggers a rescan on the next draw frame.
-    void SetProjectDir(const std::filesystem::path& assetsRoot);
-
-    // Wire the icon cache + icon font for file icon display.
-    void SetIconCache(EditorIconCache* cache, ImFont* iconFont) {
-        m_iconCache = cache; m_iconFont = iconFont;
-    }
+    // Switch to a new project at runtime (called from EditorMode::LoadProject).
+    void UpdateProjectDir(const std::filesystem::path& assetsRoot);
 
     // ── Top-bar actions (called from EditorUI menu bar) ───────────────────────
     void RequestImport();      // open the import-file modal on next draw
@@ -93,13 +70,12 @@ public:
     void RequestReimportAll(); // force-recook all assets under assetsRoot
 
 private:
-    enum class CreateKind : uint8_t { Mat, Saglsl };
+    enum class CreateKind : uint8_t { Mat, Saglsl, Scene, Script };
 
     // Left pane: recursive directory tree (dirs only).
     void DrawDirPane(const std::filesystem::path& dir);
     // Right pane: file list / grid for m_selectedDir.
     void DrawFilePane();
-    void ProcessImportQueue();
 
     // Write template content + .sameta + cook, then enter inline rename.
     // Default filenames: "New Material" / "New Shader".
@@ -124,10 +100,6 @@ private:
     void MoveAsset(const std::filesystem::path& src,
                    const std::filesystem::path& destDir);
 
-    // Import a single file into the project.
-    // Copies to the correct assets/ subdirectory, writes .sameta, cooks, returns true on success.
-    bool ImportFile(const std::filesystem::path& srcPath);
-
     // Force-recook an already-imported asset (force=true).
     // Resolves type from the .sameta sidecar.  For .sanim, resolves the source
     // .glb path from the registry before delegating to CookAnimSidecar.
@@ -136,15 +108,24 @@ private:
     // Force-recook every asset under dir (recursive).
     void ReimportDir(const std::filesystem::path& dir);
 
+    // Sets m_selectedPath and syncs to EditorSelection.
+    void SetSelectedPath(const std::filesystem::path& p);
+    // Returns the import destination directory based on current selection.
+    std::filesystem::path GetCurrentDestDir() const;
+
+    AssetsPresenter&         m_presenter;
+
     std::filesystem::path    m_assetsRoot;
     std::filesystem::path    m_selectedDir;    // directory shown in the right pane
     std::filesystem::path    m_selectedPath;   // primary selection (for context ops)
     std::string              m_projectDir;
     std::string              m_cookCacheDir;
-    Resource::AssetRegistry* m_registry     = nullptr;
-    MaterialManager*         m_matMgr       = nullptr;
-    EditorDiagnostics*       m_diagnostics  = nullptr;
-    InputSystem*             m_input        = nullptr;
+    Resource::AssetRegistry*  m_registry       = nullptr;
+    MaterialManager*          m_matMgr         = nullptr;
+    EditorDiagnostics*        m_diagnostics    = nullptr;
+    InputSystem*              m_input          = nullptr;
+    EditorSelection*          m_selectionCtx   = nullptr;
+    EntityTemplateRegistry*   m_templateReg    = nullptr;
 
     // ── Multi-selection ────────────────────────────────────────────────────
     std::unordered_set<std::string>   m_selectedPaths;   // path strings of all selected files
@@ -157,26 +138,19 @@ private:
     std::vector<std::filesystem::path> m_pendingDeletePaths;
     bool                               m_batchDeleteConfirmOpen = false;
 
-    SceneLoadCallback    m_onSceneLoad;
-    ImportCallback       m_onImport;
-    CookShadersCallback  m_onCookShaders;
+    std::function<void(const std::filesystem::path&)> m_onSceneLoad;
+    std::function<void()>                             m_onImport;
+    std::function<void()>                             m_onCookShaders;
 
     // ── Import dialog state ────────────────────────────────────────────────
-    // NFD path: flag set by RequestImport(), consumed at the top of OnDraw().
-    // Fallback (no nfd): text-input modal.
-    bool m_importDialogPending = false;
     bool m_importModalOpen     = false;
     char m_importPathBuf[1024] = {};
-
-    void ProcessNFDImport();
 
     // ── Inline rename state (new files + explicit rename) ──────────────────
     std::filesystem::path m_renamingPath;
     char                  m_renameNameBuf[256] = {};
     bool                  m_renameFocusNext    = false;
-
-    // ── Drag-and-drop queue ────────────────────────────────────────────────
-    std::vector<std::filesystem::path> m_dropQueue;
+    bool                  m_renamingFromTree   = false; // true = rename triggered from left tree
 
     // ── Delete confirmation ────────────────────────────────────────────────
     std::filesystem::path m_pendingDeletePath;

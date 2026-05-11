@@ -8,6 +8,7 @@
 
 // Forward-declared so EditorUI.hpp stays cheap to include.
 namespace StellarAlia::Editor { class EditorDiagnostics; }
+namespace StellarAlia::Editor { class CommandManager; }
 
 struct GLFWwindow;
 struct ImFont;
@@ -97,6 +98,16 @@ public:
     // Wire the diagnostic bus so the menu bar can show an error/warning badge.
     void SetDiagnostics(EditorDiagnostics* diags) { m_diagnostics = diags; }
 
+    // Wire the command manager so the Edit menu can show Undo/Redo descriptions.
+    // onUndo / onRedo are called when the menu items are clicked.
+    void SetCommandManager(CommandManager* mgr,
+                           std::function<void()> onUndo,
+                           std::function<void()> onRedo) {
+        m_cmdMgr  = mgr;
+        m_onUndo  = std::move(onUndo);
+        m_onRedo  = std::move(onRedo);
+    }
+
 private:
     RHI::VulkanDevice*                          m_device        = nullptr;
     std::vector<std::unique_ptr<IEditorWindow>> m_windows;
@@ -104,6 +115,9 @@ private:
     FileCallbacks                               m_fileCallbacks;
     AssetCallbacks                              m_assetCallbacks;
     EditorDiagnostics*                          m_diagnostics   = nullptr;
+    CommandManager*                             m_cmdMgr        = nullptr;
+    std::function<void()>                       m_onUndo;
+    std::function<void()>                       m_onRedo;
     bool                                        m_panelsHidden  = false;
     ImFont*                                     m_iconFont      = nullptr;
 };

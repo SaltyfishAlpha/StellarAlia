@@ -20,7 +20,7 @@ void PlaybackPanel::OnDraw() {
         case EnginePlayState::Editing:
             if (!canPlay) ImGui::BeginDisabled();
             if (ImGui::Button("Play"))
-                m_app->SetPlayState(EnginePlayState::Playing);
+                m_presenter.RequestSetPlayState(EnginePlayState::Playing);
             if (!canPlay) {
                 ImGui::EndDisabled();
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
@@ -36,18 +36,18 @@ void PlaybackPanel::OnDraw() {
 
         case EnginePlayState::Playing:
             if (ImGui::Button("Pause"))
-                m_app->SetPlayState(EnginePlayState::Paused);
+                m_presenter.RequestSetPlayState(EnginePlayState::Paused);
             ImGui::SameLine();
             if (ImGui::Button("Stop"))
-                m_app->SetPlayState(EnginePlayState::Editing);
+                m_presenter.RequestSetPlayState(EnginePlayState::Editing);
             break;
 
         case EnginePlayState::Paused:
             if (ImGui::Button("Resume"))
-                m_app->SetPlayState(EnginePlayState::Playing);
+                m_presenter.RequestSetPlayState(EnginePlayState::Playing);
             ImGui::SameLine();
             if (ImGui::Button("Stop"))
-                m_app->SetPlayState(EnginePlayState::Editing);
+                m_presenter.RequestSetPlayState(EnginePlayState::Editing);
             break;
     }
 

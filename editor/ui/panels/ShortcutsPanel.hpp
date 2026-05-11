@@ -1,13 +1,13 @@
 #pragma once
 
 #include "ui/IEditorWindow.hpp"
+#include "ui/presenters/ShortcutsPresenter.hpp"
+#include "EditorContext.hpp"
 #include "function/input/ActionMapDef.hpp"
 
 #include <filesystem>
 #include <string>
 #include <vector>
-
-namespace StellarAlia { class InputSystem; }
 
 namespace StellarAlia::Editor {
 
@@ -26,8 +26,7 @@ class EditorShortcutConfig;
 // ─────────────────────────────────────────────────────────────────────────────
 class ShortcutsPanel : public IEditorWindow {
 public:
-    ShortcutsPanel(EditorShortcutConfig& config, InputSystem& input,
-                   std::filesystem::path defaultConfigPath);
+    ShortcutsPanel(EditorContext& ctx, ShortcutsPresenter& presenter);
 
     std::string_view GetName() const override { return "Shortcuts"; }
     void OnDraw() override;
@@ -41,8 +40,8 @@ private:
     void        BuildEntries();
     static std::string FormatBinding(const BindingDef& b);
 
+    ShortcutsPresenter&   m_presenter;
     EditorShortcutConfig& m_config;
-    InputSystem&          m_input;
     std::filesystem::path m_defaultConfigPath;
 
     std::vector<Entry>    m_entries;

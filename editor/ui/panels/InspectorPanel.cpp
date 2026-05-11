@@ -1,9 +1,8 @@
 #include "ui/panels/InspectorPanel.hpp"
 
-#include "ui/ComponentDrawers.hpp"
 #include "ui/AssetInspectors.hpp"
 #include "ui/EditorIconCache.hpp"
-#include "ui/panels/AssetsPanel.hpp"
+#include "ui/drawers/ComponentDrawerRegistry.hpp"
 #include "resource/AssetRegistry.hpp"
 #include "function/scene/Scene.hpp"
 #include "function/scene/Components.hpp"
@@ -13,15 +12,20 @@
 
 namespace StellarAlia::Editor {
 
-InspectorPanel::InspectorPanel(Scene& scene,
-                               const SceneHierarchyPanel& hierarchy,
-                               const Resource::AssetRegistry* registry,
-                               const MaterialManager*          matMgr)
-    : m_scene(&scene), m_hierarchy(&hierarchy), m_registry(registry), m_matMgr(matMgr)
+InspectorPanel::InspectorPanel(EditorContext& ctx)
+    : m_ctx(&ctx)
+    , m_scene(ctx.scene)
+    , m_selection(ctx.selection)
+    , m_iconCache(ctx.iconCache)
 {
-    RegisterDrawers();
     RegisterBuiltinComponents();
     RegisterAssetDrawers();
+    if (m_iconCache) {
+        for (auto& [ext, drawer] : m_assetDrawers) {
+            if (auto* img = dynamic_cast<ImageAssetInspector*>(drawer.get()))
+                img->SetIconCache(m_iconCache);
+        }
+    }
 }
 
 void InspectorPanel::RegisterComponent(ComponentDescriptor desc) {
@@ -98,12 +102,20 @@ void InspectorPanel::RegisterBuiltinComponents() {
         [](auto& r, auto e){ return r.template any_of<ColliderComponent>(e); },
         [](auto& r, auto e, auto& ){ r.template emplace_or_replace<ColliderComponent>(e); }
     });
+
+    // ── Scripting ─────────────────────────────────────────────────────────────
+    RegisterComponent({
+        "Scripting", "Script",
+        [](auto& r, auto e){ return r.template any_of<ScriptComponent>(e); },
+        [](auto& r, auto e, auto& ){ r.template emplace_or_replace<ScriptComponent>(e); }
+    });
 }
 
 void InspectorPanel::RegisterAssetDrawers() {
     m_defaultAssetDrawer = std::make_unique<DefaultAssetInspector>();
 
-    for (auto ext : {".txt", ".md", ".saglsl", ".glsl", ".vert", ".frag", ".comp", ".hlsl", ".json"})
+    for (auto ext : {".txt", ".md", ".cs",
+                     ".saglsl", ".glsl", ".vert", ".frag", ".comp", ".hlsl", ".json"})
         m_assetDrawers[ext] = std::make_unique<TextAssetInspector>();
 
     m_assetDrawers[".samat"]   = std::make_unique<MaterialAssetInspector>();
@@ -116,57 +128,24 @@ void InspectorPanel::RegisterAssetDrawers() {
         m_assetDrawers[ext] = std::make_unique<ImageAssetInspector>();
 }
 
-void InspectorPanel::SetIconCache(EditorIconCache* cache) {
-    m_iconCache = cache;
-    // Propagate to all existing ImageAssetInspector instances.
-    for (auto& [ext, drawer] : m_assetDrawers) {
-        if (auto* img = dynamic_cast<ImageAssetInspector*>(drawer.get()))
-            img->SetIconCache(cache);
-    }
-}
 
-void InspectorPanel::SetIconFont(ImFont* font) {
-    m_iconFont = font;
-    for (auto& d : m_drawers)
-        d->SetIconFont(font);
-}
-
-void InspectorPanel::RegisterDrawers() {
-    m_drawers.push_back(std::make_unique<TagDrawer>());
-    m_drawers.push_back(std::make_unique<TransformDrawer>());
-    m_drawers.push_back(std::make_unique<CameraDrawer>());
-    m_drawers.push_back(std::make_unique<DirectionalLightDrawer>());
-    m_drawers.push_back(std::make_unique<PointLightDrawer>());
-    m_drawers.push_back(std::make_unique<SpotLightDrawer>());
-    m_drawers.push_back(std::make_unique<AreaLightDrawer>());
-    m_drawers.push_back(std::make_unique<StaticMeshDrawer>(m_registry));
-    m_drawers.push_back(std::make_unique<MeshRendererDrawer>(m_registry));
-    m_drawers.push_back(std::make_unique<AnimatorDrawer>(m_registry));
-    m_drawers.push_back(std::make_unique<SkinnedMeshDrawer>(m_registry));
-    m_drawers.push_back(std::make_unique<MaterialOverrideDrawer>(m_registry, m_matMgr));
-    m_drawers.push_back(std::make_unique<RigidBodyDrawer>());
-    m_drawers.push_back(std::make_unique<ColliderDrawer>());
-}
 
 void InspectorPanel::OnDraw() {
-    const uint32_t selEntity = m_hierarchy->GetSelectedEntity();
+    if (!m_selection) { ImGui::TextDisabled("Nothing selected"); return; }
+
+    const auto selType   = m_selection->GetType();
+    const uint32_t selEntity =
+        (selType == EditorSelectionType::Entity)
+            ? static_cast<uint32_t>(m_selection->GetPrimaryEntity())
+            : ~0u;
     const std::filesystem::path selAsset =
-        m_assetsPanel ? m_assetsPanel->GetSelectedPath() : std::filesystem::path{};
+        (selType == EditorSelectionType::Asset)
+            ? m_selection->GetSelectedAsset()
+            : std::filesystem::path{};
 
-    // Mode switching: whichever selection changed most recently wins.
-    if (selEntity != m_lastEntity) {
-        m_mode = (selEntity != ~0u) ? Mode::Entity
-               : (!selAsset.empty() ? Mode::Asset : m_mode);
-        m_lastEntity = selEntity;
-    }
-    if (selAsset != m_lastAsset) {
-        if (!selAsset.empty()) m_mode = Mode::Asset;
-        m_lastAsset = selAsset;
-    }
-
-    if (m_mode == Mode::Entity)
+    if (selType == EditorSelectionType::Entity)
         DrawEntityInspector(selEntity);
-    else if (!selAsset.empty())
+    else if (selType == EditorSelectionType::Asset && !selAsset.empty())
         DrawAssetInspector(selAsset);
     else
         ImGui::TextDisabled("Nothing selected");
@@ -187,8 +166,8 @@ void InspectorPanel::DrawEntityInspector(uint32_t sel) {
     }
 
     ImGui::PushItemWidth(-150.f);
-    for (auto& drawer : m_drawers)
-        drawer->TryDraw(reg, entity, *m_scene);
+    if (m_ctx && m_ctx->drawerRegistry)
+        m_ctx->drawerRegistry->DrawAll(reg, entity, *m_scene, *m_ctx);
     ImGui::PopItemWidth();
 
     ImGui::Separator();

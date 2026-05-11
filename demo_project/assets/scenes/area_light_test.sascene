@@ -292,6 +292,10 @@
         "receiveShadow": true
       },
       "parent": -1,
+      "script": {
+        "class": "",
+        "path": "assets/scripts/BouncingRotator.cs"
+      },
       "staticMesh": {
         "mesh": "c0be0000-0000-4000-0000-000000000001"
       },
@@ -318,9 +322,14 @@
     {
       "id": 7,
       "materialOverride": {
-        "materialAsset": "5ec599b2-0f1a-49cf-87ff-971e687d1da3",
+        "materialAsset": "2b32fe56-31ae-4af7-8304-461fa721c53b",
         "scalars": {
-          "roughnessFactor": 1.0
+          "baseColorFactor": [
+            0.3835063874721527,
+            0.0,
+            0.686274528503418,
+            1.0
+          ]
         },
         "textures": {}
       },
@@ -347,9 +356,9 @@
           0.0
         ],
         "scale": [
-          1.1799999475479126,
-          2.03448224067688,
-          2.03448224067688
+          1.0,
+          1.0,
+          1.0
         ]
       }
     },
@@ -445,6 +454,7 @@
       "aeEvMin": -4.0,
       "aeHighPercent": 0.949999988079071,
       "aeLowPercent": 0.44999998807907104,
+      "aperture": 1.399999976158142,
       "autoExposureEnabled": true,
       "bloomEnabled": true,
       "bloomMipLevels": 3,
@@ -471,8 +481,13 @@
         ],
         "saturation": 1.0
       },
+      "dofEnabled": false,
+      "dofSamples": 16,
       "exposure": 0.5299999713897705,
+      "focalLength": 50.0,
+      "focusDistance": 5.0,
       "lutStrength": 1.0,
+      "maxCocPx": 20.0,
       "ssaoBias": 0.02500000037252903,
       "ssaoBlurSharpness": 10.0,
       "ssaoDirections": 4,

@@ -9,6 +9,20 @@
 #include "EditorDiagnostics.hpp"
 #include "EditorLogCapture.hpp"
 #include "config/EditorShortcutConfig.hpp"
+#include "EditorContext.hpp"
+#include "EditorSelection.hpp"
+#include "ui/drawers/ComponentDrawerRegistry.hpp"
+#include "ui/presenters/SceneHierarchyPresenter.hpp"
+#include "ui/presenters/AssetsPresenter.hpp"
+#include "ui/presenters/PlaybackPresenter.hpp"
+#include "ui/presenters/WorldSettingsPresenter.hpp"
+#include "ui/presenters/PostProcessPresenter.hpp"
+#include "ui/presenters/ShortcutsPresenter.hpp"
+#include "ui/presenters/ProjectBrowserPresenter.hpp"
+#include "ui/presenters/ConsolePanelPresenter.hpp"
+#include "action/EditorActionRegistry.hpp"
+#include "command/CommandManager.hpp"
+#include "function/scene/Components.hpp"
 
 #include "core/spatial/BVHTree.hpp"
 #include "ui/EditorIconCache.hpp"
@@ -74,11 +88,27 @@ private:
     bool                                   m_showProjectBrowser = false;
 
     EditorShortcutConfig                   m_shortcutConfig;
+    EditorSelection                        m_selection;
+    ComponentDrawerRegistry                m_drawerRegistry;
+    std::unique_ptr<SceneHierarchyPresenter>  m_hierPresenter;
+    std::unique_ptr<AssetsPresenter>          m_assetsPresenter;
+    std::unique_ptr<PlaybackPresenter>        m_playbackPresenter;
+    std::unique_ptr<WorldSettingsPresenter>   m_worldPresenter;
+    std::unique_ptr<PostProcessPresenter>     m_ppPresenter;
+    std::unique_ptr<ShortcutsPresenter>       m_shortcutsPresenter;
+    std::unique_ptr<ProjectBrowserPresenter>  m_projectBrowserPresenter;
+    std::unique_ptr<ConsolePanelPresenter>    m_consolePresenter;
+    EditorActionRegistry                      m_actionRegistry;
+    CommandManager                            m_commandManager;
+    EditorContext                             m_ctx;
 
     std::filesystem::path      m_currentScenePath;
     std::filesystem::path      m_pendingProjectLoad;   // deferred — set in OnRenderUI, executed in OnUpdate
+    bool                       m_pendingSaveAs   = false; // deferred — set in render phase, NFD runs in OnUpdate
     bool                       m_gizmoIsUsing    = false;
+    TransformComponent         m_gizmoDragStart  = {};
 
+    void BuildContext(Application& app);
     void DrawOverlays();
     void DrawBillboardIcons();
     void DrawImGuizmo();

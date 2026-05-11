@@ -9,6 +9,7 @@
 #include "function/material/MaterialManager.hpp"
 #include "function/renderer/SceneRenderer.hpp"
 #include "function/scene/Scene.hpp"
+#include "function/script/ScriptSystem.hpp"
 #include "resource/ResourceManager.hpp"
 #include "resource/AssetRegistry.hpp"
 
@@ -72,6 +73,9 @@ public:
 
     // ── System accessors (valid after Init, before Shutdown) ─────────────────
     Scene&                       GetScene()            { return *m_scene; }
+    // PIE accessors — prefer these over GetScene() for play-state-aware access.
+    Scene&                       GetEditorScene()      { return *m_scene; }
+    Scene&                       GetActiveScene();     // game copy during Playing/Paused, editor scene otherwise
     SceneRenderer&               GetRenderer()         { return m_renderer; }
     InputSystem&                 GetInputSystem()      { return m_input; }
     Platform::GLFWInputProvider& GetInputProvider();
@@ -89,6 +93,7 @@ public:
     DebugDraw& GetDebugDraw() { return m_debugDraw; }
 
     AnimationSystem&      GetAnimationSystem()     { return m_animSystem; }
+    ScriptSystem&         GetScriptSystem()        { return m_scriptSystem; }
 
     // Returns the physics system. Use PhysicsDebugSettings to toggle overlay drawing.
     PhysicsSystem&        GetPhysicsSystem()       { return m_physics; }
@@ -122,6 +127,8 @@ private:
     std::unique_ptr<RHI::IRHIDevice>               m_device;
     std::unique_ptr<Platform::GLFWInputProvider>   m_provider;
     std::unique_ptr<Scene>                         m_scene;
+    std::unique_ptr<Scene>                         m_gameScene;   // non-null only during Playing/Paused
+    std::string                                    m_pieSnapshot; // compact JSON, non-empty during Playing/Paused
 
     Resource::ResourceManager  m_resMgr;
     Resource::AssetRegistry    m_assetRegistry;
@@ -131,6 +138,7 @@ private:
     AnimationSystem            m_animSystem;
     PhysicsSystem              m_physics;
     DebugDraw                  m_debugDraw;
+    ScriptSystem               m_scriptSystem;
 
     PhysicsDebugSettings       m_physicsDebugSettings;
     float                      m_physicsAccumulator = 0.f;

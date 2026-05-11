@@ -52,6 +52,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <queue>
 #include <type_traits>
 #include <unordered_map>
 
@@ -80,20 +81,29 @@ static glm::quat JsonToQuat(const json& j) {
 static std::string AssetToStr(const AssetID& id) { return id.ToString(); }
 static AssetID     StrToAsset(const std::string& s) { return AssetID::FromString(s); }
 
-// ── Save ──────────────────────────────────────────────────────────────────────
+// ── SerializeToJson ───────────────────────────────────────────────────────────
 
-bool SceneSerializer::SaveToFile(const Scene& scene,
-                                  const std::filesystem::path& path) {
+nlohmann::json SceneSerializer::SerializeToJson(const Scene& scene) {
     const auto& reg = scene.Registry();
 
-    // Assign stable serialization indices to every entity.
-    std::unordered_map<entt::entity, int> entityIndex;
+    // BFS from root order → stable, order-preserving indices.
+    std::vector<entt::entity> saveOrder;
     {
-        int idx = 0;
-        reg.view<TagComponent>().each([&](entt::entity e, const TagComponent&) {
-            entityIndex[e] = idx++;
-        });
+        std::queue<entt::entity> q;
+        for (entt::entity root : scene.GetRootOrder())
+            if (reg.valid(root)) q.push(root);
+        while (!q.empty()) {
+            entt::entity e = q.front(); q.pop();
+            saveOrder.push_back(e);
+            if (const auto* h = reg.try_get<HierarchyComponent>(e))
+                for (entt::entity child : h->children)
+                    if (reg.valid(child)) q.push(child);
+        }
     }
+
+    std::unordered_map<entt::entity, int> entityIndex;
+    for (int idx = 0; idx < static_cast<int>(saveOrder.size()); ++idx)
+        entityIndex[saveOrder[idx]] = idx;
 
     json root;
     root["version"] = 1;
@@ -164,7 +174,8 @@ bool SceneSerializer::SaveToFile(const Scene& scene,
 
     root["entities"] = json::array();
 
-    reg.view<TagComponent>().each([&](entt::entity e, const TagComponent& tag) {
+    for (entt::entity e : saveOrder) {
+        const TagComponent& tag = reg.get<TagComponent>(e);
         json ej;
         ej["id"]  = entityIndex[e];
         ej["tag"] = tag.name;
@@ -250,6 +261,11 @@ bool SceneSerializer::SaveToFile(const Scene& scene,
             };
         }
 
+        // Script
+        if (const auto* sc = reg.try_get<ScriptComponent>(e)) {
+            ej["script"] = {{"path", sc->scriptPath}, {"class", sc->className}};
+        }
+
         // Lights
         if (const auto* l = reg.try_get<DirectionalLightComponent>(e)) {
             ej["directionalLight"] = {
@@ -316,8 +332,16 @@ bool SceneSerializer::SaveToFile(const Scene& scene,
             ej["staticGeometry"] = true;
 
         root["entities"].push_back(std::move(ej));
-    });
+    }
 
+    return root;
+}
+
+// ── Save ──────────────────────────────────────────────────────────────────────
+
+bool SceneSerializer::SaveToFile(const Scene& scene,
+                                  const std::filesystem::path& path) {
+    const json root = SerializeToJson(scene);
     std::ofstream f(path);
     if (!f) {
         SA_LOG_ERROR("SceneSerializer: cannot write '{}'", path.string());
@@ -329,27 +353,11 @@ bool SceneSerializer::SaveToFile(const Scene& scene,
     return f.good();
 }
 
-// ── Load ──────────────────────────────────────────────────────────────────────
+// ── DeserializeFromJson ───────────────────────────────────────────────────────
 
-bool SceneSerializer::LoadFromFile(Scene& scene,
-                                    const std::filesystem::path& path) {
-    std::ifstream f(path);
-    if (!f) {
-        SA_LOG_ERROR("SceneSerializer: cannot open '{}'", path.string());
-        return false;
-    }
-
-    json root;
-    try {
-        f >> root;
-    } catch (const json::exception& ex) {
-        SA_LOG_ERROR("SceneSerializer: JSON parse error in '{}': {}",
-                     path.string(), ex.what());
-        return false;
-    }
-
+bool SceneSerializer::DeserializeFromJson(Scene& scene, const nlohmann::json& root) {
     if (root.value("version", 0) != 1) {
-        SA_LOG_ERROR("SceneSerializer: unsupported version in '{}'", path.string());
+        SA_LOG_ERROR("SceneSerializer: unsupported schema version");
         return false;
     }
 
@@ -557,6 +565,15 @@ bool SceneSerializer::LoadFromFile(Scene& scene,
             reg.emplace<ColliderComponent>(e, col);
         }
 
+        // Script
+        if (ej.contains("script")) {
+            const auto& sj = ej["script"];
+            ScriptComponent sc;
+            sc.scriptPath = sj.value("path",  std::string{});
+            sc.className  = sj.value("class", std::string{});
+            reg.emplace<ScriptComponent>(e, sc);
+        }
+
         // Lights
         if (ej.contains("directionalLight")) {
             const auto& lj = ej["directionalLight"];
@@ -670,7 +687,31 @@ bool SceneSerializer::LoadFromFile(Scene& scene,
             scene.SetParent(indexToEntity[i], indexToEntity[parentIdx]);
     }
 
-    SA_LOG_INFO("SceneSerializer: loaded '{}' ({} entities)", path.string(), count);
+    return true;
+}
+
+// ── Load ──────────────────────────────────────────────────────────────────────
+
+bool SceneSerializer::LoadFromFile(Scene& scene,
+                                    const std::filesystem::path& path) {
+    std::ifstream f(path);
+    if (!f) {
+        SA_LOG_ERROR("SceneSerializer: cannot open '{}'", path.string());
+        return false;
+    }
+
+    json root;
+    try {
+        f >> root;
+    } catch (const json::exception& ex) {
+        SA_LOG_ERROR("SceneSerializer: JSON parse error in '{}': {}",
+                     path.string(), ex.what());
+        return false;
+    }
+
+    if (!DeserializeFromJson(scene, root)) return false;
+    SA_LOG_INFO("SceneSerializer: loaded '{}' ({} entities)",
+                path.string(), root.value("entities", json::array()).size());
     return true;
 }
 

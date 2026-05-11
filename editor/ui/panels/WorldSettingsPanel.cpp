@@ -1,10 +1,16 @@
 #include "ui/panels/WorldSettingsPanel.hpp"
-#include "ui/ComponentDrawers.hpp"
+#include "ui/drawers/DrawerHelpers.hpp"
 #include "resource/AssetRegistry.hpp"
 
 #include <imgui.h>
 
 namespace StellarAlia::Editor {
+
+WorldSettingsPanel::WorldSettingsPanel(EditorContext& ctx, WorldSettingsPresenter& presenter)
+    : m_presenter(presenter)
+    , m_scene(ctx.scene)
+    , m_registry(ctx.assetReg)
+{}
 
 void WorldSettingsPanel::OnDraw() {
     WorldSettings& ws = m_scene->GetWorldSettings();
@@ -23,7 +29,7 @@ void WorldSettingsPanel::OnDraw() {
             if (ImGui::ColorEdit3("Color (linear)", col,
                     ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR)) {
                 ws.backgroundColor = { col[0], col[1], col[2] };
-                m_renderer->ApplyWorldSettings(ws, /*updateIBL=*/false);
+                m_presenter.RequestApplySettings(/*updateIBL=*/false);
             }
         } else {
             // HDR asset picker — changing it clears stale baked products.
@@ -42,7 +48,7 @@ void WorldSettingsPanel::OnDraw() {
             const bool canBake = ws.skyboxHdr.IsValid() && !hasBaked;
             if (!canBake) ImGui::BeginDisabled();
             if (ImGui::Button("Bake IBL"))
-                m_renderer->ApplyWorldSettings(ws);
+                m_presenter.RequestApplySettings(/*updateIBL=*/true);
             if (!canBake) {
                 ImGui::EndDisabled();
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -54,7 +60,7 @@ void WorldSettingsPanel::OnDraw() {
             if (hasBaked) {
                 ImGui::SameLine();
                 if (ImGui::Button("Re-bake"))
-                    m_renderer->RebakeIBL(ws);
+                    m_presenter.RequestRebakeIBL();
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Delete cached IBL textures and bake again from the source HDR");
             }
@@ -75,7 +81,7 @@ void WorldSettingsPanel::OnDraw() {
 
     // ── Apply (IBL bake / settings reload) ───────────────────────────────────
     if (ImGui::Button("Apply Settings", { -1.f, 0.f }))
-        m_renderer->ApplyWorldSettings(ws);
+        m_presenter.RequestApplySettings(/*updateIBL=*/true);
 }
 
 } // namespace StellarAlia::Editor

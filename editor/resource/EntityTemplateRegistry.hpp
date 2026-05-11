@@ -40,11 +40,20 @@ public:
     const std::vector<TemplateEntry>& Entries() const { return m_entries; }
 
     // Absolute path to templates/scenes/default.sascene, or empty if not found.
-    const std::filesystem::path& DefaultScenePath() const { return m_defaultScene; }
+    const std::filesystem::path& DefaultScenePath()   const { return m_defaultScene; }
+    // Absolute path to templates/scripts/NewScript.cs, or empty if not found.
+    const std::filesystem::path& ScriptTemplatePath() const { return m_scriptTemplate; }
+    // Absolute path to templates/materials/PBR Default.samat, or empty if not found.
+    const std::filesystem::path& MatTemplatePath()    const { return m_matTemplate; }
+    // Absolute path to templates/shaders/NewShader.saglsl, or empty if not found.
+    const std::filesystem::path& ShaderTemplatePath() const { return m_shaderTemplate; }
 
 private:
     std::vector<TemplateEntry> m_entries;
     std::filesystem::path      m_defaultScene;
+    std::filesystem::path      m_scriptTemplate;
+    std::filesystem::path      m_matTemplate;
+    std::filesystem::path      m_shaderTemplate;
 };
 
 } // namespace StellarAlia::Editor

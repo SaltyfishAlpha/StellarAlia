@@ -5,6 +5,7 @@
 #include <vector>
 
 #include <entt/entt.hpp>
+#include <nlohmann/json.hpp>
 
 namespace StellarAlia {
 
@@ -38,6 +39,12 @@ struct SceneSerializer {
     [[nodiscard]] static std::vector<entt::entity> SpawnFromTemplate(
         Scene&                       scene,
         const std::filesystem::path& path);
+
+    // In-memory serialization — same JSON schema as SaveToFile/LoadFromFile.
+    // Used by PIE to snapshot the editor scene before play without touching disk.
+    [[nodiscard]] static nlohmann::json SerializeToJson(const Scene& scene);
+    [[nodiscard]] static bool           DeserializeFromJson(Scene&                    scene,
+                                                            const nlohmann::json&     root);
 };
 
 } // namespace StellarAlia

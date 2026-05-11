@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ui/IEditorWindow.hpp"
+#include "EditorContext.hpp"
 #include "EditorOverlaySettings.hpp"
 #include "function/physics/PhysicsSystem.hpp"
 
@@ -12,10 +13,7 @@ namespace StellarAlia::Editor {
 // ─────────────────────────────────────────────────────────────────────────────
 class SettingsPanel : public IEditorWindow {
 public:
-    explicit SettingsPanel(EditorOverlaySettings* overlaySettings = nullptr,
-                           PhysicsDebugSettings*  physicsSettings = nullptr)
-        : m_overlaySettings(overlaySettings)
-        , m_physicsSettings(physicsSettings) {}
+    explicit SettingsPanel(EditorContext& ctx);
 
     std::string_view GetName() const override { return "Settings"; }
     void OnDraw() override;

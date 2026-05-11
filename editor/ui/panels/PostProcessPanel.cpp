@@ -1,10 +1,16 @@
 #include "ui/panels/PostProcessPanel.hpp"
-#include "ui/ComponentDrawers.hpp"
+#include "ui/drawers/DrawerHelpers.hpp"
 #include "resource/AssetRegistry.hpp"
 
 #include <imgui.h>
 
 namespace StellarAlia::Editor {
+
+PostProcessPanel::PostProcessPanel(EditorContext& ctx, PostProcessPresenter& presenter)
+    : m_presenter(presenter)
+    , m_scene(ctx.scene)
+    , m_registry(ctx.assetReg)
+{}
 
 void PostProcessPanel::OnDraw() {
     WorldSettings& ws = m_scene->GetWorldSettings();
@@ -154,7 +160,7 @@ void PostProcessPanel::OnDraw() {
     }
 
     if (liveUpdate)
-        m_renderer->ApplyWorldSettings(ws, /*updateIBL=*/false);
+        m_presenter.RequestApply();
 }
 
 } // namespace StellarAlia::Editor

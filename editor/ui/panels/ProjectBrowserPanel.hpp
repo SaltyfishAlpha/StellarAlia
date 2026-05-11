@@ -1,6 +1,8 @@
 #pragma once
 
+#include "ui/presenters/ProjectBrowserPresenter.hpp"
 #include "project/ProjectManager.hpp"
+#include "EditorContext.hpp"
 
 #include <filesystem>
 #include <functional>
@@ -18,10 +20,7 @@ class ProjectBrowserPanel {
 public:
     using ProjectSelectedCallback = std::function<void(std::filesystem::path saprojectPath)>;
 
-    ProjectBrowserPanel(ProjectManager& mgr,
-                        const std::filesystem::path& engineAssetsDir);
-
-    void SetOnProjectSelected(ProjectSelectedCallback cb) { m_onSelected = std::move(cb); }
+    ProjectBrowserPanel(EditorContext& ctx, ProjectBrowserPresenter& presenter);
 
     // Queue the modal to open on the next OnDraw call.
     void Open() { m_pendingOpen = true; }
@@ -30,9 +29,9 @@ public:
     void OnDraw();
 
 private:
-    ProjectManager&         m_mgr;
-    std::filesystem::path   m_engineAssetsDir;
-    ProjectSelectedCallback m_onSelected;
+    ProjectBrowserPresenter& m_presenter;
+    ProjectManager&          m_mgr;
+    ProjectSelectedCallback  m_onSelected;
 
     bool            m_pendingOpen   = false;
     char            m_newName[256]  = {};

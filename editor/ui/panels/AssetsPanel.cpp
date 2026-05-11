@@ -1,4 +1,5 @@
 #include "ui/panels/AssetsPanel.hpp"
+#include "engine/Application.hpp"
 #include "ui/EditorIconCache.hpp"
 #include "ui/EditorIcons.hpp"
 #include "resource/AssetRegistry.hpp"
@@ -11,6 +12,7 @@
 #include "importer/TextureImporter.hpp"
 #include "importer/MaterialImporter.hpp"
 #include "function/material/MaterialManager.hpp"
+#include "resource/EntityTemplateRegistry.hpp"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -60,23 +62,13 @@ static bool IsTextAsset(const fs::path& ext) {
     std::string e = ext.string();
     std::transform(e.begin(), e.end(), e.begin(), ::tolower);
     for (auto sv : { ".saglsl", ".glsl", ".vert", ".frag", ".comp", ".hlsl",
-                     ".txt", ".md", ".json", ".lua", ".py", ".js", ".ts" })
+                     ".cs", ".txt", ".md", ".json", ".lua", ".py", ".js", ".ts" })
         if (e == sv) return true;
     return false;
 }
 
 // ─── extension helpers ────────────────────────────────────────────────────────
 
-static std::string AssetTypeFromExt(const fs::path& ext) {
-    std::string e = ext.string();
-    std::transform(e.begin(), e.end(), e.begin(),
-                   [](unsigned char c){ return static_cast<char>(::tolower(c)); });
-    if (e == ".glb" || e == ".gltf")               return "Mesh";
-    if (e == ".png" || e == ".jpg" || e == ".jpeg" ||
-        e == ".bmp" || e == ".tga")                 return "Texture";
-    if (e == ".hdr")                                return "Texture";
-    return {};
-}
 
 
 static AssetID ReadSourceMeshUUID(const fs::path& sidecarPath) {
@@ -231,18 +223,40 @@ static Import::AssetEntry MakeAndSaveMeta(const fs::path& srcPath, const std::st
 
 // ─── AssetsPanel ──────────────────────────────────────────────────────────────
 
-AssetsPanel::AssetsPanel(std::string projectDir,
-                         std::string cookCacheDir,
-                         Resource::AssetRegistry* registry)
-    : m_assetsRoot(fs::path(projectDir) / "assets")
-    , m_projectDir(std::move(projectDir))
-    , m_cookCacheDir(std::move(cookCacheDir))
-    , m_registry(registry)
+AssetsPanel::AssetsPanel(EditorContext& ctx, AssetsPresenter& presenter)
+    : m_presenter(presenter)
+    , m_assetsRoot(ctx.projectDir.empty() ? fs::path{} : ctx.projectDir / "assets")
+    , m_projectDir(ctx.projectDir.string())
+    , m_cookCacheDir(ctx.app->GetDesc().cookCacheDir)
+    , m_registry(ctx.assetReg)
+    , m_matMgr(ctx.matMgr)
+    , m_diagnostics(ctx.diagnostics)
+    , m_input(ctx.input)
+    , m_selectionCtx(ctx.selection)
+    , m_templateReg(ctx.templateReg)
+    , m_iconCache(ctx.iconCache)
+    , m_iconFont(ctx.iconFont)
+    , m_onSceneLoad(ctx.onSceneLoad)
+    , m_onImport(ctx.onAssetsImport)
+    , m_onCookShaders(ctx.onCookShaders)
 {}
+
+void AssetsPanel::SetSelectedPath(const fs::path& p) {
+    m_selectedPath = p;
+    if (m_selectionCtx)
+        m_selectionCtx->SelectAsset(p);
+}
+
+fs::path AssetsPanel::GetCurrentDestDir() const {
+    std::error_code ec;
+    if (!m_selectedPath.empty())
+        return fs::is_directory(m_selectedPath, ec) ? m_selectedPath : m_selectedPath.parent_path();
+    return m_assetsRoot;
+}
 
 void AssetsPanel::EnqueueDroppedPaths(int count, const char** paths) {
     for (int i = 0; i < count; ++i)
-        m_dropQueue.emplace_back(paths[i]);
+        m_presenter.EnqueueImport(fs::path(paths[i]));
 }
 
 void AssetsPanel::RunInitialScan() {
@@ -264,51 +278,15 @@ void AssetsPanel::RunInitialScan() {
 
 void AssetsPanel::RequestImport() {
 #ifdef SA_HAS_NFD
-    m_importDialogPending = true;
+    m_presenter.RequestNFDImport(GetCurrentDestDir());
 #else
     m_importModalOpen  = true;
     m_importPathBuf[0] = '\0';
 #endif
 }
 
-void AssetsPanel::ProcessNFDImport() {
-#ifdef SA_HAS_NFD
-    static constexpr nfdfilteritem_t kFilters[] = {
-        { "Supported Assets", "gltf,glb,png,jpg,jpeg,bmp,tga,hdr" },
-        { "3D Models",        "gltf,glb"                           },
-        { "Textures",         "png,jpg,jpeg,bmp,tga,hdr"           },
-    };
 
-    if (NFD_Init() != NFD_OKAY) {
-        SA_LOG_WARN("AssetsPanel: NFD_Init failed: {}", NFD_GetError());
-        return;
-    }
-
-    const nfdpathset_t* outPaths = nullptr;
-    const nfdresult_t res = NFD_OpenDialogMultipleU8(
-        &outPaths, kFilters, static_cast<nfdfiltersize_t>(std::size(kFilters)), nullptr);
-
-    if (res == NFD_OKAY) {
-        nfdpathsetsize_t count = 0;
-        NFD_PathSet_GetCount(outPaths, &count);
-        for (nfdpathsetsize_t i = 0; i < count; ++i) {
-            nfdchar_t* path = nullptr;
-            if (NFD_PathSet_GetPathU8(outPaths, i, &path) == NFD_OKAY && path) {
-                ImportFile(fs::path(path));
-                NFD_PathSet_FreePathU8(path);
-            }
-        }
-        NFD_PathSet_Free(outPaths);
-    } else if (res == NFD_ERROR) {
-        SA_LOG_WARN("AssetsPanel: file dialog error: {}", NFD_GetError());
-    }
-    // NFD_CANCEL — user dismissed, no action.
-
-    NFD_Quit();
-#endif
-}
-
-void AssetsPanel::SetProjectDir(const std::filesystem::path& assetsRoot) {
+void AssetsPanel::UpdateProjectDir(const std::filesystem::path& assetsRoot) {
     m_assetsRoot      = assetsRoot;
     m_projectDir      = assetsRoot.parent_path().string();
     m_cookCacheDir    = (assetsRoot.parent_path() / "cook_cache").string();
@@ -316,6 +294,7 @@ void AssetsPanel::SetProjectDir(const std::filesystem::path& assetsRoot) {
     m_selectedDir.clear();     // reset to new root on next draw
     m_filePaneDirty = true;
     m_initialScanDone = false;
+    m_presenter.UpdateProjectDir(assetsRoot);
 }
 
 void AssetsPanel::RequestRefresh() {
@@ -333,16 +312,24 @@ void AssetsPanel::RequestReimportAll() {
 
 void AssetsPanel::CreateNewFile(CreateKind kind, const fs::path& dir)
 {
-    const std::string ext         = (kind == CreateKind::Saglsl) ? ".saglsl" : ".samat";
-    const std::string defaultStem = (kind == CreateKind::Saglsl) ? "New Shader" : "New Material";
+    const std::string ext         = (kind == CreateKind::Saglsl) ? ".saglsl"
+                                  : (kind == CreateKind::Scene)  ? ".sascene"
+                                  : (kind == CreateKind::Script) ? ".cs"
+                                  :                                ".samat";
+    const std::string defaultStem = (kind == CreateKind::Saglsl) ? "New Shader"
+                                  : (kind == CreateKind::Scene)  ? "New Scene"
+                                  : (kind == CreateKind::Script) ? "NewScript"
+                                  :                                "New Material";
 
-    // Pick a unique filename.
+    // Pick a unique filename. Scripts use no space before the number ("NewScript1.cs")
+    // so the stem remains a valid C# identifier.
     fs::path destPath = dir / (defaultStem + ext);
     if (fs::exists(destPath)) {
         int n = 1;
-        while (fs::exists(dir / (defaultStem + " " + std::to_string(n) + ext)))
+        const std::string sep = (kind == CreateKind::Script) ? "" : " ";
+        while (fs::exists(dir / (defaultStem + sep + std::to_string(n) + ext)))
             ++n;
-        destPath = dir / (defaultStem + " " + std::to_string(n) + ext);
+        destPath = dir / (defaultStem + sep + std::to_string(n) + ext);
     }
 
     // Write template content.
@@ -352,89 +339,115 @@ void AssetsPanel::CreateNewFile(CreateKind kind, const fs::path& dir)
         return;
     }
 
-    if (kind == CreateKind::Mat) {
-        f << R"({
-  "type": "PBR",
-  "version": 1,
-  "params": {
-    "baseColorFactor":   [1.0, 1.0, 1.0, 1.0],
-    "roughnessFactor":   0.5,
-    "metallicFactor":    0.0,
-    "normalScale":       1.0,
-    "occlusionStrength": 1.0,
-    "emissiveFactor":    [0.0, 0.0, 0.0],
-    "emissiveIntensity": 1.0
-  },
-  "textures": {
-    "t_BaseColor":         "",
-    "t_Normal":            "",
-    "t_MetallicRoughness": "",
-    "t_Occlusion":         "",
-    "t_Emissive":          ""
-  }
-}
-)";
+    if (kind == CreateKind::Script) {
+        const std::string cls  = destPath.stem().string();
+        const fs::path    tmpl = m_templateReg ? m_templateReg->ScriptTemplatePath() : fs::path{};
+        f.close();
+        bool written = false;
+        if (!tmpl.empty() && fs::exists(tmpl)) {
+            std::ifstream src(tmpl);
+            std::ofstream dst(destPath);
+            if (src && dst) {
+                std::string line;
+                while (std::getline(src, line)) {
+                    // Replace the template class name ("NewScript") with the actual stem.
+                    std::string::size_type pos = 0;
+                    while ((pos = line.find("NewScript", pos)) != std::string::npos) {
+                        line.replace(pos, 9, cls);
+                        pos += cls.size();
+                    }
+                    dst << line << '\n';
+                }
+                written = true;
+            }
+        }
+        if (!written) {
+            std::ofstream fb(destPath);
+            fb << "using StellarAlia;\n\n"
+               << "public class " << cls << " : ScriptBase\n"
+               << "{\n"
+               << "    public override void OnUpdate(float dt)\n"
+               << "    {\n"
+               << "    }\n"
+               << "}\n";
+        }
+    } else if (kind == CreateKind::Scene) {
+        const fs::path tmpl = m_templateReg ? m_templateReg->DefaultScenePath() : fs::path{};
+        f.close();
+        if (!tmpl.empty() && fs::exists(tmpl)) {
+            std::error_code ec;
+            fs::copy_file(tmpl, destPath, fs::copy_options::overwrite_existing, ec);
+            if (ec) {
+                SA_LOG_WARN("AssetsPanel: could not copy scene template: {}", ec.message());
+                return;
+            }
+        } else {
+            std::ofstream fb(destPath);
+            fb << "{\n  \"entities\": []\n}\n";
+        }
+    } else if (kind == CreateKind::Mat) {
+        f.close();
+        const fs::path tmpl = m_templateReg ? m_templateReg->MatTemplatePath() : fs::path{};
+        if (tmpl.empty() || !fs::exists(tmpl)) {
+            SA_LOG_WARN("AssetsPanel: material template not found ({})",
+                        tmpl.empty() ? "no registry" : tmpl.string());
+            fs::remove(destPath);
+            return;
+        }
+        std::error_code ec;
+        fs::copy_file(tmpl, destPath, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            SA_LOG_WARN("AssetsPanel: could not copy material template: {}", ec.message());
+            return;
+        }
     } else {
-        f << "// @ShaderName \"" << defaultStem << "\"\n"
-          << R"(// @ShadingModel SimpleAlbedo
-// @VertShader deferred_geometry
-
-#pragma sa_section gbuffer
-
-#version 450
-#extension GL_GOOGLE_include_directive : enable
-#include "common.glsl"
-#include "shading_models.glsl"
-#include "shading_model_ids.glsl"
-
-layout(set = 1, binding = 0) uniform MaterialParams {
-    vec4 baseColorFactor; // @Color4("Base Color") = 1,1,1,1
-} u_Mat;
-
-layout(set = 1, binding = 1) uniform sampler2D t_BaseColor; // @Texture("Albedo Map")
-
-layout(location = 1) in vec3 v_Normal;
-layout(location = 3) in vec2 v_TexCoord0;
-
-layout(location = 0) out vec4 out_GAlbedoOcclusion;
-layout(location = 1) out vec4 out_GNormalRoughness;
-layout(location = 2) out vec4 out_GData;
-
-void main() {
-    vec4 color = texture(t_BaseColor, v_TexCoord0) * u_Mat.baseColorFactor;
-    vec3 N = normalize(v_Normal);
-    out_GAlbedoOcclusion = vec4(color.rgb, 1.0);
-    out_GNormalRoughness  = vec4(OctEncode(N), 1.0, 0.0);
-    out_GData             = vec4(0.0, 0.0, 0.0, EncodeShadingFlags(SHADING_MODEL_SIMPLE_ALBEDO));
-}
-
-#pragma sa_end_section
-
-#pragma sa_section lighting
-
-vec3 EvaluateShading(GBufferData gbuf) {
-    return gbuf.albedo;
-}
-
-#pragma sa_end_section
-)";
+        // kind == CreateKind::Saglsl
+        const std::string shaderName = destPath.stem().string();
+        const fs::path    tmpl = m_templateReg ? m_templateReg->ShaderTemplatePath() : fs::path{};
+        f.close();
+        if (tmpl.empty() || !fs::exists(tmpl)) {
+            SA_LOG_WARN("AssetsPanel: shader template not found ({})",
+                        tmpl.empty() ? "no registry" : tmpl.string());
+            fs::remove(destPath);
+            return;
+        }
+        std::ifstream src(tmpl);
+        std::ofstream dst(destPath);
+        if (!src || !dst) {
+            SA_LOG_WARN("AssetsPanel: could not read/write shader template '{}'", tmpl.string());
+            return;
+        }
+        std::string line;
+        while (std::getline(src, line)) {
+            std::string::size_type pos = 0;
+            while ((pos = line.find("NewShader", pos)) != std::string::npos) {
+                line.replace(pos, 9, shaderName);
+                pos += shaderName.size();
+            }
+            dst << line << '\n';
+        }
     }
     f.close();
     SA_LOG_INFO("AssetsPanel: created '{}'", destPath.string());
 
-    // Generate .sameta and cook.
-    const std::string type = (kind == CreateKind::Saglsl) ? "Shader" : "Material";
-    const Import::AssetEntry entry = MakeAndSaveMeta(destPath, type);
-    if (kind == CreateKind::Mat)
-        CookEntry(entry, m_cookCacheDir);
+    // Generate .sameta and cook (scripts need neither).
+    if (kind != CreateKind::Script) {
+        const std::string type = (kind == CreateKind::Saglsl) ? "Shader"
+                               : (kind == CreateKind::Scene)  ? "Scene"
+                               :                                "Material";
+        const Import::AssetEntry entry = MakeAndSaveMeta(destPath, type);
+        if (kind == CreateKind::Mat)
+            CookEntry(entry, m_cookCacheDir);
+    }
 
     if (m_onImport)
         m_onImport();
     else if (m_registry)
         m_registry->Scan(m_assetsRoot, {});
 
+    m_filePaneDirty = true;
     // Enter inline rename with the default stem pre-filled.
-    m_selectedPath     = destPath;
+    SetSelectedPath(destPath);
     m_renamingPath     = destPath;
     m_renameFocusNext  = true;
     std::snprintf(m_renameNameBuf, sizeof(m_renameNameBuf), "%s", defaultStem.c_str());
@@ -454,20 +467,37 @@ void AssetsPanel::CreateMatFromShader(const std::string& typeName,
         destPath = dir / (baseName + "_" + std::to_string(n) + ".samat");
     }
 
+    using json = nlohmann::json;
+
+    // Load the material template as the format schema; only patch dynamic fields.
+    json root = json::object();
+    const fs::path tmpl = m_templateReg ? m_templateReg->MatTemplatePath() : fs::path{};
+    if (!tmpl.empty() && fs::exists(tmpl)) {
+        std::ifstream tf(tmpl);
+        try { root = json::parse(tf); }
+        catch (const json::exception& ex) {
+            SA_LOG_WARN("AssetsPanel: could not parse material template: {}", ex.what());
+        }
+    }
+
+    root["type"] = typeName;
+    if (!defaultParamsJson.empty()) {
+        try { root["params"] = json::parse("{" + defaultParamsJson + "}"); }
+        catch (const json::exception& ex) {
+            SA_LOG_WARN("AssetsPanel: could not parse shader defaults for '{}': {}",
+                        typeName, ex.what());
+            root["params"] = json::object();
+        }
+    } else {
+        root["params"] = json::object();
+    }
+
     std::ofstream f(destPath);
     if (!f) {
         SA_LOG_WARN("AssetsPanel: could not create '{}'", destPath.string());
         return;
     }
-    f << "{\n"
-      << "  \"type\": \"" << typeName << "\",\n"
-      << "  \"version\": 1,\n"
-      << "  \"params\": {";
-    if (!defaultParamsJson.empty())
-        f << "\n" << defaultParamsJson << "\n  ";
-    f << "},\n"
-      << "  \"textures\": {}\n"
-      << "}\n";
+    f << root.dump(2) << '\n';
     f.close();
     SA_LOG_INFO("AssetsPanel: created '{}' (type={})", destPath.string(), typeName);
 
@@ -479,7 +509,8 @@ void AssetsPanel::CreateMatFromShader(const std::string& typeName,
     else if (m_registry)
         m_registry->Scan(m_assetsRoot, {});
 
-    m_selectedPath    = destPath;
+    m_filePaneDirty = true;
+    SetSelectedPath(destPath);
     m_renamingPath    = destPath;
     m_renameFocusNext = true;
     std::snprintf(m_renameNameBuf, sizeof(m_renameNameBuf), "%s", baseName.c_str());
@@ -520,7 +551,9 @@ void AssetsPanel::CommitRename() {
 
     SA_LOG_INFO("AssetsPanel: renamed '{}' → '{}'",
                 m_renamingPath.filename().string(), newPath.filename().string());
-    m_selectedPath = newPath;
+    m_filePaneDirty    = true;
+    m_renamingFromTree = false;
+    SetSelectedPath(newPath);
     m_renamingPath.clear();
 
     if (m_onImport)
@@ -544,7 +577,8 @@ void AssetsPanel::CreateNewDir(const fs::path& parent) {
     if (ec) { SA_LOG_WARN("AssetsPanel: mkdir failed: {}", ec.message()); return; }
     SA_LOG_INFO("AssetsPanel: created directory '{}'", dest.filename().string());
 
-    m_selectedPath    = dest;
+    m_filePaneDirty = true;
+    SetSelectedPath(dest);
     m_renamingPath    = dest;
     m_renameFocusNext = true;
     std::snprintf(m_renameNameBuf, sizeof(m_renameNameBuf), "%s", base.c_str());
@@ -564,7 +598,8 @@ void AssetsPanel::DeletePath(const fs::path& path) {
         return;
     }
     SA_LOG_INFO("AssetsPanel: deleted '{}'", path.filename().string());
-    if (m_selectedPath == path) m_selectedPath.clear();
+    m_filePaneDirty = true;
+    if (m_selectedPath == path) SetSelectedPath({});
 
     if (m_onImport)    m_onImport();
     else if (m_registry) m_registry->Scan(m_assetsRoot, {});
@@ -592,7 +627,8 @@ void AssetsPanel::MoveAsset(const fs::path& src, const fs::path& destDir) {
     SA_LOG_INFO("AssetsPanel: moved '{}' → '{}'",
                 src.filename().string(), destDir.filename().string());
 
-    if (m_selectedPath == src) m_selectedPath = dest;
+    m_filePaneDirty = true;
+    if (m_selectedPath == src) SetSelectedPath(dest);
     if (m_onImport)    m_onImport();
     else if (m_registry) m_registry->Scan(m_assetsRoot, {});
 }
@@ -603,12 +639,8 @@ void AssetsPanel::OnDraw() {
     if (!m_initialScanDone)
         RunInitialScan();
 
-    if (m_importDialogPending) {
-        m_importDialogPending = false;
-        ProcessNFDImport();
-    }
-
-    ProcessImportQueue();
+    if (m_presenter.ConsumeFilePaneDirty())
+        m_filePaneDirty = true;
 
     if (m_assetsRoot.empty() || !fs::exists(m_assetsRoot)) {
         ImGui::TextDisabled("No project loaded.");
@@ -617,7 +649,7 @@ void AssetsPanel::OnDraw() {
 
     // Flush deferred single-select: click on multi-selected item without dragging.
     if (!m_pendingDeselectOtherPath.empty() && !ImGui::IsMouseDown(0)) {
-        m_selectedPath    = fs::path(m_pendingDeselectOtherPath);
+        SetSelectedPath(fs::path(m_pendingDeselectOtherPath));
         m_selectedPaths   = { m_pendingDeselectOtherPath };
         m_shiftAnchorPath = m_pendingDeselectOtherPath;
         m_pendingDeselectOtherPath.clear();
@@ -629,30 +661,24 @@ void AssetsPanel::OnDraw() {
 
     m_drawOrderFilesBuild.clear();
 
-    // Window-level root drop target (catches drops on empty space)
-    {
-        const ImVec2 p0 = ImGui::GetWindowPos();
-        const ImRect winRect(p0, ImVec2(p0.x + ImGui::GetWindowWidth(),
-                                        p0.y + ImGui::GetWindowHeight()));
-        if (ImGui::BeginDragDropTargetCustom(winRect, ImGui::GetID("##win_root_dnd"))) {
-            if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAASSET")) {
-                const fs::path anchor(static_cast<const char*>(p->Data));
-                if (m_selectedPaths.count(anchor.string()) && m_selectedPaths.size() > 1) {
-                    for (const fs::path& f : m_drawOrderFiles)
-                        if (m_selectedPaths.count(f.string()))
-                            MoveAsset(f, m_assetsRoot);
-                    m_selectedPaths.clear();
-                } else {
-                    MoveAsset(anchor, m_assetsRoot);
-                }
-            }
-            ImGui::EndDragDropTarget();
-        }
-    }
-
     // ── Two-pane layout ───────────────────────────────────────────────────────
     static constexpr float kBottomH = 34.f;
     static constexpr float kLeftW   = 200.f;
+
+    // Helper: accept an SAASSET drop payload and move to destDir.
+    auto acceptDrop = [&](const fs::path& destDir) {
+        if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAASSET")) {
+            const fs::path anchor(static_cast<const char*>(p->Data));
+            if (m_selectedPaths.count(anchor.string()) && m_selectedPaths.size() > 1) {
+                for (const fs::path& f : m_drawOrderFiles)
+                    if (m_selectedPaths.count(f.string()))
+                        MoveAsset(f, destDir);
+                m_selectedPaths.clear();
+            } else {
+                MoveAsset(anchor, destDir);
+            }
+        }
+    };
 
     // Left pane: directory tree
     ImGui::BeginChild("##dirtree", {kLeftW, -kBottomH}, true);
@@ -671,8 +697,10 @@ void AssetsPanel::OnDraw() {
             if (ImGui::BeginMenu("Create")) {
                 if (ImGui::MenuItem("Folder"))             CreateNewDir(m_assetsRoot);
                 ImGui::Separator();
+                if (ImGui::MenuItem("Scene (.sascene)"))   CreateNewFile(CreateKind::Scene,  m_assetsRoot);
                 if (ImGui::MenuItem("Material (.samat)"))  CreateNewFile(CreateKind::Mat,    m_assetsRoot);
                 if (ImGui::MenuItem("Shader (.saglsl)"))   CreateNewFile(CreateKind::Saglsl, m_assetsRoot);
+                if (ImGui::MenuItem("Script (.cs)"))       CreateNewFile(CreateKind::Script, m_assetsRoot);
                 ImGui::EndMenu();
             }
             ImGui::Separator();
@@ -685,6 +713,14 @@ void AssetsPanel::OnDraw() {
         }
     }
     ImGui::EndChild();
+    // Empty-space drop on the left tree → root directory.
+    {
+        const ImRect r(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+        if (ImGui::BeginDragDropTargetCustom(r, ImGui::GetID("##dirtree_bg_dnd"))) {
+            acceptDrop(m_assetsRoot);
+            ImGui::EndDragDropTarget();
+        }
+    }
 
     ImGui::SameLine();
 
@@ -692,6 +728,14 @@ void AssetsPanel::OnDraw() {
     ImGui::BeginChild("##filecontent", {0.f, -kBottomH}, true);
     DrawFilePane();
     ImGui::EndChild();
+    // Empty-space drop on the right pane → current directory.
+    {
+        const ImRect r(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+        if (ImGui::BeginDragDropTargetCustom(r, ImGui::GetID("##filecontent_bg_dnd"))) {
+            acceptDrop(m_selectedDir);
+            ImGui::EndDragDropTarget();
+        }
+    }
 
     // ── Keyboard shortcuts ────────────────────────────────────────────────────
     if (m_input && (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) ||
@@ -701,7 +745,7 @@ void AssetsPanel::OnDraw() {
             for (const auto& p : m_drawOrderFiles)
                 m_selectedPaths.insert(p.string());
             if (!m_selectedPaths.empty()) {
-                m_selectedPath    = m_drawOrderFiles.front();
+                SetSelectedPath(m_drawOrderFiles.front());
                 m_shiftAnchorPath = m_selectedPath.string();
             }
         }
@@ -745,7 +789,7 @@ void AssetsPanel::OnDraw() {
         if (ImGui::Button("Delete", ImVec2(120, 0))) {
             for (const auto& p : m_pendingDeletePaths) { DeletePath(p); m_selectedPaths.erase(p.string()); }
             m_pendingDeletePaths.clear();
-            if (m_selectedPaths.empty()) m_selectedPath.clear();
+            if (m_selectedPaths.empty()) SetSelectedPath({});
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
@@ -764,13 +808,10 @@ void AssetsPanel::OnDraw() {
         if (entered || ImGui::Button("Import", ImVec2(120, 0))) {
             const fs::path src(m_importPathBuf);
             if (fs::exists(src) && fs::is_regular_file(src)) {
-                if (ImportFile(src)) {
-                    SA_LOG_INFO("AssetsPanel: imported '{}'", src.string());
-                    m_importPathBuf[0] = '\0'; m_importModalOpen = false;
-                    ImGui::CloseCurrentPopup();
-                } else {
-                    SA_LOG_WARN("AssetsPanel: import failed for '{}'", src.string());
-                }
+                m_presenter.RequestImportFile(src, GetCurrentDestDir());
+                m_importPathBuf[0] = '\0';
+                m_importModalOpen  = false;
+                ImGui::CloseCurrentPopup();
             }
         }
         ImGui::SameLine();
@@ -824,7 +865,7 @@ static const char* GlyphForExt(const std::string& ext) {
     if (ext == ".sascene")                                 return FA_ICON_SCENE;
     if (ext == ".sanim")                                   return FA_ICON_ANIMATION;
     if (ext == ".saskel")                                  return FA_ICON_SKELETON;
-    if (ext == ".saglsl")                                  return FA_ICON_SCRIPT;
+    if (ext == ".saglsl" || ext == ".cs")                   return FA_ICON_SCRIPT;
     if (ext == ".json"  || ext == ".jsonc")                return FA_ICON_CONFIG;
     return nullptr;
 }
@@ -858,7 +899,7 @@ void AssetsPanel::DrawDirPane(const fs::path& dir) {
         const bool open = ImGui::TreeNodeEx("##dir", flags,
                                             "%s", renaming ? "" : name.c_str());
 
-        if (renaming) {
+        if (renaming && m_renamingFromTree) {
             ImGui::SameLine();
             ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
             if (m_renameFocusNext) { ImGui::SetKeyboardFocusHere(); m_renameFocusNext = false; }
@@ -880,14 +921,17 @@ void AssetsPanel::DrawDirPane(const fs::path& dir) {
                 if (ImGui::BeginMenu("Create")) {
                     if (ImGui::MenuItem("Folder"))            CreateNewDir(entry.path());
                     ImGui::Separator();
+                    if (ImGui::MenuItem("Scene (.sascene)"))  CreateNewFile(CreateKind::Scene,  entry.path());
                     if (ImGui::MenuItem("Material (.samat)")) CreateNewFile(CreateKind::Mat,    entry.path());
                     if (ImGui::MenuItem("Shader (.saglsl)"))  CreateNewFile(CreateKind::Saglsl, entry.path());
+                    if (ImGui::MenuItem("Script (.cs)"))      CreateNewFile(CreateKind::Script, entry.path());
                     ImGui::EndMenu();
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Rename")) {
                     m_renamingPath    = entry.path();
                     m_renameFocusNext = true;
+                    m_renamingFromTree = true;
                     std::snprintf(m_renameNameBuf, sizeof(m_renameNameBuf), "%s", name.c_str());
                 }
                 if (ImGui::MenuItem("Delete")) {
@@ -1006,7 +1050,7 @@ void AssetsPanel::DrawFilePane() {
             if (ctrl) {
                 if (m_selectedPaths.count(pathStr)) m_selectedPaths.erase(pathStr);
                 else                                m_selectedPaths.insert(pathStr);
-                m_selectedPath    = p;
+                SetSelectedPath(p);
                 m_shiftAnchorPath = pathStr;
             } else if (shift && !m_shiftAnchorPath.empty()) {
                 const auto& ord = m_drawOrderFiles;
@@ -1021,13 +1065,13 @@ void AssetsPanel::DrawFilePane() {
                 } else {
                     m_selectedPaths = { pathStr };
                 }
-                m_selectedPath = p;
+                SetSelectedPath(p);
             } else {
                 if (m_selectedPaths.count(pathStr) && m_selectedPaths.size() > 1)
                     m_pendingDeselectOtherPath = pathStr;
                 else {
                     m_selectedPaths   = { pathStr };
-                    m_selectedPath    = p;
+                    SetSelectedPath(p);
                     m_shiftAnchorPath = pathStr;
                 }
             }
@@ -1057,14 +1101,17 @@ void AssetsPanel::DrawFilePane() {
                 if (ImGui::BeginMenu("Create")) {
                     if (ImGui::MenuItem("Folder"))            CreateNewDir(p);
                     ImGui::Separator();
+                    if (ImGui::MenuItem("Scene (.sascene)"))  CreateNewFile(CreateKind::Scene,  p);
                     if (ImGui::MenuItem("Material (.samat)")) CreateNewFile(CreateKind::Mat,    p);
                     if (ImGui::MenuItem("Shader (.saglsl)"))  CreateNewFile(CreateKind::Saglsl, p);
+                    if (ImGui::MenuItem("Script (.cs)"))      CreateNewFile(CreateKind::Script, p);
                     ImGui::EndMenu();
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Rename")) {
-                    m_renamingPath    = p;
-                    m_renameFocusNext = true;
+                    m_renamingPath     = p;
+                    m_renameFocusNext  = true;
+                    m_renamingFromTree = false;
                     std::snprintf(m_renameNameBuf, sizeof(m_renameNameBuf), "%s", name.c_str());
                 }
                 if (ImGui::MenuItem("Delete")) {
@@ -1074,6 +1121,21 @@ void AssetsPanel::DrawFilePane() {
                 ImGui::Separator();
                 if (ImGui::MenuItem("Reimport All in Folder")) ReimportDir(p);
                 ImGui::EndPopup();
+            }
+            // Drop target: drag assets onto a folder in the right pane
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("SAASSET")) {
+                    const fs::path anchor(static_cast<const char*>(payload->Data));
+                    if (m_selectedPaths.count(anchor.string()) && m_selectedPaths.size() > 1) {
+                        for (const fs::path& f : m_drawOrderFiles)
+                            if (m_selectedPaths.count(f.string()))
+                                MoveAsset(f, p);
+                        m_selectedPaths.clear();
+                    } else {
+                        MoveAsset(anchor, p);
+                    }
+                }
+                ImGui::EndDragDropTarget();
             }
         } else {
             const std::string ext = p.extension().string();
@@ -1103,8 +1165,9 @@ void AssetsPanel::DrawFilePane() {
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Rename")) {
-                    m_renamingPath    = p;
-                    m_renameFocusNext = true;
+                    m_renamingPath     = p;
+                    m_renameFocusNext  = true;
+                    m_renamingFromTree = false;
                     std::snprintf(m_renameNameBuf, sizeof(m_renameNameBuf),
                                   "%s", p.stem().string().c_str());
                 }
@@ -1150,13 +1213,28 @@ void AssetsPanel::DrawFilePane() {
                 const std::string name    = p.filename().string();
                 const std::string ext     = p.extension().string();
                 const bool sel  = m_selectedPaths.count(pathStr) > 0;
-                const bool isRen = (p == m_renamingPath);
+                const bool isRen = (p == m_renamingPath) && !m_renamingFromTree;
 
                 ImGui::PushID(pathStr.c_str());
-                if (isRen) { drawRename(ImGui::GetContentRegionAvail().x); ImGui::PopID(); continue; }
+                const ImVec2 rowMin = ImGui::GetCursorScreenPos();
+                if (isRen) {
+                    const float availW = ImGui::GetContentRegionAvail().x;
+                    ImGui::Selectable("##item", sel, ImGuiSelectableFlags_AllowOverlap,
+                                      ImVec2(0.f, rowH));
+                    const float vci = rowMin.y + (rowH - iconSz) * 0.5f;
+                    drawIcon(p, isDir, getThumb(p, isDir), {rowMin.x + 2.f, vci}, iconSz);
+                    const ImVec2 afterRow = ImGui::GetCursorScreenPos();
+                    ImGui::SetCursorScreenPos(
+                        {rowMin.x + 2.f + iconSz + 4.f,
+                         rowMin.y + (rowH - ImGui::GetFrameHeight()) * 0.5f});
+                    drawRename(std::max(1.f, availW - (iconSz + 6.f)));
+                    ImGui::SetCursorScreenPos(afterRow);
+                    ImGui::Dummy(ImVec2(0.f, 0.f));  // tell ImGui about the boundary
+                    ImGui::PopID();
+                    continue;
+                }
 
                 m_drawOrderFilesBuild.push_back(p);
-                const ImVec2 rowMin = ImGui::GetCursorScreenPos();
                 ImGui::Selectable("##item", sel, 0, ImVec2(0.f, rowH));
                 handleItem(p, pathStr, name, isDir);
 
@@ -1210,14 +1288,34 @@ void AssetsPanel::DrawFilePane() {
                     const std::string name    = p.filename().string();
                     const std::string ext     = p.extension().string();
                     const bool sel   = m_selectedPaths.count(pathStr) > 0;
-                    const bool isRen = (p == m_renamingPath);
+                    const bool isRen = (p == m_renamingPath) && !m_renamingFromTree;
 
                     ImGui::PushID(pathStr.c_str());
-                    if (isRen) { drawRename(cardW); ImGui::PopID(); continue; }
-
-                    m_drawOrderFilesBuild.push_back(p);
                     const ImVec2 cardMin = ImGui::GetCursorScreenPos();
                     const ImVec2 cardMax = {cardMin.x + cardW, cardMin.y + cardH};
+                    if (isRen) {
+                        // BeginGroup so EndGroup emits the correct {cardW,cardH} item,
+                        // keeping SameLine alignment for subsequent columns.
+                        ImGui::BeginGroup();
+                        ImGui::InvisibleButton("##card", ImVec2(cardW, cardH));
+                        if (sel)
+                            dl->AddRectFilled(cardMin, cardMax,
+                                              ImGui::GetColorU32(ImGuiCol_Header), 4.f);
+                        dl->AddRect(cardMin, cardMax, borderU32, 4.f);
+                        drawIcon(p, isDir, getThumb(p, isDir),
+                                 {cardMin.x + cardPad, cardMin.y + cardPad}, iconSz);
+                        const ImVec2 afterCard = ImGui::GetCursorScreenPos();
+                        ImGui::SetCursorScreenPos(
+                            {cardMin.x + 2.f, cardMin.y + cardPad + iconSz + 4.f});
+                        drawRename(cardW - 4.f);
+                        ImGui::SetCursorScreenPos(afterCard);
+                        ImGui::Dummy(ImVec2(0.f, 0.f));  // tell ImGui about the boundary
+                        ImGui::EndGroup();
+                        ImGui::PopID();
+                        continue;
+                    }
+
+                    m_drawOrderFilesBuild.push_back(p);
                     ImGui::InvisibleButton("##card", ImVec2(cardW, cardH));
                     const bool hov = ImGui::IsItemHovered();
                     handleItem(p, pathStr, name, isDir);
@@ -1250,120 +1348,6 @@ void AssetsPanel::DrawFilePane() {
         }
         clipper.End();
     }
-}
-
-void AssetsPanel::ProcessImportQueue() {
-    for (const auto& path : m_dropQueue) {
-        if (fs::exists(path) && fs::is_regular_file(path)) {
-            if (ImportFile(path))
-                SA_LOG_INFO("AssetsPanel: imported (drop) '{}'", path.string());
-            else
-                SA_LOG_WARN("AssetsPanel: import failed (drop) '{}'", path.string());
-        }
-    }
-    m_dropQueue.clear();
-}
-
-// Copy .bin buffers and external image files referenced by a .gltf into destDir.
-static void CopyGltfCompanions(const fs::path& gltfSrc, const fs::path& destDir) {
-    std::ifstream f(gltfSrc);
-    if (!f) return;
-
-    using json = nlohmann::json;
-    json j;
-    try { f >> j; } catch (...) { return; }
-
-    const fs::path srcDir = gltfSrc.parent_path();
-    std::error_code ec;
-
-    auto copyRef = [&](const std::string& uri) {
-        if (uri.empty() || uri.starts_with("data:") || uri.find("://") != std::string::npos)
-            return;
-        const fs::path src = srcDir / uri;
-        const fs::path dst = destDir / fs::path(uri).filename();
-        if (fs::exists(src) && !fs::exists(dst)) {
-            fs::copy_file(src, dst, ec);
-            if (!ec)
-                SA_LOG_INFO("AssetsPanel: copied companion '{}'", fs::path(uri).filename().string());
-            else
-                SA_LOG_WARN("AssetsPanel: failed to copy companion '{}': {}",
-                            fs::path(uri).filename().string(), ec.message());
-        }
-    };
-
-    if (j.contains("buffers"))
-        for (const auto& buf : j["buffers"])
-            if (buf.contains("uri") && buf["uri"].is_string())
-                copyRef(buf["uri"].get<std::string>());
-
-    if (j.contains("images"))
-        for (const auto& img : j["images"])
-            if (img.contains("uri") && img["uri"].is_string())
-                copyRef(img["uri"].get<std::string>());
-}
-
-bool AssetsPanel::ImportFile(const fs::path& srcPath) {
-    const std::string type = AssetTypeFromExt(srcPath.extension());
-    if (type.empty()) {
-        SA_LOG_WARN("AssetsPanel: unsupported file type '{}'", srcPath.extension().string());
-        return false;
-    }
-
-    // Import into the currently selected directory; fall back to assets root.
-    std::error_code ec;
-    fs::path destDir = m_assetsRoot;
-    if (!m_selectedPath.empty()) {
-        destDir = fs::is_directory(m_selectedPath, ec)
-                      ? m_selectedPath
-                      : m_selectedPath.parent_path();
-    }
-
-    const fs::path destPath = destDir / srcPath.filename();
-
-    // Already inside assets/ — ensure meta + cook, no copy needed.
-    {
-        const fs::path canonical = fs::weakly_canonical(srcPath, ec);
-        const fs::path root      = fs::weakly_canonical(m_assetsRoot, ec);
-        if (!ec) {
-            const auto mismatch = std::mismatch(root.begin(), root.end(), canonical.begin());
-            if (mismatch.first == root.end()) {
-                const Import::AssetEntry entry = MakeAndSaveMeta(canonical, type);
-                CookEntry(entry, m_cookCacheDir);
-                if (m_registry) m_registry->Scan(m_assetsRoot, {});
-                if (m_onImport) m_onImport();
-                return true;
-            }
-        }
-    }
-
-    if (!fs::exists(destPath)) {
-        fs::copy_file(srcPath, destPath, ec);
-        if (ec) {
-            SA_LOG_WARN("AssetsPanel: copy failed '{}' → '{}': {}",
-                        srcPath.string(), destPath.string(), ec.message());
-            return false;
-        }
-    }
-
-    // For .gltf files, copy companion .bin and external image files alongside.
-    {
-        std::string ext = srcPath.extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(),
-                       [](unsigned char c){ return static_cast<char>(::tolower(c)); });
-        if (ext == ".gltf")
-            CopyGltfCompanions(srcPath, destDir);
-    }
-
-    const Import::AssetEntry entry = MakeAndSaveMeta(destPath, type);
-    if (!entry.meta.IsValid()) {
-        SA_LOG_WARN("AssetsPanel: could not write .sameta for '{}'", destPath.string());
-        return false;
-    }
-    CookEntry(entry, m_cookCacheDir);
-
-    if (m_registry) m_registry->Scan(m_assetsRoot, {});
-    if (m_onImport) m_onImport();
-    return true;
 }
 
 // Scan assetsRoot for the .saglsl whose @ShadingModel matches typeName.

@@ -16,10 +16,10 @@ namespace StellarAlia::Editor {
 
 namespace fs = std::filesystem;
 
-ProjectBrowserPanel::ProjectBrowserPanel(ProjectManager& mgr,
-                                          const fs::path& engineAssetsDir)
-    : m_mgr(mgr)
-    , m_engineAssetsDir(engineAssetsDir)
+ProjectBrowserPanel::ProjectBrowserPanel(EditorContext& ctx, ProjectBrowserPresenter& presenter)
+    : m_presenter(presenter)
+    , m_mgr(*ctx.projectMgr)
+    , m_onSelected(ctx.onProjectSelected)
 {}
 
 void ProjectBrowserPanel::OnDraw() {
@@ -52,6 +52,22 @@ void ProjectBrowserPanel::DrawModal() {
 }
 
 void ProjectBrowserPanel::DrawCreateSection() {
+    // Consume create result from previous frame.
+    {
+        fs::path created;
+        if (m_presenter.ConsumeCreateSuccess(created)) {
+            m_statusMessage.clear();
+            ImGui::CloseCurrentPopup();
+            if (m_onSelected) m_onSelected(created);
+            return;
+        }
+        std::string err;
+        if (m_presenter.ConsumeCreateError(err)) {
+            m_statusMessage = std::move(err);
+            m_statusIsError = true;
+        }
+    }
+
     if (!ImGui::CollapsingHeader("Create New Project", ImGuiTreeNodeFlags_DefaultOpen))
         return;
 
@@ -76,18 +92,8 @@ void ProjectBrowserPanel::DrawCreateSection() {
     ImGui::BeginDisabled(!canCreate);
     const float btnW = 140.f;
     ImGui::SetCursorPosX(ImGui::GetContentRegionAvail().x - btnW + ImGui::GetCursorPosX());
-    if (ImGui::Button("Create Project", ImVec2(btnW, 0))) {
-        const fs::path saproject = ProjectManager::CreateProject(
-            fs::path(m_newDir), m_newName, m_selectedTmpl, m_engineAssetsDir);
-        if (saproject.empty()) {
-            m_statusMessage = "Failed to create project — check the log for details.";
-            m_statusIsError = true;
-        } else {
-            m_statusMessage.clear();
-            ImGui::CloseCurrentPopup();
-            if (m_onSelected) m_onSelected(saproject);
-        }
-    }
+    if (ImGui::Button("Create Project", ImVec2(btnW, 0)))
+        m_presenter.RequestCreateProject(fs::path(m_newDir), m_newName, m_selectedTmpl);
     ImGui::EndDisabled();
 
     if (!m_statusMessage.empty()) {

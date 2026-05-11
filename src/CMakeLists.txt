@@ -65,8 +65,6 @@ if(NOT ALL_RUNTIME_SOURCES)
     message(STATUS "StellarAliaRuntime: Using placeholder source file. Add implementation files to remove it.")
 endif()
 
-# Create static library for foundation runtime
-# Headers are included so they're part of the library target
 add_library(StellarAliaRuntime STATIC ${ALL_RUNTIME_SOURCES})
 
 # Set library properties
@@ -74,18 +72,6 @@ set_target_properties(StellarAliaRuntime PROPERTIES
     OUTPUT_NAME "StellarAliaRuntime"
     VERSION ${PROJECT_VERSION}
 )
-
-# Platform-specific export settings
-if(MSVC)
-    set_target_properties(StellarAliaRuntime PROPERTIES
-        WINDOWS_EXPORT_ALL_SYMBOLS ON
-    )
-else()
-    set_target_properties(StellarAliaRuntime PROPERTIES
-        CXX_VISIBILITY_PRESET hidden
-        VISIBILITY_INLINES_HIDDEN ON
-    )
-endif()
 
 # Set public include directory for the library
 # Headers can be included from src/ directory
@@ -164,5 +150,21 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/third_party/VulkanSDK/include/vulkan/vulkan.h)
     # Volk calls LoadLibrary("vulkan-1.dll") / dlopen("libvulkan.so") internally.
 else()
     message(WARNING "VulkanSDK not found. Vulkan support may not work.")
+endif()
+
+# nethost — for C# scripting (ScriptSystem.cpp uses nethost_get_hostfxr_path)
+set(NETHOST_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/third_party/nethost)
+set(NETHOST_LIB_DIR     ${CMAKE_SOURCE_DIR}/lib/nethost)
+if(WIN32)
+    set(NETHOST_LIB ${NETHOST_LIB_DIR}/nethost.lib)
+else()
+    set(NETHOST_LIB ${NETHOST_LIB_DIR}/libnethost.a)
+endif()
+if(EXISTS ${NETHOST_LIB})
+    target_include_directories(StellarAliaRuntime PRIVATE ${NETHOST_INCLUDE_DIR})
+    target_link_libraries(StellarAliaRuntime PRIVATE ${NETHOST_LIB})
+    message(STATUS "nethost found: ${NETHOST_LIB}")
+else()
+    message(WARNING "nethost library not found at ${NETHOST_LIB} — C# scripting disabled")
 endif()
 

@@ -1,14 +1,13 @@
 #include "ui/panels/SceneHierarchyPanel.hpp"
+#include "EditorSelection.hpp"
+#include "command/CommandManager.hpp"
+#include "command/commands/EntityCommands.hpp"
 
 #include "function/scene/Scene.hpp"
 #include "function/scene/Components.hpp"
-#include "function/scene/EntityFactory.hpp"
-#include "function/scene/SceneSerializer.hpp"
 #include "function/input/InputSystem.hpp"
 #include "resource/AssetRegistry.hpp"
 #include "resource/EntityTemplateRegistry.hpp"
-#include "core/asset/AssetID.hpp"
-#include "core/logs/Log.hpp"
 
 #include <imgui.h>
 #include <entt/entt.hpp>
@@ -22,108 +21,21 @@ namespace fs = std::filesystem;
 
 namespace StellarAlia::Editor {
 
-void SceneHierarchyPanel::SetRegistry(const Resource::AssetRegistry* registry) {
-    m_registry = registry;
-}
-void SceneHierarchyPanel::SetTemplateRegistry(const EntityTemplateRegistry* tmplRegistry) {
-    m_tmplRegistry = tmplRegistry;
-}
-void SceneHierarchyPanel::SetSceneLoadCallback(SceneLoadCallback cb) {
-    m_onSceneLoad = std::move(cb);
-}
-void SceneHierarchyPanel::SetFocusEntityCallback(FocusEntityCallback cb) {
-    m_onFocusEntity = std::move(cb);
-}
-
-// ── Hierarchy helpers ──────────────────────────────────────────────────────────
-
-// Returns true if 'candidate' is equal to 'subtreeRoot' or is a descendant of it.
-static bool IsInSubtree(entt::entity candidate, entt::entity subtreeRoot,
-                        const entt::registry& reg) {
-    if (candidate == subtreeRoot) return true;
-    const auto* hc = reg.try_get<HierarchyComponent>(subtreeRoot);
-    if (!hc) return false;
-    for (entt::entity child : hc->children)
-        if (IsInSubtree(candidate, child, reg)) return true;
-    return false;
-}
-
-// Move 'child' to immediately before 'beforeSibling' in their shared parent's list.
-static void MoveChildBefore(entt::entity child, entt::entity beforeSibling,
-                             entt::registry& reg) {
-    entt::entity parent = entt::null;
-    if (const auto* hc = reg.try_get<HierarchyComponent>(child))
-        parent = hc->parent;
-    if (parent == entt::null) return;
-    auto* phc = reg.try_get<HierarchyComponent>(parent);
-    if (!phc) return;
-    auto& ch = phc->children;
-    auto it = std::find(ch.begin(), ch.end(), child);
-    if (it == ch.end()) return;
-    ch.erase(it);
-    auto tgt = std::find(ch.begin(), ch.end(), beforeSibling);
-    ch.insert(tgt != ch.end() ? tgt : ch.end(), child);
-}
-
-// Move 'child' to immediately after 'afterSibling' in their shared parent's list.
-static void MoveChildAfter(entt::entity child, entt::entity afterSibling,
-                            entt::registry& reg) {
-    entt::entity parent = entt::null;
-    if (const auto* hc = reg.try_get<HierarchyComponent>(child))
-        parent = hc->parent;
-    if (parent == entt::null) return;
-    auto* phc = reg.try_get<HierarchyComponent>(parent);
-    if (!phc) return;
-    auto& ch = phc->children;
-    auto it = std::find(ch.begin(), ch.end(), child);
-    if (it == ch.end()) return;
-    ch.erase(it);
-    auto tgt = std::find(ch.begin(), ch.end(), afterSibling);
-    ch.insert(tgt != ch.end() ? std::next(tgt) : ch.end(), child);
-}
-
-// ── DuplicateEntity ────────────────────────────────────────────────────────────
-entt::entity SceneHierarchyPanel::DuplicateEntity(entt::entity src) {
-    auto& reg = m_scene->Registry();
-
-    const auto& srcTag = reg.get<TagComponent>(src);
-    entt::entity dst = m_scene->CreateEntity(srcTag.name + " (Copy)");
-
-    if (auto* t  = reg.try_get<TransformComponent>(src))        reg.emplace_or_replace<TransformComponent>(dst, *t);
-    if (auto* c  = reg.try_get<CameraComponent>(src))           reg.emplace_or_replace<CameraComponent>(dst, *c);
-    if (auto* dl = reg.try_get<DirectionalLightComponent>(src)) reg.emplace_or_replace<DirectionalLightComponent>(dst, *dl);
-    if (auto* pl = reg.try_get<PointLightComponent>(src))       reg.emplace_or_replace<PointLightComponent>(dst, *pl);
-    if (auto* sl = reg.try_get<SpotLightComponent>(src))        reg.emplace_or_replace<SpotLightComponent>(dst, *sl);
-    if (auto* al = reg.try_get<AreaLightComponent>(src))        reg.emplace_or_replace<AreaLightComponent>(dst, *al);
-    if (auto* sm = reg.try_get<StaticMeshComponent>(src))       reg.emplace_or_replace<StaticMeshComponent>(dst, *sm);
-    if (auto* mr = reg.try_get<MeshRendererComponent>(src))     reg.emplace_or_replace<MeshRendererComponent>(dst, *mr);
-    if (auto* mo = reg.try_get<MaterialOverrideComponent>(src)) reg.emplace_or_replace<MaterialOverrideComponent>(dst, *mo);
-    if (auto* an = reg.try_get<AnimatorComponent>(src))         reg.emplace_or_replace<AnimatorComponent>(dst, *an);
-    if (auto* sk = reg.try_get<SkinnedMeshComponent>(src)) {
-        SkinnedMeshComponent skCopy{};
-        skCopy.meshAsset = sk->meshAsset;   // GPU handles re-allocated by PrepareEntity
-        reg.emplace_or_replace<SkinnedMeshComponent>(dst, skCopy);
-        m_scene->MarkSkinnedMeshDirty();
+// ── SyncSelectionToCtx ───────────────────────────────────────────────────────
+void SceneHierarchyPanel::SyncSelectionToCtx() {
+    if (!m_selectionCtx) return;
+    if (m_primarySelected == ~0u || m_selection.empty()) {
+        m_selectionCtx->Clear();
+        return;
     }
-    if (auto* rb = reg.try_get<RigidBodyComponent>(src)) {
-        RigidBodyComponent rbCopy = *rb;
-        rbCopy.bodyId = ~0u;
-        reg.emplace_or_replace<RigidBodyComponent>(dst, rbCopy);
-    }
-    if (auto* col = reg.try_get<ColliderComponent>(src))        reg.emplace_or_replace<ColliderComponent>(dst, *col);
-    if (reg.any_of<StaticGeometryTag>(src))                     reg.emplace_or_replace<StaticGeometryTag>(dst);
-
-    // Recursively duplicate children and re-parent under dst
-    const auto* hc = reg.try_get<HierarchyComponent>(src);
-    if (hc) {
-        std::vector<entt::entity> srcChildren = hc->children;
-        for (entt::entity child : srcChildren) {
-            entt::entity childDst = DuplicateEntity(child);
-            m_scene->SetParent(childDst, dst);
-        }
-    }
-
-    return dst;
+    // Build entity list with primary entity first so SelectEntities sets it as primary.
+    std::vector<entt::entity> ents;
+    ents.reserve(m_selection.size());
+    ents.push_back(static_cast<entt::entity>(m_primarySelected));
+    for (uint32_t b : m_selection)
+        if (b != m_primarySelected)
+            ents.push_back(static_cast<entt::entity>(b));
+    m_selectionCtx->SelectEntities(ents);
 }
 
 // ── SelectRange ───────────────────────────────────────────────────────────────
@@ -180,14 +92,32 @@ void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
                                              ImGuiInputTextFlags_EnterReturnsTrue
                                              | ImGuiInputTextFlags_AutoSelectAll);
         const bool lost = ImGui::IsItemDeactivated();
-        if (commit) {
-            reg.get<TagComponent>(entity).name = m_renameBuffer;
+        auto commitRename = [&]() {
+            std::string oldName = reg.get<TagComponent>(entity).name;
+            std::string newName = m_renameBuffer;
+            if (oldName != newName) {
+                if (m_cmdMgr && m_scene) {
+                    EditorContext tmpCtx{};
+                    tmpCtx.registry = &reg;
+                    tmpCtx.scene    = m_scene;
+                    tmpCtx.cmdMgr   = m_cmdMgr;
+                    m_cmdMgr->Execute(
+                        std::make_unique<RenameEntityCommand>(entity, std::move(oldName), std::move(newName)),
+                        tmpCtx);
+                } else {
+                    reg.get<TagComponent>(entity).name = std::move(newName);
+                }
+            }
             m_renamingEntity = ~0u;
+        };
+        if (commit) {
+            commitRename();
         } else if (lost) {
             // Click-away → commit; Escape → discard
             if (!ImGui::IsKeyDown(ImGuiKey_Escape))
-                reg.get<TagComponent>(entity).name = m_renameBuffer;
-            m_renamingEntity = ~0u;
+                commitRename();
+            else
+                m_renamingEntity = ~0u;
         }
     } else {
         // ── Normal interaction ─────────────────────────────────────────────────
@@ -199,9 +129,11 @@ void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
                 else                          m_selection.insert(ebits);
                 m_primarySelected = ebits;
                 m_shiftAnchor     = ebits;
+                SyncSelectionToCtx();
             } else if (shiftHeld && m_shiftAnchor != ~0u) {
                 SelectRange(ebits);
                 m_primarySelected = ebits;
+                SyncSelectionToCtx();
             } else {
                 if (m_selection.count(ebits) && m_selection.size() > 1)
                     m_pendingDeselectOthers = ebits;
@@ -209,6 +141,7 @@ void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
                     m_selection       = { ebits };
                     m_primarySelected = ebits;
                     m_shiftAnchor     = ebits;
+                    SyncSelectionToCtx();
                 }
             }
         }
@@ -219,6 +152,7 @@ void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
             m_shiftAnchor     = ebits;
             m_dblClickEntity  = ebits;
             m_dblClick.OnDoubleClicked();
+            SyncSelectionToCtx();
         }
 
         // ── Right-click context menu ───────────────────────────────────────────
@@ -229,6 +163,7 @@ void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
                 m_selection       = { ebits };
                 m_primarySelected = ebits;
                 m_shiftAnchor     = ebits;
+                SyncSelectionToCtx();
             }
 
             if (ImGui::MenuItem("Rename\tF2")) {
@@ -238,9 +173,8 @@ void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
                 std::snprintf(m_renameBuffer, sizeof(m_renameBuffer), "%s", name);
             }
             if (ImGui::BeginMenu("Create Child")) {
-                if (ImGui::MenuItem("Empty Entity")) {
-                    m_pendingCreate = { CreateOp::Empty, {}, entity };
-                }
+                if (ImGui::MenuItem("Empty Entity"))
+                    m_presenter.RequestCreate(SceneHierarchyPresenter::CreateOp::Empty, {}, entity);
                 if (m_tmplRegistry) {
                     std::string lastCategory;
                     for (const auto& entry : m_tmplRegistry->Entries()) {
@@ -250,17 +184,18 @@ void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
                             lastCategory = entry.category;
                         }
                         if (ImGui::MenuItem(entry.label.c_str()))
-                            m_pendingCreate = { CreateOp::Template, entry.path, entity };
+                            m_presenter.RequestCreate(SceneHierarchyPresenter::CreateOp::Template,
+                                                      entry.path, entity);
                     }
                 }
                 ImGui::EndMenu();
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Duplicate\tCtrl+D"))
-                m_pendingDuplicates.push_back(entity);
+                m_presenter.RequestDuplicate({ entity });
             ImGui::Separator();
             if (ImGui::MenuItem("Delete\tDel"))
-                m_pendingDeletes.push_back(entity);
+                m_presenter.RequestDelete({ entity });
 
             ImGui::EndPopup();
         }
@@ -285,18 +220,19 @@ void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
             const float h       = itemBot - itemTop;
             const float mouseY  = ImGui::GetMousePos().y;
 
-            DnDOp::Mode zone =
-                (mouseY < itemTop + h * 0.3f) ? DnDOp::BeforeSibling :
-                (mouseY > itemBot - h * 0.3f) ? DnDOp::AfterSibling  :
-                                                 DnDOp::AsChild;
+            using DnDMode = SceneHierarchyPresenter::DnDMode;
+            DnDMode zone =
+                (mouseY < itemTop + h * 0.3f) ? DnDMode::BeforeSibling :
+                (mouseY > itemBot - h * 0.3f) ? DnDMode::AfterSibling  :
+                                                 DnDMode::AsChild;
 
             auto*       dl      = ImGui::GetWindowDrawList();
             const ImU32 lineCol = IM_COL32(80, 160, 255, 220);
             const float x0      = ImGui::GetItemRectMin().x;
             const float x1      = ImGui::GetItemRectMax().x;
-            if (zone == DnDOp::BeforeSibling)
+            if (zone == DnDMode::BeforeSibling)
                 dl->AddLine({x0, itemTop}, {x1, itemTop}, lineCol, 2.f);
-            else if (zone == DnDOp::AfterSibling)
+            else if (zone == DnDMode::AfterSibling)
                 dl->AddLine({x0, itemBot}, {x1, itemBot}, lineCol, 2.f);
 
             if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAENTITY")) {
@@ -309,12 +245,12 @@ void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
                 } else {
                     list = { static_cast<entt::entity>(bits) };
                 }
-                m_pendingDnD = { std::move(list), entity, zone, true };
+                m_presenter.RequestReparent(std::move(list), entity, zone);
             }
             if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAASSET")) {
-                m_pendingAssetDrop = {
+                m_presenter.RequestAssetDrop({
                     fs::path(static_cast<const char*>(p->Data)), entity, {}, true
-                };
+                });
             }
             ImGui::EndDragDropTarget();
         }
@@ -332,11 +268,11 @@ void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
 }
 
 void SceneHierarchyPanel::RequestCreateEmpty() {
-    m_pendingCreate = { CreateOp::Empty, {}, entt::null };
+    m_presenter.RequestCreate(SceneHierarchyPresenter::CreateOp::Empty, {}, entt::null);
 }
 
 void SceneHierarchyPanel::RequestSpawnTemplate(const fs::path& templatePath) {
-    m_pendingCreate = { CreateOp::Template, templatePath, entt::null };
+    m_presenter.RequestCreate(SceneHierarchyPresenter::CreateOp::Template, templatePath, entt::null);
 }
 
 void SceneHierarchyPanel::SetSelection(entt::entity e) {
@@ -344,21 +280,34 @@ void SceneHierarchyPanel::SetSelection(entt::entity e) {
     m_primarySelected = static_cast<uint32_t>(e);
     m_selection.insert(m_primarySelected);
     m_shiftAnchor = m_primarySelected;
+    if (m_selectionCtx) m_selectionCtx->SelectEntity(e);
 }
 
 void SceneHierarchyPanel::ClearSelection() {
     m_selection.clear();
     m_primarySelected = ~0u;
     m_shiftAnchor     = ~0u;
+    if (m_selectionCtx) m_selectionCtx->Clear();
 }
 
 void SceneHierarchyPanel::TriggerAssetDrop(const fs::path& assetPath, const glm::vec3& spawnPos) {
-    m_pendingAssetDrop = { assetPath, entt::null, spawnPos, true };
+    m_presenter.RequestAssetDrop({ assetPath, entt::null, spawnPos, true });
 }
 
 // ── OnDraw ─────────────────────────────────────────────────────────────────────
 void SceneHierarchyPanel::OnDraw() {
     auto& reg = m_scene->Registry();
+
+    // Sync local selection mirror from EditorSelection (picks up presenter mutations).
+    if (m_selectionCtx) {
+        if (m_selectionCtx->GetType() == EditorSelectionType::Entity) {
+            m_selection = m_selectionCtx->GetEntitySet();
+            const entt::entity prim = m_selectionCtx->GetPrimaryEntity();
+            m_primarySelected = (prim != entt::null) ? static_cast<uint32_t>(prim) : ~0u;
+        } else if (m_selection.empty()) {
+            // Nothing changed by presenter; don't clobber user's selection mid-drag.
+        }
+    }
 
     // ── Double-click result (short = focus, long = rename) ─────────────────────
     {
@@ -380,11 +329,10 @@ void SceneHierarchyPanel::OnDraw() {
         }
     }
 
-    // ── Create-entity popup (triggered by menu bar or background right-click) ──
-    // Shared lambda so both triggers show identical items.
+    // Shared lambda — create menu items for both toolbar and background right-click.
     auto drawCreateItems = [&]() {
         if (ImGui::MenuItem("Empty Entity"))
-            m_pendingCreate = { CreateOp::Empty, {}, entt::null };
+            m_presenter.RequestCreate(SceneHierarchyPresenter::CreateOp::Empty, {}, entt::null);
         if (m_tmplRegistry) {
             std::string lastCategory;
             for (const auto& entry : m_tmplRegistry->Entries()) {
@@ -394,7 +342,8 @@ void SceneHierarchyPanel::OnDraw() {
                     lastCategory = entry.category;
                 }
                 if (ImGui::MenuItem(entry.label.c_str()))
-                    m_pendingCreate = { CreateOp::Template, entry.path, entt::null };
+                    m_presenter.RequestCreate(SceneHierarchyPresenter::CreateOp::Template,
+                                              entry.path, entt::null);
             }
         }
     };
@@ -406,17 +355,16 @@ void SceneHierarchyPanel::OnDraw() {
         m_primarySelected     = bits;
         m_shiftAnchor         = bits;
         m_pendingDeselectOthers = ~0u;
+        SyncSelectionToCtx();
     }
 
     // ── Entity tree ────────────────────────────────────────────────────────────
     m_drawOrderBuild.clear();
-    auto view = reg.view<TagComponent>();
-    for (auto entity : view) {
-        const auto* hc = reg.try_get<HierarchyComponent>(entity);
-        if (hc && hc->parent != entt::null) continue;
-        DrawNode(entity, reg);
+    for (entt::entity entity : m_scene->GetRootOrder()) {
+        if (reg.valid(entity))
+            DrawNode(entity, reg);
     }
-    m_drawOrder = m_drawOrderBuild;  // make this frame's order available next frame
+    m_drawOrder = m_drawOrderBuild;
 
     // Click on empty space → deselect
     if (ImGui::IsMouseClicked(0) && ImGui::IsWindowHovered()
@@ -424,12 +372,10 @@ void SceneHierarchyPanel::OnDraw() {
         m_selection.clear();
         m_primarySelected = ~0u;
         m_shiftAnchor     = ~0u;
+        if (m_selectionCtx) m_selectionCtx->Clear();
     }
 
-    // Empty-area InvisibleButton: handles both right-click (create) and
-    // drag-drop (detach to root). Using BeginPopupContextWindow+NoOpenOverItems
-    // was broken because the InvisibleButton itself blocked the flag on the
-    // next frame, so both are now attached to the same item.
+    // Empty-area InvisibleButton: handles right-click (create) and entity DnD (detach to root).
     {
         const float h = std::max(ImGui::GetContentRegionAvail().y, 4.f);
         ImGui::InvisibleButton("##hier_bg_zone", ImVec2(-1.f, h));
@@ -450,18 +396,19 @@ void SceneHierarchyPanel::OnDraw() {
                 } else {
                     list = { static_cast<entt::entity>(bits) };
                 }
-                m_pendingDnD = { std::move(list), entt::null, DnDOp::AsChild, true };
+                m_presenter.RequestReparent(std::move(list), entt::null,
+                                            SceneHierarchyPresenter::DnDMode::AsChild);
             }
             if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAASSET")) {
-                m_pendingAssetDrop = {
+                m_presenter.RequestAssetDrop({
                     fs::path(static_cast<const char*>(p->Data)), entt::null, {}, true
-                };
+                });
             }
             ImGui::EndDragDropTarget();
         }
     }
 
-    // ── Keyboard shortcuts via InputSystem ────────────────────────────────────
+    // ── Keyboard shortcuts ────────────────────────────────────────────────────
     const bool wantInput = (ImGui::IsWindowFocused() || ImGui::IsWindowHovered())
                          && m_renamingEntity == ~0u;
     if (wantInput) {
@@ -469,17 +416,13 @@ void SceneHierarchyPanel::OnDraw() {
             m_selection.clear();
             for (auto entity : reg.view<TagComponent>())
                 m_selection.insert(static_cast<uint32_t>(entity));
-            if (!m_selection.empty())
+            if (!m_selection.empty()) {
                 m_primarySelected = *m_selection.begin();
+                SyncSelectionToCtx();
+            }
         } else if (!m_selection.empty()) {
-            if (m_input->WasActivated("EntityDelete")) {
-                for (uint32_t bits : m_selection)
-                    m_pendingDeletes.push_back(static_cast<entt::entity>(bits));
-            }
-            if (m_input->WasActivated("EntityDuplicate")) {
-                for (uint32_t bits : m_selection)
-                    m_pendingDuplicates.push_back(static_cast<entt::entity>(bits));
-            }
+            // EntityDelete and EntityDuplicate are dispatched globally via
+            // EditorActionRegistry::PollAndDispatch; no panel-local handling needed.
             if (m_input->WasActivated("EntityRename") && m_primarySelected != ~0u) {
                 auto sel = static_cast<entt::entity>(m_primarySelected);
                 if (reg.valid(sel)) {
@@ -487,154 +430,6 @@ void SceneHierarchyPanel::OnDraw() {
                     m_renameFocusNext = true;
                     auto& t = reg.get<TagComponent>(sel);
                     std::snprintf(m_renameBuffer, sizeof(m_renameBuffer), "%s", t.name.c_str());
-                }
-            }
-        }
-    }
-
-    // ── Execute deferred operations ────────────────────────────────────────────
-
-    if (m_pendingCreate.kind != CreateOp::None) {
-        CreateOp op = std::move(m_pendingCreate);
-        m_pendingCreate = {};
-
-        entt::entity e = entt::null;
-        if (op.kind == CreateOp::Empty) {
-            e = m_scene->CreateEntity("Entity");
-        } else {
-            auto spawned = SceneSerializer::SpawnFromTemplate(*m_scene, op.templatePath);
-            if (!spawned.empty()) {
-                e = spawned.front();
-                m_scene->MarkMaterialDirty();
-            }
-        }
-
-        if (reg.valid(e)) {
-            if (reg.valid(op.parent))
-                m_scene->SetParent(e, op.parent);
-            m_selection       = { static_cast<uint32_t>(e) };
-            m_primarySelected = static_cast<uint32_t>(e);
-            m_shiftAnchor     = m_primarySelected;
-        }
-    }
-    if (!m_pendingDuplicates.empty()) {
-        std::vector<entt::entity> srcs = std::move(m_pendingDuplicates);
-        m_pendingDuplicates.clear();
-        m_selection.clear();
-        entt::entity lastDst = entt::null;
-        for (entt::entity src : srcs) {
-            if (reg.valid(src)) {
-                lastDst = DuplicateEntity(src);
-                m_selection.insert(static_cast<uint32_t>(lastDst));
-            }
-        }
-        if (reg.valid(lastDst)) {
-            m_primarySelected = static_cast<uint32_t>(lastDst);
-            m_shiftAnchor     = m_primarySelected;
-            m_scene->MarkMaterialDirty();
-        }
-    }
-    if (!m_pendingDeletes.empty()) {
-        std::vector<entt::entity> es = std::move(m_pendingDeletes);
-        m_pendingDeletes.clear();
-        for (entt::entity e : es) {
-            if (reg.valid(e)) {
-                m_selection.erase(static_cast<uint32_t>(e));
-                if (m_primarySelected == static_cast<uint32_t>(e))
-                    m_primarySelected = ~0u;
-                m_scene->DestroyEntity(e);
-            }
-        }
-        if (m_primarySelected == ~0u && !m_selection.empty())
-            m_primarySelected = *m_selection.begin();
-    }
-
-    // ── Asset drop execution ───────────────────────────────────────────────────
-    if (m_pendingAssetDrop.valid) {
-        const fs::path   assetPath = std::move(m_pendingAssetDrop.assetPath);
-        const entt::entity parent  = m_pendingAssetDrop.parent;
-        const glm::vec3  spawnPos  = m_pendingAssetDrop.spawnPos;
-        m_pendingAssetDrop = {};
-
-        std::string ext = assetPath.extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(),
-                       [](unsigned char c){ return static_cast<char>(::tolower(c)); });
-
-        if (ext == ".sascene") {
-            if (m_onSceneLoad) m_onSceneLoad(assetPath);
-        } else if (ext == ".glb" || ext == ".gltf") {
-            if (!m_registry) {
-                SA_LOG_WARN("SceneHierarchyPanel: no registry — cannot instantiate mesh");
-            } else {
-                const Resource::AssetEntry* entry = m_registry->FindBySourcePath(assetPath);
-                if (!entry || !entry->id.IsValid()) {
-                    SA_LOG_WARN("SceneHierarchyPanel: '{}' not in registry — import it first",
-                                assetPath.filename().string());
-                } else {
-                    entt::entity e = EntityFactory::CreateStaticMesh(
-                        *m_scene, assetPath.stem().string(), entry->id);
-                    if (reg.valid(parent))
-                        m_scene->SetParent(e, parent);
-                    if (spawnPos != glm::vec3(0.f)) {
-                        reg.get<TransformComponent>(e).position = spawnPos;
-                        m_scene->MarkDirty(e);
-                    }
-                    m_selection       = { static_cast<uint32_t>(e) };
-                    m_primarySelected = static_cast<uint32_t>(e);
-                    m_shiftAnchor     = m_primarySelected;
-                    m_scene->MarkMaterialDirty();
-                }
-            }
-        }
-        // Textures, materials, animations, skeletons → no independent scene object.
-    }
-
-    // ── Drag-and-drop execution ────────────────────────────────────────────────
-    if (m_pendingDnD.valid) {
-        DnDOp op = std::move(m_pendingDnD);
-        m_pendingDnD = {};
-
-        if (op.target == entt::null) {
-            // Detach all to scene root
-            for (entt::entity dragged : op.dragged)
-                if (reg.valid(dragged))
-                    m_scene->SetParent(dragged, entt::null);
-        } else if (reg.valid(op.target)) {
-            if (op.mode == DnDOp::AsChild) {
-                for (entt::entity dragged : op.dragged) {
-                    if (!reg.valid(dragged) || dragged == op.target) continue;
-                    if (!IsInSubtree(op.target, dragged, reg))
-                        m_scene->SetParent(dragged, op.target);
-                }
-            } else {
-                // BeforeSibling / AfterSibling — move all to target's parent level.
-                // Sort by draw order so entities maintain their relative visual order:
-                //   BeforeSibling: ascending order  → all land before target in original order
-                //   AfterSibling:  descending order → each inserted after target, stacking correctly
-                entt::entity targetParent = entt::null;
-                if (const auto* hc = reg.try_get<HierarchyComponent>(op.target))
-                    targetParent = hc->parent;
-
-                std::vector<entt::entity> sorted = op.dragged;
-                std::stable_sort(sorted.begin(), sorted.end(),
-                    [&](entt::entity a, entt::entity b) {
-                        auto pa = std::find(m_drawOrder.begin(), m_drawOrder.end(), (uint32_t)a);
-                        auto pb = std::find(m_drawOrder.begin(), m_drawOrder.end(), (uint32_t)b);
-                        return pa < pb;
-                    });
-                if (op.mode == DnDOp::AfterSibling)
-                    std::reverse(sorted.begin(), sorted.end());
-
-                for (entt::entity dragged : sorted) {
-                    if (!reg.valid(dragged) || dragged == op.target) continue;
-                    const bool safe = (targetParent == entt::null)
-                        || !IsInSubtree(targetParent, dragged, reg);
-                    if (!safe) continue;
-                    m_scene->SetParent(dragged, targetParent);
-                    if (op.mode == DnDOp::BeforeSibling)
-                        MoveChildBefore(dragged, op.target, reg);
-                    else
-                        MoveChildAfter(dragged, op.target, reg);
                 }
             }
         }

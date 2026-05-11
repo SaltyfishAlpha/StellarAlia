@@ -1,12 +1,15 @@
 #include "engine/Application.hpp"
 
+#include "ApplicationPath.hpp"
 #include "core/logs/Log.hpp"
 #include "core/Profiler.hpp"
 #include "function/scene/Components.hpp"
+#include "function/scene/SceneSerializer.hpp"
 #include "platform/input/GLFWInputProvider.hpp"
 #include "platform/rhi/vulkan/VulkanDevice.hpp"
 #include "platform/window/GLFWWindow.hpp"
 
+#include <nlohmann/json.hpp>
 #include <filesystem>
 #include <chrono>
 
@@ -29,6 +32,9 @@ Application::~Application() {
 bool Application::Init(const Desc& desc) {
     m_desc = desc;
     Core::Log::Initialize();
+#ifndef NDEBUG
+    Core::Log::SetLevel(spdlog::level::debug);  // suppress trace spam in debug builds; remove to re-enable
+#endif
     SA_LOG_INFO("Application: initialising");
 
     if (!desc.engineCookCacheDir.empty())
@@ -92,6 +98,18 @@ bool Application::Init(const Desc& desc) {
     // ── Scene ─────────────────────────────────────────────────────────────────
     m_scene = std::make_unique<Scene>("Main");
 
+    // ── ScriptSystem ──────────────────────────────────────────────────────────
+    {
+        ScriptSystem::Context sctx;
+        sctx.scene      = m_scene.get();
+        sctx.input      = &m_input;
+        sctx.debug      = &m_debugDraw;
+        sctx.managedDir = std::string(StellarAliaApp::BIN_DIR) + "/managed";
+        sctx.projectDir = desc.projectDir;
+        if (!m_scriptSystem.Init(sctx))
+            SA_LOG_WARN("Application: ScriptSystem init failed — C# scripting unavailable");
+    }
+
     // ── Hand off to mode ──────────────────────────────────────────────────────
     m_mode->OnAttach(*this);
 
@@ -134,15 +152,17 @@ void Application::Run() {
             SA_PROFILE_SCOPE_N("Physics");
             constexpr float kFixedStep = 1.f / 60.f;
             if (m_playState == EnginePlayState::Playing) {
+                Scene& active = GetActiveScene();
                 m_physicsAccumulator += dt;
                 while (m_physicsAccumulator >= kFixedStep) {
-                    m_physics.SyncIn(*m_scene);
+                    m_physics.SyncIn(active);
                     m_physics.Step(kFixedStep);
-                    m_physics.SyncOut(*m_scene);
+                    m_physics.SyncOut(active);
+                    m_scriptSystem.FixedUpdate(kFixedStep, active.Registry());
                     m_physicsAccumulator -= kFixedStep;
                 }
             }
-            m_physics.DrawDebug(m_physicsDebugSettings, *m_scene);
+            m_physics.DrawDebug(m_physicsDebugSettings, GetActiveScene());
         }
 
         // ── Mode update ───────────────────────────────────────────────────────
@@ -154,7 +174,10 @@ void Application::Run() {
         // ── Animation (only while simulation is running) ──────────────────────
         if (m_playState == EnginePlayState::Playing) {
             SA_PROFILE_SCOPE_N("Animation");
-            m_animSystem.Update(dt, m_scene->Registry(), m_resMgr, m_device.get());
+            Scene& active = GetActiveScene();
+            m_animSystem.Update(dt, active.Registry(), m_resMgr, m_device.get());
+            m_scriptSystem.Update(dt, active.Registry());
+            m_scriptSystem.LateUpdate(dt, active.Registry());
         }
 
         // ── Editor skinned-mesh refresh: inspector changed meshAsset → re-prepare
@@ -175,8 +198,9 @@ void Application::Run() {
         if (w == 0 || h == 0) continue;
 
         const float aspect = static_cast<float>(w) / static_cast<float>(h);
-        m_scene->UpdateTransforms();
-        m_renderer.RenderFrame(*m_scene, m_mode->GetCameraData(aspect), w, h,
+        Scene& active = GetActiveScene();
+        active.UpdateTransforms();
+        m_renderer.RenderFrame(active, m_mode->GetCameraData(aspect), w, h,
             [this](RHI::IRHICommandList* cmd) { m_mode->OnRenderUI(cmd); });
 
         SA_PROFILE_FRAME();
@@ -192,8 +216,10 @@ void Application::Shutdown() {
 
     m_mode->OnDetach();
 
+    entt::registry& shutdownReg = m_gameScene ? m_gameScene->Registry() : m_scene->Registry();
+    m_scriptSystem.Shutdown(shutdownReg);
     m_physics.Shutdown();
-    m_animSystem.Shutdown(m_device.get(), m_scene->Registry());
+    m_animSystem.Shutdown(m_device.get(), shutdownReg);
     m_renderer.Shutdown();
     m_input.Shutdown();
     m_matMgr.Shutdown();
@@ -219,16 +245,21 @@ void* Application::GetNativeWindow() {
     return m_window->GetNativeHandle();
 }
 
+Scene& Application::GetActiveScene() {
+    return m_gameScene ? *m_gameScene : *m_scene;
+}
+
 void Application::RebuildDrawList() {
-    m_scene->UpdateTransforms();
-    m_renderer.BuildDrawList(*m_scene);
+    Scene& active = GetActiveScene();
+    active.UpdateTransforms();
+    m_renderer.BuildDrawList(active);
 }
 
 void Application::PrepareAnimatedEntities() {
-    auto& reg = m_scene->Registry();
+    Scene& active = GetActiveScene();
+    auto& reg = active.Registry();
     for (auto entity : reg.view<SkinnedMeshComponent>())
         m_animSystem.PrepareEntity(entity, reg, m_resMgr, m_device.get());
-    // Populate lastGlobalPose at t=0 so the skeleton gizmo is visible in editor mode.
     m_animSystem.EvaluateAll(0.f, reg, m_resMgr, m_device.get());
 }
 
@@ -236,46 +267,62 @@ void Application::SetPlayState(EnginePlayState newState) {
     if (newState == m_playState) return;
     const EnginePlayState old = m_playState;
 
+    // GPU barrier: play state transitions destroy/create GPU resources.
+    m_device->WaitIdle();
+
     if (newState == EnginePlayState::Playing) {
         if (old == EnginePlayState::Editing) {
-            // Fresh start — reset all clip times, re-prepare, rebuild draw list.
-            m_scene->Registry().view<AnimatorComponent>().each(
-                [](AnimatorComponent& a) { a.time = 0.f; });
-            PrepareAnimatedEntities();
+            // Snapshot editor scene and spin up game copy.
+            m_pieSnapshot = SceneSerializer::SerializeToJson(*m_scene).dump();
+            m_gameScene   = std::make_unique<Scene>(m_scene->GetName());
+            SceneSerializer::DeserializeFromJson(*m_gameScene,
+                                                 nlohmann::json::parse(m_pieSnapshot));
+
+            // Clear editor scene animation entries; game scene will get its own.
+            m_animSystem.Shutdown(m_device.get(), m_scene->Registry());
+
+            m_playState = EnginePlayState::Playing;
+            m_mode->OnPlayStateChanged(m_playState);  // EditorContext → game copy
+            PrepareAnimatedEntities();                 // prepare game copy GPU buffers
+            m_scriptSystem.OnPlayStart(*m_gameScene);  // g_ctx.scene → game copy
             RebuildDrawList();
             SA_LOG_INFO("Application: Play");
         } else {
             // Resume from Pause — preserve current frame.
+            m_playState = newState;
+            m_mode->OnPlayStateChanged(m_playState);
             SA_LOG_INFO("Application: Resume");
         }
-    } else if (newState == EnginePlayState::Paused) {
-        // Freeze at the current deformed frame; GPU buffer unchanged.
-        SA_LOG_INFO("Application: Paused");
-    } else {
-        // Stop → Editing: destroy all Jolt bodies so bodyIds are cleared, then
-        // restore WorldTransformComponent from TransformComponent before the next
-        // render frame — otherwise physics-driven positions persist in the editor.
-        m_physics.Reset(*m_scene);
-        m_physicsAccumulator = 0.f;
-
-        // Reset animation to frame 0.
-        m_scene->Registry().view<AnimatorComponent>().each(
-            [](AnimatorComponent& a) { a.time = 0.f; });
-        m_animSystem.EvaluateAll(0.f, m_scene->Registry(), m_resMgr, m_device.get());
-
-        // Recompute world transforms and rebuild the draw list with restored poses.
-        RebuildDrawList();
-        SA_LOG_INFO("Application: Stop → Edit");
+        return;
     }
 
-    m_playState = newState;
-    m_mode->OnPlayStateChanged(m_playState);
+    if (newState == EnginePlayState::Paused) {
+        m_playState = newState;
+        m_mode->OnPlayStateChanged(m_playState);
+        SA_LOG_INFO("Application: Paused");
+        return;
+    }
+
+    // Stop → Editing: destroy game copy; editor scene was never touched.
+    m_scriptSystem.OnPlayStop(m_gameScene->Registry());
+    m_physics.Reset(*m_gameScene);
+    m_physicsAccumulator = 0.f;
+    m_animSystem.Shutdown(m_device.get(), m_gameScene->Registry());
+    m_gameScene.reset();
+    m_pieSnapshot.clear();
+
+    m_playState = EnginePlayState::Editing;
+    m_mode->OnPlayStateChanged(m_playState);  // EditorContext → editor scene
+    PrepareAnimatedEntities();                 // re-prepare editor scene GPU buffers
+    RebuildDrawList();
+    SA_LOG_INFO("Application: Stop → Edit");
 }
 
 void Application::UpdateProjectPaths(const std::filesystem::path& projectDir,
                                       const std::filesystem::path& cookCacheDir) {
     m_desc.projectDir   = projectDir.string();
     m_desc.cookCacheDir = cookCacheDir.string();
+    m_scriptSystem.SetProjectDir(projectDir.string());
     if (!cookCacheDir.empty())
         fs::create_directories(cookCacheDir);
     m_resMgr.SetProjectCookCache(cookCacheDir);

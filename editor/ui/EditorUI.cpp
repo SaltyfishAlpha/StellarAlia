@@ -2,6 +2,7 @@
 #include "ui/IEditorWindow.hpp"
 #include "resource/EditorFontLoader.hpp"
 #include "EditorDiagnostics.hpp"
+#include "command/CommandManager.hpp"
 
 #include "platform/rhi/vulkan/VulkanDevice.hpp"
 #include "platform/rhi/vulkan/VulkanCommandList.hpp"
@@ -153,6 +154,22 @@ void EditorUI::DrawPanels() {
             if (ImGui::MenuItem("Open Project...")) {
                 if (m_fileCallbacks.onOpenProject) m_fileCallbacks.onOpenProject();
             }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Edit")) {
+            const bool canUndo = m_cmdMgr && m_cmdMgr->CanUndo();
+            const bool canRedo = m_cmdMgr && m_cmdMgr->CanRedo();
+
+            std::string undoLabel = "Undo";
+            if (canUndo) { undoLabel += "  "; undoLabel += m_cmdMgr->GetUndoDescription(); }
+            if (ImGui::MenuItem(undoLabel.c_str(), "Ctrl+Z", false, canUndo))
+                if (m_onUndo) m_onUndo();
+
+            std::string redoLabel = "Redo";
+            if (canRedo) { redoLabel += "  "; redoLabel += m_cmdMgr->GetRedoDescription(); }
+            if (ImGui::MenuItem(redoLabel.c_str(), "Ctrl+Y", false, canRedo))
+                if (m_onRedo) m_onRedo();
+
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Assets")) {

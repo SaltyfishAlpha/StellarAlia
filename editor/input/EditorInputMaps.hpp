@@ -130,6 +130,19 @@ inline std::vector<ActionMapDef> MakeViewportMaps() {
                     .bindings = { BindingDef::Direct("Keyboard/F2") },
                     .userConfigurable = true,
                 },
+                // ── History shortcuts ─────────────────────────────────────
+                {
+                    .name = "Undo",
+                    .type = ActionType::Button,
+                    .bindings = { BindingDef::Composite("Keyboard/LeftControl", "Keyboard/Z") },
+                    .userConfigurable = true,
+                },
+                {
+                    .name = "Redo",
+                    .type = ActionType::Button,
+                    .bindings = { BindingDef::Composite("Keyboard/LeftControl", "Keyboard/Y") },
+                    .userConfigurable = true,
+                },
                 // ── Panel visibility ──────────────────────────────────────
                 {
                     .name = "TogglePanels",

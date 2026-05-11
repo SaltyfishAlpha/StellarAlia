@@ -1,8 +1,14 @@
 #include "ui/panels/SettingsPanel.hpp"
+#include "engine/Application.hpp"
 
 #include <imgui.h>
 
 namespace StellarAlia::Editor {
+
+SettingsPanel::SettingsPanel(EditorContext& ctx)
+    : m_overlaySettings(ctx.overlaySettings)
+    , m_physicsSettings(&ctx.app->GetPhysicsDebugSettings())
+{}
 
 void SettingsPanel::OnDraw() {
     ImGuiIO& io = ImGui::GetIO();
