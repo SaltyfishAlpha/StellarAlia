@@ -1414,3 +1414,18 @@ public static class InputAction {
 
 ---
 
+## Vulkan Error E — 未使用顶点属性（Unused Vertex Attributes）✅ DONE
+<!-- ShaderReflection.vertexInputs (.refl v6, populated from SPIR-V stage_inputs); ShaderProgram 透传到 RHIPipelineDesc.vertexInputs[]; VulkanDevice::CreatePipeline 用反射数据生成 attribs + location→offset 静态表，v3-v5 旧文件 fallback 到 4-attrib 硬编码。 -->
+
+## Vulkan Error F — 描述符集 / 推送常量布局错配（Stale m_boundPipeline）✅ DONE
+<!-- VulkanCommandList::Bind() 重置 m_boundPipeline 防止 ImmediateCompute 的 compute pipeline 跨命令缓冲泄漏；Shadow/GBuffer/SelectionMask 将 frameSet 绑定移到首个 SetPipeline 之后。 -->
+
+## Vulkan Error G — Resize 同步错乱（imageView < renderArea + fence/semaphore in use）✅ DONE
+<!-- Application::Run 在读取 GetSwapchainWidth/Height 前调用 ResizeSwapchain(window_w, h)，让内部 RT 与 swapchain 同尺寸创建；BeginFrame 的 m_needResize 路径保留。 -->
+
+## Vulkan Error H — RenderGraph Read+Write 在 swapchain 触发 SHADER_READ 转换 ✅ DONE
+<!-- RenderGraph::Execute 检测 pass 同时 Read+Write 同一纹理时跳过 SHADER_READ 转换（仅排序依赖，layout 留在 RenderTarget；Write 块的 wasTexWritten 仍发 RT→RT 内存屏障）。修复 DebugOverlay / InfiniteGrid / SelectionOutline 在 swapchain（无 SAMPLED_BIT）上的非法布局转换。 -->
+
+## Cross-dir Vertex Shader Resolution for Project Material Types ✅ DONE
+<!-- FeatureInitContext 新增 engineShaderDir；MaterialManager::RegisterTypeFromShaders 用 resolve() lambda 先 ctx.shaderDir 后 engineShaderDir 查找 SPV/.refl，修正项目 .saglsl 引用 deferred_geometry.vert 时跨目录的路径解析。 -->
+
