@@ -94,6 +94,7 @@ public:
 
     AnimationSystem&      GetAnimationSystem()     { return m_animSystem; }
     ScriptSystem&         GetScriptSystem()        { return m_scriptSystem; }
+    bool                  IsWindowFocused()  const;
 
     // Returns the physics system. Use PhysicsDebugSettings to toggle overlay drawing.
     PhysicsSystem&        GetPhysicsSystem()       { return m_physics; }
@@ -106,6 +107,9 @@ public:
     // Call this before rescanning the AssetRegistry and loading a new scene.
     void UpdateProjectPaths(const std::filesystem::path& projectDir,
                              const std::filesystem::path& cookCacheDir);
+
+    // Writes Directory.Build.props (always) and {stem}.csproj / {stem}.sln (if absent).
+    void GenerateIdeProjectFiles(const std::filesystem::path& projectDir);
 
     // ── Play-state control ────────────────────────────────────────────────────
     // Editing  — animation paused, scene freely editable.

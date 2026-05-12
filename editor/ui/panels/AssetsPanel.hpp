@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ui/IEditorWindow.hpp"
+#include "ui/DoubleClickClassifier.hpp"
 #include "ui/presenters/AssetsPresenter.hpp"
 #include "EditorDiagnostics.hpp"
 #include "EditorContext.hpp"
@@ -169,6 +170,11 @@ private:
     ImFont*          m_iconFont     = nullptr;
     float            m_fileIconSize = 48.f;
     bool             m_gridView     = true;
+
+    // ── Double-click classification (right pane) ───────────────────────────
+    DoubleClickClassifier m_dblClick;
+    std::filesystem::path m_dblClickPath;
+    bool                  m_dblClickIsDir = false;
 };
 
 } // namespace StellarAlia::Editor

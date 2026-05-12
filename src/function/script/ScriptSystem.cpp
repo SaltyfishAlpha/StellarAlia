@@ -59,7 +59,8 @@ bool ScriptSystem::Init(const Context& ctx) {
     path_char_t hostfxrPath[1024];
     size_t      hostfxrPathLen = sizeof(hostfxrPath) / sizeof(path_char_t);
     if (get_hostfxr_path(hostfxrPath, &hostfxrPathLen, nullptr) != 0) {
-        SA_LOG_ERROR("[ScriptSystem] get_hostfxr_path failed — .NET 8 runtime not installed?");
+        SA_LOG_ERROR("[ScriptSystem] .NET 8 Runtime not found — C# scripting disabled.\n"
+                     "  Download: https://dotnet.microsoft.com/download/dotnet/8.0");
         return false;
     }
     SA_LOG_INFO("[ScriptSystem] hostfxr found");
@@ -121,7 +122,7 @@ bool ScriptSystem::Init(const Context& ctx) {
     SA_LOG_INFO("[ScriptSystem] NativeApi initialized on managed side");
 
     // 7. Set C API context
-    SA_Script_SetContext({ ctx.scene, ctx.input, ctx.debug, 0.f, 0.f });
+    SA_Script_SetContext({ ctx.scene, ctx.input, ctx.debug, ctx.physics, 0.f, 0.f });
 
     m_available = true;
     SA_LOG_INFO("[ScriptSystem] C# scripting ready");
@@ -161,7 +162,7 @@ void ScriptSystem::OnPlayStart(Scene& gameScene) {
     if (!m_available) return;
 
     // Redirect all script API calls (SetPosition etc.) to the game copy.
-    SA_Script_SetContext({ &gameScene, m_ctx.input, m_ctx.debug, 0.f, 0.f });
+    SA_Script_SetContext({ &gameScene, m_ctx.input, m_ctx.debug, m_ctx.physics, 0.f, 0.f });
 
     auto& reg = gameScene.Registry();
 
@@ -210,6 +211,35 @@ void ScriptSystem::OnPlayStart(Scene& gameScene) {
     InvokeAll(reg, 1 /*OnStart*/,  0.f);
 
     m_playing = true;
+}
+
+// ── RecompileEditing ──────────────────────────────────────────────────────────
+
+bool ScriptSystem::RecompileEditing(entt::registry& reg) {
+    if (!m_available || m_playing) return false;
+
+    auto view = reg.view<ScriptComponent>();
+    std::vector<std::string> paths;
+    std::vector<const char*> pathPtrs;
+    for (auto e : view) {
+        const auto& sc = view.get<ScriptComponent>(e);
+        if (!sc.scriptPath.empty()) {
+            fs::path full = fs::path(m_ctx.projectDir) / sc.scriptPath;
+            paths.push_back(full.string());
+        }
+    }
+    if (paths.empty()) return true;
+    for (auto& p : paths) pathPtrs.push_back(p.c_str());
+
+    SA_LOG_INFO("[ScriptSystem] RecompileEditing: {} script(s)...", paths.size());
+    int ok = m_fnCompile(const_cast<void*>(static_cast<const void*>(pathPtrs.data())),
+                         static_cast<int>(pathPtrs.size()));
+    // Unload releases the CollectibleALC but also clears NativeApi.s_table on the managed side.
+    // Re-init immediately so subsequent OnPlayStart sees a valid function table.
+    m_fnUnload();
+    m_fnInit(&m_functionTable);
+    if (!ok) SA_LOG_WARN("[ScriptSystem] RecompileEditing: compile failed — check Diagnostics tab");
+    return ok != 0;
 }
 
 // ── Update loop ───────────────────────────────────────────────────────────────

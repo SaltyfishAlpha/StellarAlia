@@ -26,8 +26,9 @@ public:
 
     [[nodiscard]] static std::unique_ptr<GLFWWindow> Create(const WindowDesc& desc);
 
-    uint32_t GetWidth()  const override { return m_width; }
-    uint32_t GetHeight() const override { return m_height; }
+    uint32_t GetWidth()   const override { return m_width; }
+    uint32_t GetHeight()  const override { return m_height; }
+    bool     IsFocused()  const override { return m_focused; }
     bool     ShouldClose() const override;
     void     PollEvents() override;
     void*    GetNativeHandle() const override;
@@ -35,12 +36,13 @@ public:
 private:
     GLFWWindow() = default;
 
-    GLFWwindow* m_handle = nullptr;
-    uint32_t    m_width  = 0;
-    uint32_t    m_height = 0;
+    GLFWwindow* m_handle  = nullptr;
+    uint32_t    m_width   = 0;
+    uint32_t    m_height  = 0;
+    bool        m_focused = true; // assume focused until the OS says otherwise
 
-    // GLFW resize callback
     static void OnFramebufferResized(GLFWwindow* window, int width, int height);
+    static void OnWindowFocus(GLFWwindow* window, int focused);
 };
 
 } // namespace StellarAlia::Platform

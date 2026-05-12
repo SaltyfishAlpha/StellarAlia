@@ -829,7 +829,7 @@ entt::entity SceneRenderer::RaycastScene(const Core::Ray& ray, float maxDist) co
     for (const DrawItem& item : m_drawItems) {
         if (!item.skipCull) continue;
         float t;
-        if (Core::BVHTree<entt::entity>::RayAABB(ray, item.worldAABBMin, item.worldAABBMax, bestT, t)) {
+        if (Core::BVHTree<entt::entity>::RayAABB(ray, item.worldAABBMin, item.worldAABBMax, bestT, t) && t < bestT) {
             bestT = t;
             best  = item.entity;
         }

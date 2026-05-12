@@ -1,0 +1,186 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>StellarAlia.Runtime</name>
+    </assembly>
+    <members>
+        <member name="T:StellarAlia.Entity">
+            <summary>
+            Lightweight handle to a scene entity. Cheap to copy; check IsValid before use.
+            </summary>
+        </member>
+        <member name="M:StellarAlia.Entity.GetRotation">
+            <summary>Gets the rotation as a quaternion (lossless, no gimbal lock).</summary>
+        </member>
+        <member name="M:StellarAlia.Entity.SetRotation(System.Numerics.Quaternion)">
+            <summary>Sets the rotation from a quaternion. Normalised automatically.</summary>
+        </member>
+        <member name="P:StellarAlia.Entity.Forward">
+            <summary>Local forward direction (−Z of the entity's rotation).</summary>
+        </member>
+        <member name="P:StellarAlia.Entity.Right">
+            <summary>Local right direction (+X of the entity's rotation).</summary>
+        </member>
+        <member name="P:StellarAlia.Entity.Up">
+            <summary>Local up direction (+Y of the entity's rotation).</summary>
+        </member>
+        <member name="M:StellarAlia.Entity.Destroy">
+            <summary>Destroys this entity and all its components.</summary>
+        </member>
+        <member name="M:StellarAlia.Entity.Create">
+            <summary>Creates a new empty entity with a TagComponent and TransformComponent.</summary>
+        </member>
+        <member name="M:StellarAlia.Entity.GetAnimator">
+            <summary>Returns an animator proxy for this entity, or null if not valid.</summary>
+        </member>
+        <member name="M:StellarAlia.Entity.GetRigidBody">
+            <summary>Returns a rigidbody proxy for this entity, or null if not valid.</summary>
+        </member>
+        <member name="M:StellarAlia.Entity.GetPointLight">
+            <summary>Returns a point-light proxy for this entity, or null if not valid.</summary>
+        </member>
+        <member name="M:StellarAlia.Entity.Find(System.String)">
+            <summary>O(N) scene scan — cache the result in OnStart, do not call per-frame.</summary>
+        </member>
+        <member name="T:StellarAlia.Key">
+            <summary>
+            Maps friendly key names to engine device paths (e.g. Key.W → "Keyboard/W").
+            </summary>
+        </member>
+        <member name="M:StellarAlia.Input.IsKeyDown(StellarAlia.Key)">
+            Returns true while the key is held.
+        </member>
+        <member name="M:StellarAlia.Input.IsKeyJustPressed(StellarAlia.Key)">
+            Returns true on the first frame the key was pressed.
+        </member>
+        <member name="M:StellarAlia.Input.IsKeyJustReleased(StellarAlia.Key)">
+            Returns true on the first frame the key was released.
+        </member>
+        <member name="M:StellarAlia.Input.GetKeyValue(StellarAlia.Key)">
+            Returns the raw analog value [0,1] for a key (useful for triggers/axes).
+        </member>
+        <member name="T:StellarAlia.Mathf">
+            <summary>Common math helpers wrapping <see cref="T:System.MathF"/>.</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.Lerp(System.Single,System.Single,System.Single)">
+            <summary>Linear interpolation (unclamped).</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.LerpClamped(System.Single,System.Single,System.Single)">
+            <summary>Linear interpolation clamped to [0,1].</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.PingPong(System.Single,System.Single)">
+            <summary>Ping-pongs t in [0, length].</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.SmoothStep(System.Single,System.Single,System.Single)">
+            <summary>Hermite smooth step in [a,b] at edge0=a, edge1=b.</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.MoveTowards(System.Single,System.Single,System.Single)">
+            <summary>Moves current towards target by at most maxDelta (handles negative delta).</summary>
+        </member>
+        <member name="T:StellarAlia.RaycastHit">
+            <summary>Result of a successful <see cref="M:StellarAlia.Physics.Raycast(System.Numerics.Vector3,System.Numerics.Vector3,System.Single,StellarAlia.RaycastHit@)"/> call.</summary>
+        </member>
+        <member name="F:StellarAlia.RaycastHit.Point">
+            <summary>World-space position of the intersection point.</summary>
+        </member>
+        <member name="F:StellarAlia.RaycastHit.Normal">
+            <summary>Surface normal at the intersection point.</summary>
+        </member>
+        <member name="F:StellarAlia.RaycastHit.Entity">
+            <summary>The entity whose collider was hit, or null if unresolvable.</summary>
+        </member>
+        <member name="T:StellarAlia.Physics">
+            <summary>Physics query utilities.</summary>
+        </member>
+        <member name="M:StellarAlia.Physics.Raycast(System.Numerics.Vector3,System.Numerics.Vector3,System.Single,StellarAlia.RaycastHit@)">
+            <summary>
+            Casts a ray from <paramref name="origin"/> in <paramref name="direction"/> up to
+            <paramref name="maxDistance"/> world units. Returns true and fills
+            <paramref name="hit"/> on contact.
+            </summary>
+        </member>
+        <member name="T:StellarAlia.PointLightProxy">
+            <summary>
+            Proxy for point-light property access on an entity.
+            Call <see cref="M:StellarAlia.Entity.GetPointLight"/> to obtain an instance.
+            </summary>
+        </member>
+        <member name="P:StellarAlia.PointLightProxy.Color">
+            <summary>Light color in linear RGB.</summary>
+        </member>
+        <member name="P:StellarAlia.PointLightProxy.Intensity">
+            <summary>Light intensity (lux).</summary>
+        </member>
+        <member name="P:StellarAlia.PointLightProxy.Range">
+            <summary>Attenuation range in world units.</summary>
+        </member>
+        <member name="T:StellarAlia.QuaternionExt">
+            <summary>Extension and factory helpers for <see cref="T:System.Numerics.Quaternion"/>.</summary>
+        </member>
+        <member name="M:StellarAlia.QuaternionExt.FromEulerDegrees(System.Single,System.Single,System.Single)">
+            <summary>Creates a quaternion from Euler angles in degrees (XYZ order, same as SetRotationEuler).</summary>
+        </member>
+        <member name="M:StellarAlia.QuaternionExt.FromEulerDegrees(System.Numerics.Vector3)">
+            <summary>Creates a quaternion from Euler angles in degrees as a Vector3.</summary>
+        </member>
+        <member name="M:StellarAlia.QuaternionExt.FromEulerRadians(System.Single,System.Single,System.Single)">
+            <summary>Creates a quaternion from Euler angles in radians (XYZ order).</summary>
+        </member>
+        <member name="M:StellarAlia.QuaternionExt.Slerp(System.Numerics.Quaternion,System.Numerics.Quaternion,System.Single)">
+            <summary>Spherical linear interpolation between two quaternions.</summary>
+        </member>
+        <member name="M:StellarAlia.QuaternionExt.RotateTowards(System.Numerics.Quaternion,System.Numerics.Quaternion,System.Single)">
+            <summary>Rotates <paramref name="q"/> toward <paramref name="target"/> by at most <paramref name="maxDegrees"/> per call.</summary>
+        </member>
+        <member name="M:StellarAlia.QuaternionExt.AngleDegrees(System.Numerics.Quaternion,System.Numerics.Quaternion)">
+            <summary>Angle in degrees between two quaternions.</summary>
+        </member>
+        <member name="M:StellarAlia.QuaternionExt.ToEulerDegrees(System.Numerics.Quaternion)">
+            <summary>Extracts Euler angles in degrees (XYZ, matching glm eulerAngles convention).</summary>
+        </member>
+        <member name="T:StellarAlia.RigidBodyProxy">
+            <summary>
+            Proxy for physics body operations on an entity.
+            Call <see cref="M:StellarAlia.Entity.GetRigidBody"/> to obtain an instance.
+            </summary>
+        </member>
+        <member name="P:StellarAlia.RigidBodyProxy.LinearVelocity">
+            <summary>Linear velocity in world space (m/s).</summary>
+        </member>
+        <member name="P:StellarAlia.RigidBodyProxy.AngularVelocity">
+            <summary>Angular velocity in world space (rad/s).</summary>
+        </member>
+        <member name="M:StellarAlia.RigidBodyProxy.AddForce(System.Numerics.Vector3)">
+            <summary>Applies a continuous force (Newtons). Accumulated over the fixed-step.</summary>
+        </member>
+        <member name="M:StellarAlia.RigidBodyProxy.AddImpulse(System.Numerics.Vector3)">
+            <summary>Applies an instantaneous impulse (N·s). Applied immediately.</summary>
+        </member>
+        <member name="T:StellarAlia.ScriptBase">
+            <summary>
+            Base class for all user scripts. Attach to an Entity via ScriptComponent.
+            </summary>
+        </member>
+        <member name="M:StellarAlia.ScriptBase.OnAttach">
+            Called once when the script is first attached (other scripts may not be ready yet).
+        </member>
+        <member name="M:StellarAlia.ScriptBase.OnStart">
+            Called after ALL entities have finished OnAttach — safe to call Entity.Find().
+        </member>
+        <member name="M:StellarAlia.ScriptBase.OnFixedUpdate(System.Single)">
+            Called each physics step (fixed dt = 1/60 s). Use for physics-driven movement.
+        </member>
+        <member name="M:StellarAlia.ScriptBase.OnUpdate(System.Single)">
+            Called each variable-rate frame. Use for input response and game logic.
+        </member>
+        <member name="M:StellarAlia.ScriptBase.OnLateUpdate(System.Single)">
+            Called after all OnUpdate calls, before UpdateTransforms. Use for camera follow.
+        </member>
+        <member name="M:StellarAlia.ScriptBase.OnStop">
+            Called when Play is stopped (before OnDetach).
+        </member>
+        <member name="M:StellarAlia.ScriptBase.OnDetach">
+            Called when the script is removed or the scene is unloaded.
+        </member>
+    </members>
+</doc>

@@ -1,6 +1,9 @@
 #pragma once
 
 #include <memory>
+#include <cstdint>
+#include <glm/glm.hpp>
+#include <entt/entt.hpp>
 
 namespace StellarAlia {
 class Scene;
@@ -62,6 +65,23 @@ public:
     // positions from TransformComponent on the next frame.
     // Call this when the engine transitions from Playing back to Editing.
     void Reset(Scene& scene);
+
+    // ── Script API — RigidBody velocity/force ─────────────────────────────────
+    // bodyId must be a valid Jolt body (RigidBodyComponent::bodyId != ~0u).
+    glm::vec3 GetLinearVelocity (uint32_t bodyId) const;
+    void      SetLinearVelocity (uint32_t bodyId, glm::vec3 v);
+    glm::vec3 GetAngularVelocity(uint32_t bodyId) const;
+    void      SetAngularVelocity(uint32_t bodyId, glm::vec3 v);
+    void      AddForce          (uint32_t bodyId, glm::vec3 f);
+    void      AddImpulse        (uint32_t bodyId, glm::vec3 imp);
+
+    // ── Script API — Physics raycast ──────────────────────────────────────────
+    // Returns true if the ray hits something.  maxDist is in world units.
+    // On hit: hitPos, hitNormal are filled; hitEntity is the ECS entity handle
+    // whose RigidBodyComponent owns the body, or entt::null if unresolvable.
+    bool Raycast(glm::vec3 origin, glm::vec3 direction, float maxDist,
+                 glm::vec3& hitPos, glm::vec3& hitNormal,
+                 entt::entity& hitEntity, entt::registry& reg) const;
 
 private:
     struct Impl;

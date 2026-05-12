@@ -60,6 +60,10 @@ public:
 
     // ── Per-frame API ─────────────────────────────────────────────────────────
 
+    // Call before NewFrame() to suppress ImGui mouse hover/click events this
+    // frame (e.g. while the viewport cursor is captured for camera look).
+    void SetMouseCapture(bool captured) { m_mouseCapture = captured; }
+
     // Start a new ImGui frame and build the full-screen DockSpace.
     void NewFrame();
 
@@ -119,6 +123,7 @@ private:
     std::function<void()>                       m_onUndo;
     std::function<void()>                       m_onRedo;
     bool                                        m_panelsHidden  = false;
+    bool                                        m_mouseCapture  = false;
     ImFont*                                     m_iconFont      = nullptr;
 };
 

@@ -17,6 +17,15 @@ public static unsafe class ScriptBridgeEntry
     [UnmanagedCallersOnly]
     public static void Initialize(void* functionTablePtr) {
         try {
+            // Verify struct version before touching any function pointers.
+            uint gotVersion = ((ScriptApiFunctionTable*)functionTablePtr)->Version;
+            if (gotVersion != NativeApi.ExpectedTableVersion) {
+                Console.Error.WriteLine(
+                    $"[Bridge] ScriptApiFunctionTable version mismatch: " +
+                    $"C++ sent {gotVersion}, managed expects {NativeApi.ExpectedTableVersion}. " +
+                    $"Rebuild managed DLLs (dotnet publish managed/StellarAlia.ScriptBridge).");
+                return;
+            }
             NativeApi.Initialize(functionTablePtr);
             s_compiler = new ScriptCompiler();
             s_loader   = new ScriptLoader();

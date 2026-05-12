@@ -13,3 +13,5 @@ D:\ClionProjects\StellarAlia\managed\StellarAlia.Runtime\obj\Debug\net8.0\ref\St
 D:\ClionProjects\StellarAlia\cmake-build-debug\bin\managed\StellarAlia.Runtime.deps.json
 D:\ClionProjects\StellarAlia\cmake-build-debug\bin\managed\StellarAlia.Runtime.dll
 D:\ClionProjects\StellarAlia\cmake-build-debug\bin\managed\StellarAlia.Runtime.pdb
+D:\ClionProjects\StellarAlia\managed\StellarAlia.Runtime\bin\Debug\net8.0\StellarAlia.Runtime.xml
+D:\ClionProjects\StellarAlia\managed\StellarAlia.Runtime\obj\Debug\net8.0\StellarAlia.Runtime.xml

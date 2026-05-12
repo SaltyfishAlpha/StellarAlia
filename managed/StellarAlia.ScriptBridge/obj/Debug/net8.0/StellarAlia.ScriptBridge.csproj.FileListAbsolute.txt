@@ -20,3 +20,4 @@ D:\ClionProjects\StellarAlia\cmake-build-debug\bin\managed\StellarAlia.ScriptBri
 D:\ClionProjects\StellarAlia\cmake-build-debug\bin\managed\StellarAlia.ScriptBridge.pdb
 D:\ClionProjects\StellarAlia\managed\StellarAlia.ScriptBridge\obj\Debug\net8.0\StellarAlia.ScriptBridge.genruntimeconfig.cache
 D:\ClionProjects\StellarAlia\managed\StellarAlia.ScriptBridge\bin\Debug\net8.0\StellarAlia.ScriptBridge.runtimeconfig.json
+D:\ClionProjects\StellarAlia\managed\StellarAlia.ScriptBridge\bin\Debug\net8.0\StellarAlia.Runtime.xml

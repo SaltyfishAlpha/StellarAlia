@@ -13,6 +13,9 @@
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyInterface.h>
+#include <Jolt/Physics/Body/BodyLockInterface.h>
+#include <Jolt/Physics/Collision/RayCast.h>
+#include <Jolt/Physics/Collision/CastResult.h>
 
 #include "function/physics/PhysicsSystem.hpp"
 #include "function/scene/Scene.hpp"
@@ -396,6 +399,71 @@ void PhysicsSystem::Reset(Scene& scene) {
     });
 
     SA_LOG_INFO("PhysicsSystem: reset ({} bodies removed)", 0);
+}
+
+// ── Script API — RigidBody velocity / force ───────────────────────────────────
+
+glm::vec3 PhysicsSystem::GetLinearVelocity(uint32_t bodyId) const {
+    if (!m_initialized || bodyId == ~0u) return {};
+    return FromJolt(m_impl->jolt.GetBodyInterface().GetLinearVelocity(JPH::BodyID{ bodyId }));
+}
+
+void PhysicsSystem::SetLinearVelocity(uint32_t bodyId, glm::vec3 v) {
+    if (!m_initialized || bodyId == ~0u) return;
+    m_impl->jolt.GetBodyInterface().SetLinearVelocity(JPH::BodyID{ bodyId }, ToJolt(v));
+}
+
+glm::vec3 PhysicsSystem::GetAngularVelocity(uint32_t bodyId) const {
+    if (!m_initialized || bodyId == ~0u) return {};
+    return FromJolt(m_impl->jolt.GetBodyInterface().GetAngularVelocity(JPH::BodyID{ bodyId }));
+}
+
+void PhysicsSystem::SetAngularVelocity(uint32_t bodyId, glm::vec3 v) {
+    if (!m_initialized || bodyId == ~0u) return;
+    m_impl->jolt.GetBodyInterface().SetAngularVelocity(JPH::BodyID{ bodyId }, ToJolt(v));
+}
+
+void PhysicsSystem::AddForce(uint32_t bodyId, glm::vec3 f) {
+    if (!m_initialized || bodyId == ~0u) return;
+    m_impl->jolt.GetBodyInterface().AddForce(JPH::BodyID{ bodyId }, ToJolt(f));
+}
+
+void PhysicsSystem::AddImpulse(uint32_t bodyId, glm::vec3 imp) {
+    if (!m_initialized || bodyId == ~0u) return;
+    m_impl->jolt.GetBodyInterface().AddImpulse(JPH::BodyID{ bodyId }, ToJolt(imp));
+}
+
+// ── Script API — Raycast ──────────────────────────────────────────────────────
+
+bool PhysicsSystem::Raycast(glm::vec3 origin, glm::vec3 direction, float maxDist,
+                            glm::vec3& hitPos, glm::vec3& hitNormal,
+                            entt::entity& hitEntity, entt::registry& reg) const {
+    if (!m_initialized) return false;
+
+    JPH::RRayCast ray{ ToJolt(origin), ToJolt(direction * maxDist) };
+    JPH::RayCastResult result;
+    if (!m_impl->jolt.GetNarrowPhaseQuery().CastRay(ray, result))
+        return false;
+
+    hitPos = origin + direction * (maxDist * result.mFraction);
+
+    // Retrieve surface normal from the hit shape
+    {
+        JPH::BodyLockRead lock(m_impl->jolt.GetBodyLockInterface(), result.mBodyID);
+        if (lock.Succeeded()) {
+            const JPH::Body& body = lock.GetBody();
+            hitNormal = FromJolt(body.GetWorldSpaceSurfaceNormal(result.mSubShapeID2,
+                                                                  ToJolt(hitPos)));
+        }
+    }
+
+    // Resolve ECS entity by matching bodyId bits
+    const uint32_t bits = result.mBodyID.GetIndexAndSequenceNumber();
+    hitEntity = entt::null;
+    for (auto [e, rb] : reg.view<RigidBodyComponent>().each()) {
+        if (rb.bodyId == bits) { hitEntity = e; break; }
+    }
+    return true;
 }
 
 } // namespace StellarAlia

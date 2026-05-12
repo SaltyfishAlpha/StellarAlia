@@ -9,6 +9,7 @@ namespace StellarAlia {
 class Scene;
 class InputSystem;
 class DebugDraw;
+class PhysicsSystem;
 }
 
 namespace StellarAlia {
@@ -29,11 +30,12 @@ namespace StellarAlia {
 class ScriptSystem {
 public:
     struct Context {
-        Scene*       scene          = nullptr;
-        InputSystem* input          = nullptr;
-        DebugDraw*   debug          = nullptr;
-        std::string  managedDir;    // path to bin/managed/ — Bridge + Runtime DLLs
-        std::string  projectDir;    // project root — .cs files resolved relative to this
+        Scene*         scene          = nullptr;
+        InputSystem*   input          = nullptr;
+        DebugDraw*     debug          = nullptr;
+        PhysicsSystem* physics        = nullptr;
+        std::string    managedDir;    // path to bin/managed/ — Bridge + Runtime DLLs
+        std::string    projectDir;    // project root — .cs files resolved relative to this
     };
 
     ScriptSystem()  = default;
@@ -48,6 +50,10 @@ public:
     void OnPlayStart          (Scene& gameScene);
     void OnPlayStop           (entt::registry& reg);
     void OnSceneAboutToChange (entt::registry& reg);
+
+    // Compile all scripts in the editor scene (diagnostics only, no Instantiate).
+    // Safe to call while not playing. Returns true on compile success.
+    bool RecompileEditing     (entt::registry& reg);
 
     void FixedUpdate(float fixedDt, entt::registry& reg);
     void Update     (float dt,      entt::registry& reg);

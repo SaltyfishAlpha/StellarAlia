@@ -33,9 +33,10 @@ std::unique_ptr<GLFWWindow> GLFWWindow::Create(const WindowDesc& desc) {
     win->m_width  = desc.width;
     win->m_height = desc.height;
 
-    // Store pointer-to-self so the resize callback can update dimensions
+    // Store pointer-to-self so callbacks can update state
     glfwSetWindowUserPointer(handle, win.get());
     glfwSetFramebufferSizeCallback(handle, OnFramebufferResized);
+    glfwSetWindowFocusCallback(handle, OnWindowFocus);
 
     SA_LOG_INFO("GLFWWindow: created {}x{} '{}'", desc.width, desc.height, desc.title);
     return win;
@@ -66,6 +67,11 @@ void GLFWWindow::OnFramebufferResized(GLFWwindow* window, int width, int height)
     self->m_width  = static_cast<uint32_t>(width);
     self->m_height = static_cast<uint32_t>(height);
     SA_LOG_INFO("GLFWWindow: resized to {}x{}", width, height);
+}
+
+void GLFWWindow::OnWindowFocus(GLFWwindow* window, int focused) {
+    auto* self   = static_cast<GLFWWindow*>(glfwGetWindowUserPointer(window));
+    self->m_focused = (focused != 0);
 }
 
 } // namespace StellarAlia::Platform

@@ -32,3 +32,4 @@ D:\ClionProjects\StellarAlia\cmake-build-debug\bin\managed\zh-Hans\Microsoft.Cod
 D:\ClionProjects\StellarAlia\cmake-build-debug\bin\managed\zh-Hant\Microsoft.CodeAnalysis.CSharp.resources.dll
 D:\ClionProjects\StellarAlia\cmake-build-debug\bin\managed\StellarAlia.Runtime.dll
 D:\ClionProjects\StellarAlia\cmake-build-debug\bin\managed\StellarAlia.Runtime.pdb
+D:\ClionProjects\StellarAlia\cmake-build-debug\bin\managed\StellarAlia.Runtime.xml

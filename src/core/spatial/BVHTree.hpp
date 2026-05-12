@@ -230,9 +230,12 @@ private:
 
         if (node.left == -1) {
             // Leaf — test each prim individually.
+            // Accept only if tFar (t) is strictly less than bestT: this correctly
+            // prefers smaller/inner objects (smaller exit distance) over large outer
+            // ones whose AABB entry may still be in front of the current best.
             for (int i = node.primBegin; i < node.primEnd; ++i) {
                 float t;
-                if (RayAABB(ray, m_prims[i].min, m_prims[i].max, bestT, t)) {
+                if (RayAABB(ray, m_prims[i].min, m_prims[i].max, bestT, t) && t < bestT) {
                     bestT       = t;
                     bestPayload = m_prims[i].payload;
                     hit         = true;

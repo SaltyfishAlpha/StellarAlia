@@ -26,6 +26,7 @@
 
 #include "core/spatial/BVHTree.hpp"
 #include "ui/EditorIconCache.hpp"
+#include "platform/io/FileWatcher.hpp"
 
 #include <entt/entt.hpp>
 #include <imgui.h>
@@ -101,6 +102,9 @@ private:
     EditorActionRegistry                      m_actionRegistry;
     CommandManager                            m_commandManager;
     EditorContext                             m_ctx;
+
+    Platform::FileWatcher      m_scriptWatcher;
+    bool                       m_pendingRecompile = false;
 
     std::filesystem::path      m_currentScenePath;
     std::filesystem::path      m_pendingProjectLoad;   // deferred — set in OnRenderUI, executed in OnUpdate

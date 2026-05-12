@@ -20,6 +20,7 @@ internal sealed class ScriptLoader
 {
     private CollectibleALC?               _alc;
     private readonly Dictionary<ulong, ScriptBase> _instances = new();
+    private bool _updateBatchActive = false;
     private static readonly FieldInfo     s_entityIdField =
         typeof(ScriptBase).GetField("EntityId", BindingFlags.Instance | BindingFlags.NonPublic)!;
 
@@ -51,8 +52,14 @@ internal sealed class ScriptLoader
                 case LifecycleMethod.OnAttach:      inst.OnAttach();          break;
                 case LifecycleMethod.OnStart:       inst.OnStart();           break;
                 case LifecycleMethod.OnFixedUpdate: inst.OnFixedUpdate(arg);  break;
-                case LifecycleMethod.OnUpdate:      inst.OnUpdate(arg);       break;
-                case LifecycleMethod.OnLateUpdate:  inst.OnLateUpdate(arg);   break;
+                case LifecycleMethod.OnUpdate:
+                    if (!_updateBatchActive) { Input.BeginFrame(); _updateBatchActive = true; }
+                    inst.OnUpdate(arg);
+                    break;
+                case LifecycleMethod.OnLateUpdate:
+                    _updateBatchActive = false;
+                    inst.OnLateUpdate(arg);
+                    break;
                 case LifecycleMethod.OnStop:        inst.OnStop();            break;
                 case LifecycleMethod.OnDetach:      inst.OnDetach();          break;
             }

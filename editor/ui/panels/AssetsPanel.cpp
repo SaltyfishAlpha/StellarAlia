@@ -970,6 +970,27 @@ void AssetsPanel::DrawDirPane(const fs::path& dir) {
 }
 
 void AssetsPanel::DrawFilePane() {
+    // ── Double-click resolution (short = navigate/open, long = rename) ────────
+    {
+        const auto dblResult = m_dblClick.Update(ImGui::GetIO().DeltaTime);
+        if (dblResult == DoubleClickClassifier::Result::Short) {
+            if (m_dblClickIsDir)
+                m_selectedDir = m_dblClickPath;
+            else if (m_dblClickPath.extension() == ".sascene" && m_onSceneLoad)
+                m_onSceneLoad(m_dblClickPath);
+            else if (IsTextAsset(m_dblClickPath.extension()))
+                OpenFileExternal(m_dblClickPath);
+        } else if (dblResult == DoubleClickClassifier::Result::Long) {
+            m_renamingPath     = m_dblClickPath;
+            m_renameFocusNext  = true;
+            m_renamingFromTree = false;
+            const std::string stem = m_dblClickIsDir
+                ? m_dblClickPath.filename().string()
+                : m_dblClickPath.stem().string();
+            std::snprintf(m_renameNameBuf, sizeof(m_renameNameBuf), "%s", stem.c_str());
+        }
+    }
+
     if (m_selectedDir.empty() || !fs::exists(m_selectedDir)) return;
 
     // ── Gather: rescan only when directory changes or an operation marks dirty ──
@@ -997,7 +1018,23 @@ void AssetsPanel::DrawFilePane() {
     const int numFiles = (int)files.size();
     const int numItems = numDirs + numFiles;
 
-    if (numItems == 0) { ImGui::TextDisabled("(empty)"); return; }
+    if (numItems == 0) {
+        ImGui::TextDisabled("(empty)");
+        // Still offer create menu on empty directory
+        if (ImGui::BeginPopupContextWindow("##filepane_bg_ctx")) {
+            if (ImGui::BeginMenu("Create")) {
+                if (ImGui::MenuItem("Folder"))             CreateNewDir(m_selectedDir);
+                ImGui::Separator();
+                if (ImGui::MenuItem("Scene (.sascene)"))   CreateNewFile(CreateKind::Scene,  m_selectedDir);
+                if (ImGui::MenuItem("Material (.samat)"))  CreateNewFile(CreateKind::Mat,    m_selectedDir);
+                if (ImGui::MenuItem("Shader (.saglsl)"))   CreateNewFile(CreateKind::Saglsl, m_selectedDir);
+                if (ImGui::MenuItem("Script (.cs)"))       CreateNewFile(CreateKind::Script, m_selectedDir);
+                ImGui::EndMenu();
+            }
+            ImGui::EndPopup();
+        }
+        return;
+    }
 
     // Index helpers
     auto itemIsDir = [&](int i) { return i < numDirs; };
@@ -1088,12 +1125,9 @@ void AssetsPanel::DrawFilePane() {
         }
         // ── Double-click ──────────────────────────────────────────────────────
         if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-            if (isDir)
-                m_selectedDir = p;
-            else if (p.extension() == ".sascene" && m_onSceneLoad)
-                m_onSceneLoad(p);
-            else if (IsTextAsset(p.extension()))
-                OpenFileExternal(p);
+            m_dblClickPath  = p;
+            m_dblClickIsDir = isDir;
+            m_dblClick.OnDoubleClicked();
         }
         // ── Context menu ──────────────────────────────────────────────────────
         if (isDir) {
@@ -1347,6 +1381,30 @@ void AssetsPanel::DrawFilePane() {
             }
         }
         clipper.End();
+    }
+
+    // ── Empty-space interactions ──────────────────────────────────────────────
+    // Right-click on background → create menu for current directory.
+    if (ImGui::BeginPopupContextWindow("##filepane_bg_ctx",
+            ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
+        if (ImGui::BeginMenu("Create")) {
+            if (ImGui::MenuItem("Folder"))             CreateNewDir(m_selectedDir);
+            ImGui::Separator();
+            if (ImGui::MenuItem("Scene (.sascene)"))   CreateNewFile(CreateKind::Scene,  m_selectedDir);
+            if (ImGui::MenuItem("Material (.samat)"))  CreateNewFile(CreateKind::Mat,    m_selectedDir);
+            if (ImGui::MenuItem("Shader (.saglsl)"))   CreateNewFile(CreateKind::Saglsl, m_selectedDir);
+            if (ImGui::MenuItem("Script (.cs)"))       CreateNewFile(CreateKind::Script, m_selectedDir);
+            ImGui::EndMenu();
+        }
+        ImGui::EndPopup();
+    }
+    // Left-click on background → deselect all.
+    if (ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        m_pendingDeselectOtherPath.clear();
+        m_selectedPaths.clear();
+        SetSelectedPath({});
+        m_shiftAnchorPath.clear();
     }
 }
 

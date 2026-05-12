@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Numerics;
 
 namespace StellarAlia;
@@ -20,6 +21,19 @@ public enum MouseButton { Left, Right, Middle }
 
 public static class Input
 {
+    private static readonly HashSet<Key> _prev = new();
+    private static readonly HashSet<Key> _curr = new();
+
+    // Called by ScriptBridgeEntry before OnUpdate each frame to advance frame state.
+    internal static void BeginFrame() {
+        _prev.Clear();
+        foreach (var k in _curr) _prev.Add(k);
+        _curr.Clear();
+        foreach (Key k in System.Enum.GetValues<Key>()) {
+            if (NativeApi.SA_Input_GetKey(KeyPath(k)) > 0.5f) _curr.Add(k);
+        }
+    }
+
     private static string KeyPath(Key k) => k switch {
         Key.Space      => "Keyboard/Space",
         Key.Enter      => "Keyboard/Enter",
@@ -51,7 +65,13 @@ public static class Input
     };
 
     /// Returns true while the key is held.
-    public static bool IsKeyDown(Key k) => NativeApi.SA_Input_GetKey(KeyPath(k)) > 0.5f;
+    public static bool IsKeyDown(Key k) => _curr.Contains(k);
+
+    /// Returns true on the first frame the key was pressed.
+    public static bool IsKeyJustPressed(Key k) => _curr.Contains(k) && !_prev.Contains(k);
+
+    /// Returns true on the first frame the key was released.
+    public static bool IsKeyJustReleased(Key k) => !_curr.Contains(k) && _prev.Contains(k);
 
     /// Returns the raw analog value [0,1] for a key (useful for triggers/axes).
     public static float GetKeyValue(Key k) => NativeApi.SA_Input_GetKey(KeyPath(k));

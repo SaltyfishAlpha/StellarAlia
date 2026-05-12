@@ -81,17 +81,32 @@ add_subdirectory(src)
 
 # Managed C# projects (StellarAlia.Runtime + StellarAlia.ScriptBridge)
 # Output goes to bin/managed/ so ScriptSystem can locate the DLLs at runtime.
+# Uses add_custom_command with DEPENDS on all .cs sources so that:
+#   • any .cs change triggers an incremental dotnet publish automatically, and
+#   • building the main exe always ensures the DLLs are up-to-date.
 find_program(DOTNET dotnet)
 if(DOTNET)
     set(MANAGED_OUTPUT_DIR "${CMAKE_BINARY_DIR}/bin/managed")
-    add_custom_target(managed_build ALL
+    set(MANAGED_STAMP "${CMAKE_BINARY_DIR}/managed_build.stamp")
+
+    # Collect all C# source files that should trigger a rebuild.
+    # CONFIGURE_DEPENDS: CMake re-globs at build time so new .cs files are picked up automatically.
+    file(GLOB_RECURSE MANAGED_CS_SOURCES CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/managed/*.cs"
+        "${CMAKE_SOURCE_DIR}/managed/*.csproj")
+
+    add_custom_command(
+        OUTPUT  "${MANAGED_STAMP}"
         COMMAND ${DOTNET} publish "${CMAKE_SOURCE_DIR}/managed/StellarAlia.ScriptBridge"
                 -c $<CONFIG> --nologo -v q
                 -o "${MANAGED_OUTPUT_DIR}"
-        COMMENT "Publishing managed C# projects → bin/managed/ (includes NuGet deps)"
+        COMMAND ${CMAKE_COMMAND} -E touch "${MANAGED_STAMP}"
+        DEPENDS ${MANAGED_CS_SOURCES}
+        COMMENT "Publishing managed C# projects → bin/managed/"
         VERBATIM)
-    add_dependencies(managed_build StellarAliaRuntime)
-    message(STATUS "dotnet found: ${DOTNET} — managed_build target enabled")
+
+    add_custom_target(managed_build ALL DEPENDS "${MANAGED_STAMP}" StellarAliaRuntime)
+    message(STATUS "dotnet found: ${DOTNET} — managed_build target enabled (incremental via stamp)")
 else()
     message(WARNING "dotnet not found — managed C# projects will not be built")
 endif()
@@ -221,10 +236,10 @@ endif()
 # and copy textures/models/hdri to the runtime output directory.
 setup_assets()
 
-# Wire shader compilation, dispatch generation, and asset cooking as hard
-# build-time dependencies of the main executable so they always run before
-# the binary is considered up-to-date.
-foreach(_dep StellarAliaBuiltinShaders ShadingEvaluatorsCopy CookAssets)
+# Wire shader compilation, dispatch generation, asset cooking, and managed DLLs
+# as hard build-time dependencies of the main executable so they always run
+# before the binary is considered up-to-date.
+foreach(_dep StellarAliaBuiltinShaders ShadingEvaluatorsCopy CookAssets managed_build)
     if(TARGET ${_dep})
         add_dependencies(${PROJECT_NAME} ${_dep})
     endif()

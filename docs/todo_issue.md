@@ -5,7 +5,6 @@
     - **Reimport All 进度条**（难度中，最有实际价值）：`ReimportDir` 同步阻塞 UI。改法：将其拆成逐帧 N 个文件的状态机，`OnDraw` 期间推进并用 `ImGui::ProgressBar` + modal 显示；或移入工作线程 + 原子进度计数器。
     - 前置条件：依赖 `AssetsPanel` 暴露异步迭代接口；待项目素材量增大后再做。
 27. 美化编辑器：骨骼改用球+锥绘制而不是线
-29. 引入挂载脚本 并提炼现有运行时库暴露给脚本调用
 31. animator编辑器 imguizmo
 32. 材质可视化编程 imguizmo
 33. 场景物体：贝塞尔曲线与相机移动 imguizmo 脚本issue完成后
@@ -905,35 +904,144 @@ editor/ui/drawers/
 
 ---
 
-## Issue #56 — Script 热编译（Editor 内无需重启即可重新编译脚本）
+## Issue #56 — Script 热编译（Editor 内无需重启即可重新编译脚本）✅
 
+**状态：已完成**  
 **优先级：中（依赖 #29 已完成）**
 
 ### 目标
 
-Editor 处于非 Playing 状态时，`.cs` 文件保存后自动（或手动触发）重新编译，并将诊断结果显示在 Inspector 中；Playing 状态下支持手动触发热重载（Unload → Compile → Instantiate），无需退出/重进 Play。
+Editing 状态下，主窗口**聚焦**时若检测到 `.cs` 文件变化则立即后台编译（Roslyn only，不 Instantiate），诊断路由至 Diagnostics tab；主窗口**失焦**期间积压变更标记，待窗口重获焦点时立即触发；Playing / Paused 状态下不自动重编。
 
 ### 设计
 
-**非 Playing — 后台编译（仅语法检查/诊断，不 Instantiate）**
-- `ScriptSystem` 添加 `RecompileAll(paths[])` 方法，只跑 Roslyn 编译、不执行 Instantiate，将 Diagnostic 存入 `m_compileErrors`
-- `AssetsPanel`：`.cs` 文件右键菜单新增 "Recompile Scripts"，调用 `Application::GetScriptSystem().RecompileAll(...)`
-- Inspector 的 `ScriptDrawer` 显示最新 `CompileErrors()`
+#### 1. `FileWatcher`（新建）
 
-**Playing — ALC 热重载**
-- `ScriptSystem::HotReload(reg)` = `InvokeAll(OnStop) → InvokeAll(OnDetach) → m_fnUnload() → Compile → Instantiate → InvokeAll(OnAttach) → InvokeAll(OnStart)`
-- `WeakReference<ALC>` 等待旧 ALC GC 回收后再加载新程序集（超时 2s 打警告继续）
-- 字段值不保留（全量重建实例）；字段序列化保留属于 Phase 2
+```
+src/platform/io/FileWatcher.hpp
+src/platform/io/FileWatcher.cpp
+```
 
-**文件监听（可选 Phase 2）**
-- 平台 API：Windows `ReadDirectoryChangesW` / Linux `inotify`，轮询间隔 200ms
-- 检测到 `.cs` 变化 → 非 Playing 自动触发 `RecompileAll`
+```cpp
+class FileWatcher {
+public:
+    void Watch(const std::filesystem::path& dir); // 启动后台监听线程
+    void Stop();                                   // 析构时自动调用
+    void PollChanges(std::vector<std::filesystem::path>& out); // 主线程每帧轮询
+private:
+    std::thread              m_thread;
+    std::mutex               m_mutex;
+    std::vector<std::filesystem::path> m_pending;
+    std::atomic<bool>        m_running{false};
+    // Windows: ReadDirectoryChangesW 循环写入 m_pending
+};
+```
 
-### 边界
+- Windows 实现：`ReadDirectoryChangesW`（`FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME`），监听目录递归；后台线程持续 append 到 `m_pending`，`PollChanges` 加锁 swap 到 `out`
+- Linux 留接口存根，等移植期加 `inotify`
 
-- 热重载期间不暂停帧循环（最多一帧卡顿）
-- 编译失败时保持当前运行状态不变，仅更新诊断
-- 不支持添加/删除 ScriptComponent 后的热重载（需重新 OnPlayStart）
+#### 2. `IWindow::IsFocused()` + GLFWWindow focus callback
+
+```cpp
+// IWindow.hpp
+virtual bool IsFocused() const = 0;
+
+// GLFWWindow.hpp
+bool m_focused = true;   // 初始视为已聚焦，避免首帧漏过
+
+// GLFWWindow.cpp — Create() 中追加：
+glfwSetWindowFocusCallback(handle, OnWindowFocus);
+
+// 静态回调：
+static void OnWindowFocus(GLFWwindow* w, int focused) {
+    static_cast<GLFWWindow*>(glfwGetWindowUserPointer(w))->m_focused = (focused != 0);
+}
+bool GLFWWindow::IsFocused() const { return m_focused; }
+```
+
+#### 3. `ScriptSystem::RecompileEditing(entt::registry& reg)`
+
+- 复用 `OnPlayStart` 中的路径收集 + `m_fnCompile` 调用
+- 不调用 `m_fnInstantiate`（此时 ALC 未加载，直接编译出诊断即可）
+- 编译 Diagnostic 通过 `ScriptLogger()` spdlog 通道输出（#58 已完成，自动路由 Diagnostics tab）
+- 返回 `bool`（成功/失败）；`m_playing` 必须为 `false`，否则 early-return
+
+#### 4. EditorMode 集成
+
+新增成员：
+```cpp
+Platform::FileWatcher m_scriptWatcher;
+bool                  m_pendingRecompile = false;
+```
+
+流程：
+```
+LoadProject() 时:
+    m_scriptWatcher.Stop();
+    m_scriptWatcher.Watch(projectDir / "assets");   // 递归
+
+OnUpdate() 帧末:
+    vector<path> changed;
+    m_scriptWatcher.PollChanges(changed);
+    for each path: if extension == ".cs" → m_pendingRecompile = true
+
+    if m_pendingRecompile
+       && m_app->GetWindow()->IsFocused()
+       && m_app->GetPlayState() == EnginePlayState::Editing:
+        m_app->GetScriptSystem().RecompileEditing(scene.Registry())
+        m_pendingRecompile = false
+
+OnPlayStateChanged(Playing/Paused):
+    m_pendingRecompile = false   // 进入 Play 时清空，不干扰运行时
+
+OnPlayStateChanged(Editing):     // Stop Play → 回 Edit
+    if m_pendingRecompile && m_app->GetWindow()->IsFocused():
+        立即重编（可直接在此调用 RecompileEditing）
+```
+
+#### 关系图
+
+```
+FileWatcher bg-thread
+    ReadDirectoryChangesW → m_pending (mutex)
+                                ↓ PollChanges() each frame
+                         EditorMode::OnUpdate
+                                ↓ .cs 变化?
+                         m_pendingRecompile = true
+                                ↓ IsFocused() + Editing?
+                         ScriptSystem::RecompileEditing()
+                                ↓
+                         spdlog "script" logger
+                                ↓
+                         Diagnostics tab (#58 路由已完成)
+```
+
+### 实施步骤
+
+1. **`IWindow` / `GLFWWindow`**：添加 `IsFocused()` 纯虚函数 + `m_focused` 字段 + `glfwSetWindowFocusCallback`（~10 行）
+2. **新建 `FileWatcher`**：`src/platform/io/FileWatcher.hpp` + `.cpp`，Windows `ReadDirectoryChangesW` 后台线程 + 线程安全轮询
+3. **CMakeLists**：将 `FileWatcher.cpp` 加入 engine/platform target
+4. **`ScriptSystem::RecompileEditing(reg)`**：收集路径 → `m_fnCompile` → log diagnostics，无 Instantiate；`ScriptSystem.hpp` 声明为 `public`
+5. **`EditorMode`**：添加 `m_scriptWatcher` + `m_pendingRecompile`；`LoadProject()` 中启动监听；`OnUpdate()` 末尾轮询 + 焦点判断触发重编；`OnPlayStateChanged` 中清空 / 触发 pending
+6. **验证**：① 聚焦时改 `.cs` → 自动编译，Diagnostics 出现结果；② 失焦时改 `.cs` → 重新聚焦才编译；③ Playing 时改 → 不触发
+
+### 边界情况与约束
+
+| 约束 | 说明 |
+|------|------|
+| 监听范围 | `projectDir / "assets"` 递归，仅过滤 `.cs`；非 `.cs` 变化直接丢弃 |
+| 项目未加载 | Project Browser 选择前不启动 FileWatcher；`LoadProject()` 是唯一启动点 |
+| 编译同步阻塞 | Roslyn 在主线程同步执行，单次编译约 100–500ms；当前帧轻微卡顿可接受，异步化属 Phase 2 |
+| Play 时变更 | `m_pendingRecompile` 继续积累，Stop Play 回 Editing 后若 pending 且聚焦则立即重编 |
+| 不做 Linux | FileWatcher Windows 实现；Linux 接口存根，等移植期填充 `inotify` |
+| 不做 Playing 热重载 | ALC Unload → Reload 序列属原规划 Phase 2，本 issue 不涉及 |
+| 不做字段保留 | 重编不保留脚本字段值，Phase 2 做序列化 |
+| `.cs` 删除/重命名 | 视作变更触发重编（编译会因文件消失失败，Diagnostic 正常输出错误）|
+
+### 受益 issues
+
+- **#58**（Diagnostics 路由）：编译错误自动出现在 Diagnostics tab，无需额外 UI
+- **#69**（Runtime API 扩展）：API 稳定后自动重编不因签名变更静默失效
 
 ---
 
@@ -1005,6 +1113,8 @@ struct ScriptApiFunctionTable {
     // ... (所有现有字段) ...
     float   (*Time_GetTotalTime)     ();
     // ── Block 2 — v2 新增 ──────────────────────
+    int32_t  (*Entity_GetRotationQuat) (uint64_t id, float* w, float* x, float* y, float* z);
+    void     (*Entity_SetRotationQuat) (uint64_t id, float w, float x, float y, float z);
     void     (*Entity_Destroy)        (uint64_t id);
     uint64_t (*Entity_Create)         (const char* name, float x, float y, float z);
     void     (*RigidBody_GetVelocity) (uint64_t id, float*, float*, float*);
@@ -1047,12 +1157,13 @@ public static bool Raycast(Vector3 origin, Vector3 direction, out RaycastHit hit
 
 ```csharp
 // Entity.cs
-public Quaternion GetRotation() { /* 通过 GetRotationEuler 反算，或新增 GetRotationQuat slot */ }
-public Vector3 Forward => Vector3.Transform(-Vector3.UnitZ, GetRotationQuat());
-public Vector3 Right   => Vector3.Transform( Vector3.UnitX, GetRotationQuat());
-public Vector3 Up      => Vector3.Transform( Vector3.UnitY, GetRotationQuat());
+public Quaternion GetRotation() { /* Entity_GetRotationQuat slot — 直读 glm::quat，无精度损耗 */ }
+public void       SetRotation(Quaternion q) { /* Entity_SetRotationQuat slot */ }
+public Vector3 Forward => Vector3.Transform(-Vector3.UnitZ, GetRotation());
+public Vector3 Right   => Vector3.Transform( Vector3.UnitX, GetRotation());
+public Vector3 Up      => Vector3.Transform( Vector3.UnitY, GetRotation());
 ```
-> 需要在 NativeApi 增加一个 `Entity_GetRotationQuat(id, w*, x*, y*, z*)` 槽，避免 Euler 往返引入万向节锁噪声。
+> `GetRotationQuat` / `SetRotationQuat` 直接读写 `glm::quat`（WXYZ），避免 Euler 往返引入万向节锁噪声；Euler 接口保留作便捷重载。
 
 ### 实施步骤
 
@@ -1071,10 +1182,16 @@ public Vector3 Up      => Vector3.Transform( Vector3.UnitY, GetRotationQuat());
   - `ScriptBridgeEntry.InvokeLifecycle` 在 `method == OnUpdate` 之前调用 `Input.BeginFrame()`（或统一在帧开始处）
   - 暴露 `IsKeyJustPressed(Key)` / `IsKeyJustReleased(Key)`
 
-- [ ] **Step 4 — version 字段 + Entity_GetRotationQuat + Entity Forward/Right/Up**
-  - `ScriptApiFunctionTable` 首字段加 `uint32_t version = 2`（注意：C# 侧首字段同步加 `uint version`）
-  - 新增 `SA_Entity_GetRotationQuat(id, w*, x*, y*, z*)` C++ 实现 + 表槽 + C# 绑定
-  - `Entity.cs` 添加 `GetRotationQuat()` 私有方法，以及 `Forward`、`Right`、`Up` 属性
+- [ ] **Step 4 — version 字段 + 四元数旋转 API + Entity 方向向量**
+  - `ScriptApiFunctionTable` 首字段加 `uint32_t version = 2`（C# 侧同步加 `uint version`）
+  - C++：新增 `SA_Entity_GetRotationQuat(id, w*, x*, y*, z*)` 和 `SA_Entity_SetRotationQuat(id, w, x, y, z)`，直接读写 `TransformComponent::rotation`（`glm::quat`），无 Euler 往返损耗
+  - C# `NativeApi.cs`：新增对应两个函数指针槽绑定
+  - `Entity.cs` 公开 `Quaternion GetRotation()` / `void SetRotation(Quaternion)`；`Forward`、`Right`、`Up` 只读属性（通过 `GetRotation()` 推导，不再依赖 Euler 反算）；保留 `GetRotationEuler`/`SetRotationEuler` 用于 Inspector 兼容
+  - 新建 `managed/StellarAlia.Runtime/QuaternionExt.cs`（纯 managed）：
+    - `QuaternionExt.LookRotation(Vector3 forward, Vector3 up)` — 从前向量构造朝向
+    - `QuaternionExt.Slerp(Quaternion a, Quaternion b, float t)` — 包装 `Quaternion.Slerp`
+    - `QuaternionExt.FromEuler(float x, float y, float z)` — 角度制 Euler → Quat（消除用户手写 `MathF.PI/180` 的需要）
+    - `QuaternionExt.ToEuler(Quaternion q)` — Quat → 角度制 Vector3，供调试用
 
 - [ ] **Step 5 — Entity 生命周期：Destroy / Create**
   - C++：`SA_Entity_Destroy(id)` — `g_ctx.scene->Registry().destroy(entity)`；`SA_Entity_Create(name, x, y, z)` — `EntityFactory::SpawnEmpty(scene, name, {x,y,z})`
@@ -1098,11 +1215,208 @@ public Vector3 Up      => Vector3.Transform( Vector3.UnitY, GetRotationQuat());
   - C# 侧：`Physics.Raycast(Vector3 origin, Vector3 dir, out RaycastHit hit, float maxDist)` 静态方法
   - 边界：仅 Play 期间有效（Jolt 在 Editing 时已 Reset）；非 Play 返回 false
 
+- [ ] **Step 9 — 外部 IDE 支持（XML 文档 + 项目模板 + .csproj / .sln / .gitignore 生成）**
+
+  **文件职责一览**（三类文件共存，不互相替代）：
+
+  | 文件 | 职责 | 纳入版本控制？ |
+  |------|------|--------------|
+  | `{Name}.saproject` | 引擎项目描述符（startupScene、name、version），由编辑器读取 | ✓ 是 |
+  | `{Name}.csproj` | IDE C# 补全，含机器绝对路径 HintPath，由编辑器生成 | ✗ gitignore |
+  | `{Name}.sln` | Visual Studio Solution，引用 `.csproj`，供 VS/Rider 双击打开 | ✗ gitignore |
+  | `.gitignore` | 排除 IDE 生成文件和 cook cache | ✓ 是 |
+
+  **关于扩展名**：`.csproj` 和 `.sln` 是 IDE 识别 C# 项目的标准格式，不可替换为自定义扩展名（如 `.scproj`），否则 Rider / VS Code / Visual Studio 无法提供 IntelliSense。
+
+  **关于版本控制**：Unity 的 `.csproj`/`.sln` 本身**提交到 git**，因为它们用 MSBuild 变量引用 UnityEngine.dll 而非硬编码绝对路径，内容可跨机器复现。StellarAlia 采用同样策略：`.csproj`/`.sln` 提交，把机器相关的绝对路径单独放进 `Directory.Build.props`，只有这一个文件被 gitignore。
+
+  ---
+
+  **子任务 9a — Runtime XML 文档**
+  - `managed/StellarAlia.Runtime/StellarAlia.Runtime.csproj` 添加 `<GenerateDocumentationFile>true</GenerateDocumentationFile>`
+  - 对所有公开 API 补充 `/// <summary>` 注释（`ScriptBase`、`Entity`、`Input`、`Mathf`、`Debug`、`Time`、`AnimatorProxy`、`RigidBodyProxy`、`Physics`、`QuaternionExt`）
+  - 构建产物 `StellarAlia.Runtime.xml` 随 `StellarAlia.Runtime.dll` 输出到 `bin/managed/`；IDE 自动读取同目录 XML 显示 tooltip
+
+  ---
+
+  **子任务 9b — 项目目录模板（新项目创建时）**
+
+  `assets/templates/project/` 存放静态模板（随引擎分发，无机器相关路径）：
+
+  ```
+  assets/templates/project/
+  └─ .gitignore.template
+  ```
+
+  新建项目时（`ProjectBrowserPanel` "New Project" 流程）生成的完整结构：
+
+  ```
+  {ProjectName}/
+  ├─ assets/
+  │   ├─ scenes/
+  │   │   └─ default.sascene        (从 templates/scenes/ 复制)
+  │   ├─ scripts/                   (空目录)
+  │   └─ materials/                 (空目录)
+  ├─ {ProjectName}.saproject        ✓ 版本控制 — 引擎描述符
+  ├─ {ProjectName}.csproj           ✓ 版本控制 — 用变量引用 Runtime.dll
+  ├─ {ProjectName}.sln              ✓ 版本控制 — VS Solution
+  ├─ Directory.Build.props          ✗ gitignore — 仅含机器绝对路径
+  └─ .gitignore                     ✓ 版本控制 — 从模板生成
+  ```
+
+  `.gitignore.template` 内容（只排除机器相关文件，不排除 `.csproj`/`.sln`）：
+
+  ```gitignore
+  # Machine-specific: auto-regenerated by the editor on project open
+  Directory.Build.props
+
+  # IDE intermediate files
+  .vs/
+  .idea/
+  obj/
+
+  # Cook cache
+  cook_cache/
+
+  # OS artifacts
+  .DS_Store
+  Thumbs.db
+  ```
+
+  实现：`.gitignore` 只在不存在时写入（不覆盖用户修改）；`.saproject` 写入 `{"name":"{stem}","version":1,"startupScene":"assets/scenes/default.sascene"}`。
+
+  ---
+
+  **子任务 9c — `{ProjectName}.csproj`、`{ProjectName}.sln`、`Directory.Build.props` 生成**
+
+  **`Directory.Build.props`**（gitignore，机器相关，每次打开项目重写）：
+
+  ```xml
+  <!-- Auto-generated by StellarAlia Editor — gitignored, do not commit -->
+  <Project>
+    <PropertyGroup>
+      <StellarAliaManaged>{managedDir_绝对路径}</StellarAliaManaged>
+    </PropertyGroup>
+  </Project>
+  ```
+
+  **`{ProjectName}.csproj`**（提交到 git，使用变量，跨机器内容一致）：
+
+  ```xml
+  <!-- IDE project file — commit to version control -->
+  <Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+      <TargetFramework>net8.0</TargetFramework>
+      <Nullable>enable</Nullable>
+      <ImplicitUsings>disable</ImplicitUsings>
+      <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+      <IsPackable>false</IsPackable>
+    </PropertyGroup>
+    <ItemGroup>
+      <Reference Include="StellarAlia.Runtime">
+        <HintPath>$(StellarAliaManaged)/StellarAlia.Runtime.dll</HintPath>
+      </Reference>
+    </ItemGroup>
+    <ItemGroup>
+      <Compile Include="assets/scripts/**/*.cs" />
+    </ItemGroup>
+  </Project>
+  ```
+
+  > MSBuild 会自动在当前目录及所有父目录搜索 `Directory.Build.props`，无需在 `.csproj` 中显式引用。
+
+  **`{ProjectName}.sln`**（提交到 git，无路径，跨机器内容一致）：
+
+  ```
+  Microsoft Visual Studio Solution File, Format Version 12.00
+  # Visual Studio Version 17
+  Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "{stem}", "{stem}.csproj", "{GUID}"
+  EndProject
+  Global
+    GlobalSection(SolutionConfigurationPlatforms) = preSolution
+      Debug|Any CPU = Debug|Any CPU
+    EndGlobalSection
+    GlobalSection(ProjectConfigurationPlatforms) = postSolution
+      {GUID}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+    EndGlobalSection
+  EndGlobal
+  ```
+
+  > 类型 GUID `{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}` 是 C# MSBuild 项目固定值；实例 GUID 由 `{stem}` SHA-1 UUID v5 确定性生成（同名项目内容完全相同）。
+
+  **C++ 实现**（`Application::UpdateProjectPaths` 末尾）：
+  - 私有方法 `GenerateIdeProjectFiles(projectDir, managedDir)`
+  - `Directory.Build.props`：始终重写（内含绝对路径，每次打开须刷新）
+  - `{stem}.csproj`：仅在不存在时写入（内容与路径无关，用户可安全修改）
+  - `{stem}.sln`：仅在不存在时写入（同上）
+  - 输出 UTF-8 无 BOM，换行 `\n`
+
+  **首次打开克隆仓库的完整序列**（git 过滤后缺失 `Directory.Build.props` 和 `cook_cache/`）：
+
+  ```
+  1. 编辑器启动（projectDir 为空，无项目加载）
+  2. ProjectBrowserPanel — 用户选择 {Name}.saproject
+  3. EditorMode 读取 .saproject → 取 name、startupScene
+  4. Application::UpdateProjectPaths(projectDir, cookCacheDir)
+       ├─ a. m_scriptSystem.SetProjectDir(projectDir)
+       ├─ b. fs::create_directories(cookCacheDir)          ← cook_cache/ 补建
+       ├─ c. m_resMgr / m_renderer 更新 cook cache 路径
+       └─ d. GenerateIdeProjectFiles(projectDir, managedDir)
+                ├─ 写 Directory.Build.props（始终）        ← gitignore 的文件在此补建
+                ├─ 跳过 {stem}.csproj（git 中已有）
+                └─ 跳过 {stem}.sln（git 中已有）
+  5. EditorMode 加载 startupScene
+  6. IDE（Rider/VS）此时刷新项目 → 读到 Directory.Build.props → IntelliSense 可用
+  ```
+
+  步骤 4d 是本 step 新增的唯一内容；步骤 4a-c 是现有代码，无需修改。
+
+  ---
+
+  **子任务 9d — 发布场景（各阶段文件清单）**
+
+  | 文件 | 版本控制 | 引擎分发包 | 游戏导出包 |
+  |------|---------|-----------|-----------|
+  | `{Name}.saproject` | ✓ | 不含（项目方拥有）| 不含 |
+  | `{Name}.csproj` / `.sln` | ✓ | 不含 | 不含 |
+  | `Directory.Build.props` | ✗ gitignore | 不含，打开时重生成 | 不含 |
+  | `StellarAlia.Runtime.dll` + `.xml` | — | ✓ | ✓ |
+  | `StellarAlia.ScriptBridge.dll` | — | ✓ | ✓ |
+  | `.cs` 源码 | ✓ | 不含 | 不含（见 #70）|
+  | `GameScripts.dll` | 不含 | 不含 | ✓（见 #70）|
+
+  **引擎分发**：`bin/managed/` 随引擎可执行打包；`.gitignore.template` 随 `assets/templates/project/` 打包。
+
+  **游戏导出**：AOT 预编译脚本 → `GameScripts.dll`，详见 **Issue #70**。
+
+  ---
+
+  **参照对比**：
+
+  | | Unity | UE | StellarAlia |
+  |---|---|---|---|
+  | 生成时机 | Asset 变化 / 手动 Regenerate | 手动 "Generate project files" | 项目加载时自动 |
+  | 文件格式 | `Assembly-CSharp.csproj` + `.sln` | `.vcxproj` + `.sln` | `{Name}.csproj` + `{Name}.sln` |
+  | 路径隔离方案 | Unity 内部变量（不暴露给用户）| `$(UE_ROOT)` 环境变量 | `Directory.Build.props`（gitignore）|
+  | `.csproj`/`.sln` 提交？ | ✓（无绝对路径）| ✓（无绝对路径）| ✓（无绝对路径）|
+  | 机器特定文件 | 无 | `.vs/` 等 IDE 文件 | `Directory.Build.props` |
+  | 项目描述符 | `ProjectSettings/*.asset` | `{Name}.uproject` | `{Name}.saproject` |
+  | 文档来源 | `UnityEngine.xml` 随 SDK 分发 | 头文件注释 | `StellarAlia.Runtime.xml` 随引擎 |
+
+  验证：克隆仓库到新机器，编辑器打开项目后 `Directory.Build.props` 自动生成；Rider / Visual Studio 打开 `{ProjectName}.sln`，输入 `Entity.` 弹出补全，Hover 显示 `<summary>`；`git status` 不显示 `Directory.Build.props`（已 gitignore），`.csproj`/`.sln` 已提交。
+
 ### 边界情况与约束
 
 | 约束 | 说明 |
 |------|------|
 | `version` 字段位置 | 必须是结构体第一个字段（C# StructLayout.Sequential 依赖顺序），旧字段位置不可变 |
+| `SetRotationQuat` 与 `SetRotationEuler` 并存 | 两者都写 `TransformComponent::rotation`，用户选其一即可；`GetRotationEuler` 内部调 `glm::eulerAngles`，仍有万向节问题，文档注明不应在帧循环内往返转换 |
+| `.csproj`/`.sln` 仅供 IDE，不参与引擎编译 | Roslyn 编译路径不读这两个文件；`<Compile>` 与 Roslyn 的源文件列表独立维护 |
+| `.csproj` 扩展名不可更改 | Rider / VS Code / Visual Studio 均需标准 `.csproj`；自定义扩展名需专用插件，超出范围 |
+| `Directory.Build.props` 每次打开项目重写 | 含绝对路径，必须随 `managedDir` 刷新；`.csproj`/`.sln` 本身无绝对路径，提交后跨机器内容一致 |
+| `.gitignore` 只在文件不存在时生成 | 不覆盖用户已有的 `.gitignore`，避免丢失自定义规则 |
+| `EnableDefaultCompileItems=false` | 防止 SDK-style csproj 把引擎源目录的 `.cs` 纳入；IDE Build 可能报错但 IntelliSense 不受影响 |
+| 游戏导出 AOT 编译 | 超出 #69 范围，见 Issue #70 |
 | Entity_Create 场景上下文 | 非 Play 期间 `g_ctx.scene == nullptr`，直接返回 `~0ull`（invalid），不崩溃 |
 | Physics.Raycast Play-only | Jolt 在 `PhysicsSystem::Reset` 后无 body，Raycast 返回 false；非 Play 不暴露 crash 风险 |
 | LightProxy 仅 PointLight | DirectionalLight / SpotLight / AreaLight 暂不支持（类型区分逻辑留后） |
@@ -1119,9 +1433,165 @@ public Vector3 Up      => Vector3.Transform( Vector3.UnitY, GetRotationQuat());
 
 ---
 
+## Issue #70 — 游戏发布（GameMode + 脚本 AOT 预编译 + 打包导出）
+
+**优先级：低（依赖 #29、#69 完成；AppMode 架构已就绪）**
+
+### 目标
+
+支持将 StellarAlia 项目导出为独立可运行的游戏包：引擎以 `GameMode`（`AppMode` 子类）启动，无 Editor UI，自动从 `.saproject` 加载启动场景并立即进入 Playing 状态；脚本预编译为 `GameScripts.dll`（不携带 Roslyn 和源码）；打包产物可单独分发给终端玩家。
+
+### 现状
+
+`AppMode` 接口已设计为可插拔（`OnAttach / OnDetach / OnUpdate / GetCameraData / OnRenderUI / OnPlayStateChanged`），`Application` 通过 `std::unique_ptr<AppMode>` 持有当前 mode。目前唯一实现是 `EditorMode`。`GameMode` 的实现代价低——核心逻辑只需去掉编辑器 UI，直接 PlayStart。
+
+### 设计
+
+#### 文件布局
+
+```
+src/game/
+├─ GameMode.hpp
+└─ GameMode.cpp
+
+tools/export/
+└─ ProjectExporter.hpp / .cpp   ← Editor 调用，产生游戏包目录
+```
+
+#### GameMode
+
+```cpp
+class GameMode : public AppMode {
+public:
+    void OnAttach(Application& app) override;   // 读 .saproject → LoadScene → SetPlayState(Playing)
+    void OnDetach()                 override;
+    void OnUpdate(float dt)         override;   // 仅转发给 Application 帧循环，无 ImGui
+    CameraData GetCameraData(float aspect) const override;  // 取最高优先级 CameraComponent
+    // OnRenderUI 不 override — 默认空实现，无 Editor 面板
+};
+```
+
+启动入口：
+
+```cpp
+// main_game.cpp（与 main_editor.cpp 并列）
+int main() {
+    Application app(std::make_unique<GameMode>());
+    Application::Desc desc;
+    desc.projectDir = /* 从命令行 / 打包目录读取 */;
+    // 不含 Editor 相关路径
+    if (!app.Init(desc)) return 1;
+    app.Run();
+    app.Shutdown();
+}
+```
+
+#### 脚本 AOT 预编译
+
+当前问题：`ScriptSystem::OnPlayStart` 在运行时调用 Roslyn 编译 `.cs`，游戏包若带 Roslyn DLL + 源码则体积大、启动慢、源码外露。
+
+解决方案：导出时预编译 → 运行时直接加载 `.dll`。
+
+```
+导出流程：
+  Editor "Export Game" →
+    ProjectExporter::Export(projectDir, outputDir)
+      ├─ 1. Roslyn 编译所有 .cs → GameScripts.dll（复用 ScriptCompiler）
+      ├─ 2. 复制 assets/ → output/assets/
+      ├─ 3. 复制 Runtime.dll + ScriptBridge.dll → output/bin/managed/
+      ├─ 4. 复制 GameScripts.dll → output/bin/managed/
+      ├─ 5. 复制游戏可执行文件（StellarAliaGame.exe）→ output/
+      ├─ 6. 写入 output/{Name}.saproject（包含预编译标志）
+      └─ 7. 不复制 .cs 源码、Roslyn DLL、Editor 资源
+
+运行时流程（GameMode + ScriptSystem）：
+  OnPlayStart → 检测到 GameScripts.dll 存在 → 跳过 Compile，直接 ScriptLoader::Load(dll路径)
+```
+
+`ScriptSystem` 改动：
+
+```cpp
+// ScriptSystem.hpp 新增
+void SetPrecompiledAssembly(const std::string& dllPath);  // 导出包模式
+
+// OnPlayStart 内
+if (!m_precompiledDll.empty()) {
+    // 直接加载 DLL，跳过 Roslyn 编译
+    m_fnLoadPrecompiled(m_precompiledDll.c_str());
+} else {
+    // 原有 Roslyn 编译路径
+}
+```
+
+`ScriptBridgeEntry` 新增入口点 `LoadPrecompiled(void* pathPtr)` — 从路径直接 `LoadFromAssemblyPath`，不走 Roslyn。
+
+#### 游戏包目录结构
+
+```
+output/{ProjectName}/
+├─ StellarAliaGame.exe         ← 游戏可执行（GameMode）
+├─ {ProjectName}.saproject     ← 项目描述符
+├─ assets/                     ← 游戏资源
+│   ├─ scenes/
+│   └─ ...
+├─ bin/
+│   ├─ managed/
+│   │   ├─ StellarAlia.Runtime.dll
+│   │   ├─ StellarAlia.ScriptBridge.dll
+│   │   └─ GameScripts.dll        ← 预编译脚本
+│   ├─ vulkan/                    ← Vulkan 运行时 DLL（Windows）
+│   └─ dotnet/                    ← .NET 8 Runtime（可选：依赖外部安装）
+└─ shaders/                    ← 编译好的 .spv
+```
+
+### 实施步骤
+
+- [ ] **Step 1 — GameMode 骨架**
+  - 新建 `src/game/GameMode.hpp/.cpp`，实现 `AppMode` 接口
+  - `OnAttach`：读 `{projectDir}/{name}.saproject` → 取 `startupScene` → `Application::LoadScene` → `SetPlayState(Playing)`
+  - `GetCameraData`：遍历 `CameraComponent` 取最高 `priority`（与 Editor 行为一致）
+  - `OnRenderUI`：空（不 override），无 ImGui
+
+- [ ] **Step 2 — 独立游戏入口**
+  - `main_game.cpp`（CMake 新增 `StellarAliaGame` 可执行目标）
+  - `Application::Desc` 从命令行参数或打包目录内固定路径读取 `projectDir`
+  - `CMakeLists.txt`：`StellarAliaGame` 链接 `StellarAliaRuntime`，不链接 Editor 相关代码
+
+- [ ] **Step 3 — ScriptSystem 预编译模式**
+  - `ScriptSystem` 新增 `SetPrecompiledAssembly(path)`
+  - `OnPlayStart` 分支：有预编译路径时调 `m_fnLoadPrecompiled`，否则走原 Roslyn 路径
+  - `ScriptBridgeEntry.LoadPrecompiled`：从文件路径 `LoadFromAssemblyPath` 并执行 `Instantiate` 流程
+
+- [ ] **Step 4 — ProjectExporter**
+  - `tools/export/ProjectExporter.hpp/.cpp`
+  - `Export(projectDir, outputDir, managedDir)`：编译脚本 → 复制资源 → 复制 DLL → 写 saproject
+  - Editor UI：`AssetsPanel` 或菜单栏 "File → Export Game"
+
+- [ ] **Step 5 — Editor 导出 UI**
+  - 导出对话框：选择输出目录 → 触发 `ProjectExporter::Export` → 完成提示
+  - 错误处理：脚本编译失败时显示 Diagnostics 并中止导出
+
+### 边界情况与约束
+
+| 约束 | 说明 |
+|------|------|
+| GameMode 无 PIE 隔离 | GameMode 不存在编辑器场景副本，直接在主场景上 PlayStart；Stop 概念不存在（窗口关闭即结束）|
+| .NET Runtime 依赖 | 游戏包可选择"依赖外部 .NET 8 安装"或"自包含"（`dotnet publish --self-contained`）；自包含包体约 +60MB |
+| Vulkan 运行时 | Windows 下 `vulkan-1.dll` 通常已由驱动安装；Linux 需 `libvulkan.so.1`；导出时可选择打包 |
+| 导出不支持热重载 | 预编译 DLL 不走 CollectibleALC 卸载流程（无需重载），`#56 热编译` 功能在 GameMode 下禁用 |
+| saproject startupScene | `GameMode::OnAttach` 若找不到该场景文件则报错退出，不降级为空场景 |
+| 不做：IL2CPP / AOT native | .NET 8 NativeAOT 可行但复杂度高，留更远期 issue |
+
+### 受益 issues
+
+- **#29**（脚本系统）：预编译模式复用 `ScriptCompiler`，代码路径共享
+- **#69**（脚本库）：`GameMode` 是验证 Runtime API 在无 Editor 环境下工作正常的最终测试
+
+---
+
 ### UI Bug Issues
-长双击重命名目前无法起效
-asset panel重命名缩略图会消失
-目前没有在asset panel空白处交互（右键创建文件， 点击选择等）的功能
-视角操作会影响ui
+~~长双击重命名目前无法起效~~ ✅ 已修：AssetsPanel 引入 DoubleClickClassifier，长按触发重命名，短按保留原导航/打开行为
+~~asset panel重命名缩略图会消失~~ ✅ 已修
+~~目前没有在asset panel空白处交互（右键创建文件， 点击选择等）的功能~~ ✅ 已修：右键空白弹出 Create 菜单，左键空白清除选中
+~~视角操作会影响ui~~ ✅ 已修：RMB mouselook 激活时将 ImGui::GetIO().MousePos 置为 (-FLT_MAX,-FLT_MAX)，消除面板悬停残留
 ~~场景继承树根节点拖拽排序无效~~ ✅ 已修：Scene::m_rootOrder 维护根节点用户定序，SceneHierarchyPresenter DnD 分支调用 MoveRootBefore/After，SceneHierarchyPanel 和 SceneSerializer 改用 GetRootOrder() 迭代

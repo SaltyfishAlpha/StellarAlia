@@ -112,6 +112,11 @@ void EditorUI::RegisterWindow(std::unique_ptr<IEditorWindow> panel) {
 void EditorUI::NewFrame() {
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplGlfw_NewFrame();
+    // Hide mouse position from ImGui while the viewport cursor is captured
+    // (RMB mouselook). Without this, panels at the last cursor position keep
+    // showing hover effects during camera rotation.
+    if (m_mouseCapture)
+        ImGui::GetIO().MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
     ImGui::NewFrame();
 
     // Full-screen DockSpace so panels can dock anywhere.

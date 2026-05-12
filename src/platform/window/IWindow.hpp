@@ -19,6 +19,8 @@ public:
     virtual uint32_t GetHeight() const = 0;
     virtual bool     ShouldClose() const = 0;
 
+    virtual bool IsFocused() const = 0;
+
     // Process OS events (call once per frame before BeginFrame)
     virtual void PollEvents() = 0;
 

@@ -111,6 +111,10 @@ void EditorMode::OnAttach(Application& app) {
         }
     }
 
+    // ── Script file watcher ──────────────────────────────────────────────────
+    if (!projectDir.empty())
+        m_scriptWatcher.Watch(fs::path(projectDir) / "assets");
+
     // ── Scan asset registry ──────────────────────────────────────────────────
     m_assetRegistry = &app.GetAssetRegistry();
     {
@@ -367,6 +371,7 @@ void EditorMode::BuildContext(Application& app) {
 }
 
 void EditorMode::OnDetach() {
+    m_scriptWatcher.Stop();
     s_dropTarget = nullptr;
     if (m_app) {
         auto* glfwWin = static_cast<GLFWwindow*>(m_app->GetNativeWindow());
@@ -387,6 +392,15 @@ void EditorMode::OnDetach() {
 }
 
 void EditorMode::OnRenderUI(RHI::IRHICommandList* cmd) {
+    // Suppress ImGui mouse hover while RMB mouselook has the cursor locked to the
+    // viewport.  Guard with !WantCaptureMouse (previous frame): if ImGui was
+    // hovering a UI panel last frame the user is right-clicking a panel for a
+    // context menu — don't suppress so the popup can open normally.
+    {
+        const bool mouselook      = m_app->GetInputSystem().IsActive("MouseLook");
+        const bool imguiHadMouse  = ImGui::GetIO().WantCaptureMouse; // previous frame
+        m_ui.SetMouseCapture(mouselook && !imguiHadMouse);
+    }
     m_ui.NewFrame();
     DrawBillboardIcons();
 
@@ -498,6 +512,21 @@ void EditorMode::OnUpdate(float dt) {
 
     m_camera.Update(input, dt, mouseLook);
     DrawOverlays();
+
+    // Poll file watcher; auto-recompile .cs changes when the window is focused.
+    {
+        std::vector<fs::path> changed;
+        m_scriptWatcher.PollChanges(changed);
+        for (const auto& p : changed) {
+            if (p.extension() == ".cs") { m_pendingRecompile = true; break; }
+        }
+        if (m_pendingRecompile
+                && m_app->IsWindowFocused()
+                && m_app->GetPlayState() == EnginePlayState::Editing) {
+            m_app->GetScriptSystem().RecompileEditing(m_app->GetEditorScene().Registry());
+            m_pendingRecompile = false;
+        }
+    }
 }
 
 void EditorMode::DrawOverlays() {
@@ -723,7 +752,6 @@ void EditorMode::OnPlayStateChanged(EnginePlayState newState) {
     InputSystem&                 input    = m_app->GetInputSystem();
     Platform::GLFWInputProvider& provider = m_app->GetInputProvider();
 
-
     if (newState != EnginePlayState::Editing) {
         // Switch EditorContext to game copy so all panels read/write game entities.
         m_ctx.scene    = &m_app->GetActiveScene();
@@ -735,6 +763,10 @@ void EditorMode::OnPlayStateChanged(EnginePlayState newState) {
             m_viewportActive = false;
         }
         m_commandManager.PushPlayBoundary();
+        // Clear pending on Play start — OnPlayStart already compiles the scripts.
+        // Keep pending through Paused so changes accumulate until Stop.
+        if (newState == EnginePlayState::Playing)
+            m_pendingRecompile = false;
     } else {
         // Returning to edit mode: restore the viewport input map.
         // Clear selection first — game-scene entity IDs are now invalid.
@@ -748,6 +780,12 @@ void EditorMode::OnPlayStateChanged(EnginePlayState newState) {
         if (!m_viewportActive) {
             input.PushMap("Viewport");
             m_viewportActive = true;
+        }
+
+        // If .cs files changed during play and window is focused, recompile now.
+        if (m_pendingRecompile && m_app->IsWindowFocused()) {
+            m_app->GetScriptSystem().RecompileEditing(m_app->GetEditorScene().Registry());
+            m_pendingRecompile = false;
         }
     }
 }
@@ -823,6 +861,10 @@ void EditorMode::LoadProject(const fs::path& saprojectPath) {
     // Update Application paths
     m_app->UpdateProjectPaths(projectDir, cookCacheDir);
     m_ctx.projectDir = projectDir;
+
+    // Restart script watcher for the new project
+    m_scriptWatcher.Watch(projectDir / "assets");
+    m_pendingRecompile = false;
 
     m_app->GetResourceManager().ClearProjectAssets();
     m_app->GetMaterialManager().ClearProjectInstances();
