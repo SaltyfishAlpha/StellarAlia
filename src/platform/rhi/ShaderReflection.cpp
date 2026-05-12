@@ -24,6 +24,9 @@ ShaderReflection MergeReflections(const ShaderReflection& a,
                                    const ShaderReflection& b) {
     ShaderReflection merged;
     merged.bindings = a.bindings;
+    // vertexInputs is populated only on vertex reflections; by convention
+    // callers pass the vert reflection as `a`. `b` (frag/compute) carries none.
+    merged.vertexInputs = a.vertexInputs;
 
     // Push constant: take the larger size, union the stages
     merged.pushConstantSize   = std::max(a.pushConstantSize, b.pushConstantSize);

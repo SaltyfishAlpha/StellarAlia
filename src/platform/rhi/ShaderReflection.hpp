@@ -54,6 +54,26 @@ struct ShaderBindingDesc {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Vertex shader input attribute format. Parallel to RHIFormat but limited to
+// the subset valid as a VkVertexInputAttributeDescription::format.
+// ─────────────────────────────────────────────────────────────────────────────
+enum class RHIVertexFormat : uint32_t {
+    Undefined = 0,
+    R32_SFLOAT,           // float
+    R32G32_SFLOAT,        // vec2
+    R32G32B32_SFLOAT,     // vec3
+    R32G32B32A32_SFLOAT,  // vec4
+};
+
+// One vertex shader stage input. Populated only when reflecting a vertex stage;
+// empty for fragment/compute. Drives VkPipelineVertexInputStateCreateInfo so
+// pipelines declare only the locations the SPIR-V actually consumes.
+struct ShaderVertexInputDesc {
+    uint32_t        location;
+    RHIVertexFormat format = RHIVertexFormat::Undefined;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Full reflection data for one compiled shader stage.
 // Produced by spirv-reflect at build time; loaded as a binary blob at runtime.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -61,6 +81,11 @@ struct ShaderReflection {
     std::vector<ShaderBindingDesc> bindings;
     uint32_t       pushConstantSize   = 0;
     RHIShaderStage pushConstantStages = RHIShaderStage::None;
+
+    // Vertex stage inputs (sorted by location). Non-empty only for vertex
+    // reflections; consumed by VulkanDevice::CreatePipeline to emit one
+    // VkVertexInputAttributeDescription per actually-used location.
+    std::vector<ShaderVertexInputDesc> vertexInputs;
 
     // Set by ShaderCookTool for .saglsl-compiled shaders; empty for builtin shaders.
     // Used by MaterialManager::RegisterTypesFromShaderDir to auto-register types.

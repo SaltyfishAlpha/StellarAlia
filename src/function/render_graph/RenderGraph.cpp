@@ -572,10 +572,24 @@ void RenderGraph::Execute(RHI::IRHIDevice& device, RHI::IRHICommandList& cmd) {
         const auto& pass = m_passes[pi];
 
         // ── Texture read barriers ─────────────────────────────────────────────
+        // When the same texture appears in both reads and writes for this pass,
+        // the Read is an "ordering-only" dependency (e.g. compositing onto the
+        // swapchain after Tonemap): the topo sort needs the edge, but we must
+        // NOT transition to SHADER_READ — the texture may not have been created
+        // with SAMPLED_BIT (the swapchain isn't), and the Write block below will
+        // emit the required write-after-write memory barrier.
         for (auto rgt : pass.reads) {
             if (!rgt.IsValid()) continue;
             auto rhi = resources.m_resolved[rgt.index];
             if (!rhi.IsValid()) continue;
+            bool alsoWritten = false;
+            for (const auto& we : pass.writes) {
+                if (we.handle.IsValid() && we.handle.index == rgt.index) {
+                    alsoWritten = true;
+                    break;
+                }
+            }
+            if (alsoWritten) continue;
             constexpr auto kReadState = RHI::RHIResourceState::ShaderRead;
             auto& cur = getTexState(rgt.index);
             if (cur != kReadState) {

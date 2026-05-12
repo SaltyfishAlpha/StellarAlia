@@ -90,6 +90,13 @@ std::vector<uint8_t> Serialize(const ShaderReflection& refl) {
     WriteU32(buf, static_cast<uint32_t>(refl.vertShader.size()));
     buf.insert(buf.end(), refl.vertShader.begin(), refl.vertShader.end());
 
+    // v6: vertex stage inputs (non-empty only for vertex reflections)
+    WriteU32(buf, static_cast<uint32_t>(refl.vertexInputs.size()));
+    for (const auto& vi : refl.vertexInputs) {
+        WriteU32(buf, vi.location);
+        WriteU32(buf, static_cast<uint32_t>(vi.format));
+    }
+
     return buf;
 }
 
@@ -104,7 +111,7 @@ bool Deserialize(std::span<const uint8_t> data, ShaderReflection& out) {
         return false;
     }
     if (!ReadU32(data, offset, version) ||
-        (version != 3u && version != 4u && version != kVersion)) {
+        (version != 3u && version != 4u && version != 5u && version != kVersion)) {
         SA_LOG_ERROR("ShaderReflectionIO: unsupported version {}", version);
         return false;
     }
@@ -112,6 +119,7 @@ bool Deserialize(std::span<const uint8_t> data, ShaderReflection& out) {
     // v4 files (committed baseline) use the basic layout without them.
     const bool v4 = (version >= 5u);
     const bool v5 = (version >= 5u);
+    const bool v6 = (version >= 6u);
 
     uint32_t pcSize = 0, pcStages = 0, bindingCount = 0;
     if (!ReadU32(data, offset, pcSize))     return false;
@@ -218,6 +226,20 @@ bool Deserialize(std::span<const uint8_t> data, ShaderReflection& out) {
         }
         result.vertShader.assign(reinterpret_cast<const char*>(data.data() + offset), vsLen);
         offset += vsLen;
+    }
+
+    // v6: vertex stage inputs (v3-v5 files leave vertexInputs empty → backend
+    // falls back to the legacy 4-attrib hardcoded layout for compatibility).
+    if (v6) {
+        uint32_t viCount = 0;
+        if (!ReadU32(data, offset, viCount)) return false;
+        result.vertexInputs.reserve(viCount);
+        for (uint32_t i = 0; i < viCount; ++i) {
+            uint32_t loc = 0, fmt = 0;
+            if (!ReadU32(data, offset, loc)) return false;
+            if (!ReadU32(data, offset, fmt)) return false;
+            result.vertexInputs.push_back({loc, static_cast<RHIVertexFormat>(fmt)});
+        }
     }
 
     out = std::move(result);

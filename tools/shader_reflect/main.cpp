@@ -191,6 +191,20 @@ static RHIShaderStage StageFromModel(spv::ExecutionModel model) {
     }
 }
 
+// Map a SPIR-V vertex input type (float / vec2 / vec3 / vec4) to RHIVertexFormat.
+// Returns Undefined for unsupported types (int/uint inputs, matrices, etc.).
+static RHIVertexFormat MapSpirTypeToVertexFormat(const spirv_cross::SPIRType& t) {
+    if (t.basetype != spirv_cross::SPIRType::Float) return RHIVertexFormat::Undefined;
+    if (t.columns != 1)                              return RHIVertexFormat::Undefined;
+    switch (t.vecsize) {
+        case 1: return RHIVertexFormat::R32_SFLOAT;
+        case 2: return RHIVertexFormat::R32G32_SFLOAT;
+        case 3: return RHIVertexFormat::R32G32B32_SFLOAT;
+        case 4: return RHIVertexFormat::R32G32B32A32_SFLOAT;
+        default: return RHIVertexFormat::Undefined;
+    }
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 int main(int argc, char** argv) {
@@ -315,6 +329,27 @@ int main(int argc, char** argv) {
             compiler.get_declared_struct_size(baseType));
         refl.pushConstantStages = stage;
         break; // one push-constant block per stage
+    }
+
+    // Vertex stage inputs — drive VkVertexInputAttributeDescription per shader.
+    // Note: SPIR-V optimizer strips declared-but-unused `in` variables, so
+    // res.stage_inputs already reflects only the locations actually consumed.
+    if (stage == RHIShaderStage::Vertex) {
+        for (const auto& r : res.stage_inputs) {
+            ShaderVertexInputDesc vd;
+            vd.location = compiler.get_decoration(r.id, spv::DecorationLocation);
+            vd.format   = MapSpirTypeToVertexFormat(compiler.get_type(r.type_id));
+            if (vd.format == RHIVertexFormat::Undefined) {
+                SA_LOG_WARN("ShaderReflectTool: unsupported vertex input '{}' (loc {}) — skipped",
+                            r.name, vd.location);
+                continue;
+            }
+            refl.vertexInputs.push_back(vd);
+        }
+        std::sort(refl.vertexInputs.begin(), refl.vertexInputs.end(),
+                  [](const ShaderVertexInputDesc& a, const ShaderVertexInputDesc& b) {
+                      return a.location < b.location;
+                  });
     }
 
     // ── Apply GLSL annotations ────────────────────────────────────────────────

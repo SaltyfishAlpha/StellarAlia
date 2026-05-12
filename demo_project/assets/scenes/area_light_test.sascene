@@ -302,9 +302,9 @@
       "tag": "CubeBlue",
       "transform": {
         "position": [
-          0.0,
+          0.10870003700256348,
           0.5,
-          0.0
+          -0.13630110025405884
         ],
         "rotation": [
           1.0,
@@ -442,9 +442,9 @@
   "version": 1,
   "world": {
     "backgroundColor": [
-      0.0,
-      0.0,
-      0.0
+      0.06372547149658203,
+      0.06372547149658203,
+      0.06372547149658203
     ],
     "backgroundMode": "SolidColor",
     "brdfLut": "ba667a20-2b4d-4a24-bd80-949820265af3",

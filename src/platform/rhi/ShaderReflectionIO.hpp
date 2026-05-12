@@ -47,12 +47,16 @@ namespace StellarAlia::RHI {
 //   shadingModel       char[shadingModelLen]  (v5+; e.g. "SimpleAlbedo")
 //   vertShaderLen      uint32_t  (v5+; 0 if default)
 //   vertShader         char[vertShaderLen]    (v5+; e.g. "deferred_geometry")
+//   vertexInputCount   uint32_t  (v6+; 0 for fragment/compute stages)
+//   vertexInputs[V]:                          (v6+)
+//     location         uint32_t
+//     format           uint32_t  (RHIVertexFormat)
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace ShaderReflectionIO {
 
 static constexpr uint32_t kMagic   = 0x4C464552u; // 'REFL'
-static constexpr uint32_t kVersion = 5u;
+static constexpr uint32_t kVersion = 6u;
 
 // Serialize reflection to a byte buffer.
 [[nodiscard]] std::vector<uint8_t> Serialize(const ShaderReflection& refl);

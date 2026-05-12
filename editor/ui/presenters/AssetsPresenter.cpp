@@ -137,6 +137,14 @@ void AssetsPresenter::RequestImportFile(const fs::path& srcPath, const fs::path&
     m_importQueue.push_back({ srcPath, destDir });
 }
 
+void AssetsPresenter::RequestRecompileScripts() {
+    if (!m_ctx.app) return;
+    const bool ok = m_ctx.app->GetScriptSystem().RecompileEditing(
+        m_ctx.app->GetEditorScene().Registry());
+    if (ok) SA_LOG_INFO("AssetsPresenter: script recompilation succeeded");
+    else    SA_LOG_WARN("AssetsPresenter: script recompilation failed — check Console");
+}
+
 bool AssetsPresenter::ConsumeFilePaneDirty() {
     const bool v = m_filePaneDirty;
     m_filePaneDirty = false;

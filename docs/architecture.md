@@ -239,10 +239,11 @@ GLSL shader (.vert / .frag / .comp / .saglsl)
 SPIR-V bytecode (.spv)
         │
         ▼  ShaderReflectTool   (tools/shader_reflect, via SPIRV-Cross)
-Reflection sidecar (.refl)
+Reflection sidecar (.refl) — binary format v6, see ShaderReflectionIO.hpp
     bindings[]: { set, binding, type, stage, name, arraySize }
-    uboMembers[]: { name, offset, size }  ← per UBO/SSBO binding
+    uboMembers[]: { name, offset, size, uiType, displayName, … }
     pushConstantSize, pushConstantStages
+    vertexInputs[]: { location, format }   ← vertex stage only; drives PSO vertex input
 ```
 
 Both files are output to `<build>/bin/assets/shaders/builtin/`.
@@ -738,6 +739,17 @@ to its authored transform positions.
 directly from `ColliderComponent` ECS data (no Jolt debug callback needed). Toggles:
 `shapes`, `aabbs`, `velocity`, `contacts`. Exposed via `SettingsPanel` → Physics Debug.
 
+### Script API Surface
+
+`PhysicsSystem` exposes the following methods for use by `ScriptApiExports` without leaking Jolt headers to callers:
+
+| Method | Delegates to |
+|--------|-------------|
+| `GetLinearVelocity / SetLinearVelocity` | `BodyInterface::GetLinearVelocity / SetLinearVelocity` |
+| `GetAngularVelocity / SetAngularVelocity` | `BodyInterface::GetAngularVelocity / SetAngularVelocity` |
+| `AddForce / AddImpulse` | `BodyInterface::AddForce / AddImpulse` |
+| `Raycast(origin, dir, maxDist, hit&)` | `NarrowPhaseQuery::CastRay` + `BodyLockRead` for surface normal |
+
 ---
 
 ## Scripting System
@@ -745,7 +757,7 @@ directly from `ColliderComponent` ECS data (no Jolt debug callback needed). Togg
 **Locations:**
 - `src/function/script/ScriptSystem.hpp/.cpp` — C++ driver; owned by `Application`
 - `src/function/script/ScriptApiExports.hpp/.cpp` — flat C API + `ScriptApiFunctionTable`
-- `managed/StellarAlia.Runtime/` — C# engine API surface (`ScriptBase`, `Entity`, `Debug`, `Time`, `Input`, `AnimatorProxy`, `NativeApi`)
+- `managed/StellarAlia.Runtime/` — C# engine API surface (`ScriptBase`, `Entity`, `Debug`, `Time`, `Input`, `Mathf`, `AnimatorProxy`, `RigidBodyProxy`, `PointLightProxy`, `Physics`, `QuaternionExt`, `NativeApi`)
 - `managed/StellarAlia.ScriptBridge/` — Roslyn compiler (`ScriptCompiler`), collectible ALC loader (`ScriptLoader`), unmanaged entry points (`ScriptBridgeEntry`)
 - `demo_project/assets/scripts/` — user `.cs` scripts
 
@@ -757,7 +769,19 @@ directly from `ColliderComponent` ECS data (no Jolt debug callback needed). Togg
 Initialize | Compile | Instantiate | InvokeLifecycle | RemoveInstance | Unload
 ```
 
-`Initialize` receives a `ScriptApiFunctionTable*` — a plain struct of C function pointers covering transforms, input, debug draw, logging, and time. The managed `NativeApi` class stores this table and calls through it; this avoids making `StellarAlia.Runtime` a native shared library.
+`Initialize` receives a `ScriptApiFunctionTable*` — a plain struct of C function pointers (version 2) covering transforms, entity lifecycle, rigidbody physics, point light control, physics raycast, animator, input, debug draw, logging, and time. The first field is `uint32_t version` so both sides can detect layout mismatches at startup. `ScriptApiContext` carries `PhysicsSystem*` so rigidbody and raycast functions can access Jolt through the physics system's public API. The managed `NativeApi` class stores this table and calls through it; this avoids making `StellarAlia.Runtime` a native shared library.
+
+**Key Runtime API classes (all in `StellarAlia` namespace):**
+
+| Class | Description |
+|-------|-------------|
+| `Mathf` | Pure managed math utilities: `Lerp`, `Clamp`, `Clamp01`, `PingPong`, `SmoothStep`, `Approximately`, `MoveTowards`, and `MathF` wrappers |
+| `Input` | `IsKeyDown`, `IsKeyJustPressed`, `IsKeyJustReleased` (frame-state tracked via `HashSet<Key> _prev/_curr`, updated by `BeginFrame()` before first `OnUpdate` each frame) |
+| `Entity` | `GetRotation/SetRotation(Quaternion)`, `Forward/Right/Up` direction vectors, `Destroy()`, static `Create()`, `GetRigidBody()`, `GetPointLight()` |
+| `RigidBodyProxy` | `LinearVelocity`/`AngularVelocity` (get/set), `AddForce`, `AddImpulse` |
+| `PointLightProxy` | `Color`, `Intensity`, `Range` (get/set) |
+| `Physics` | `Raycast(origin, direction, maxDist, out RaycastHit)` — wraps Jolt NarrowPhaseQuery |
+| `QuaternionExt` | `FromEulerDegrees`, `FromEulerRadians`, `Slerp`, `RotateTowards`, `AngleDegrees`, `ToEulerDegrees` |
 
 ### Play Lifecycle
 
@@ -795,6 +819,16 @@ OnPlayStop(reg)
 ### Dependency Resolution — Cross-ALC Search
 
 `CollectibleALC.Load()` resolves dependencies by searching `AppDomain.CurrentDomain.GetAssemblies()` rather than `AssemblyLoadContext.Default.Assemblies`. `hostfxr` loads `StellarAlia.Runtime` into its own isolated ALC (not Default), so using Default would fail to find it.
+
+### IDE Project File Generation
+
+On every project open (`Application::UpdateProjectPaths`), the engine calls `GenerateIdeProjectFiles(projectDir)`:
+
+- **`Directory.Build.props`** — always overwritten; contains the absolute `managedDir` path as `$(StellarAliaManaged)`. Gitignored — machine-specific.
+- **`{stem}.csproj`** — written only if absent; references `$(StellarAliaManaged)/StellarAlia.Runtime.dll` via the MSBuild variable. Committed to git — no absolute paths.
+- **`{stem}.sln`** — written only if absent. Project GUID is deterministically derived from the stem via FNV-1a → UUID v5. Committed to git.
+
+MSBuild automatically discovers `Directory.Build.props` by searching parent directories, so `.csproj` needs no explicit import. `StellarAlia.Runtime.xml` (generated by the Runtime `.csproj` build) ships alongside `StellarAlia.Runtime.dll`, giving IDE IntelliSense tooltip documentation.
 
 ### ECS Integration
 
@@ -903,10 +937,31 @@ RHIDescLayoutHandle → m_descLayouts[] RHIDescSetHandle  → m_descSets[]
 | | `RHIPipelineDesc` (graphics) | `RHIComputePipelineDesc` (compute) |
 |---|---|---|
 | Shaders | vert + frag | single compute |
-| Vertex input | defined / `noVertexInput` flag | not present |
+| Vertex input | reflection-driven (see below) / `noVertexInput` flag | not present |
 | Rasterizer / blend / depth | present | not present |
 | Attachment formats | color[] + depth | not present |
 | Vulkan call | `vkCreateGraphicsPipelines` | `vkCreateComputePipelines` |
+
+### Reflection-Driven Vertex Input
+
+Vertex input attributes are not hardcoded. `ShaderReflection::vertexInputs` (populated
+by `ShaderReflectTool` from SPIR-V `stage_inputs`) lists the locations the vertex
+shader actually consumes; the SPIR-V optimizer strips declared-but-unused `in`
+variables so the list reflects real consumption. `ShaderProgram` forwards it via
+`RHIPipelineDesc::vertexInputs[]`, and `VulkanDevice::CreatePipeline` emits one
+`VkVertexInputAttributeDescription` per entry — never more.
+
+The mesh data layout (`CookedMesh::Vertex`, 48-byte interleaved
+pos+normal+tangent+uv) is unchanged: binding stride is fixed at 48, and the backend
+holds a static `LocationToOffset` table (`0→0, 1→12, 2→24, 3→40`). Locations
+outside this table are an error (logged and skipped) — declare a vertex attribute
+in a shader without a matching mesh attribute, and the next draw will trigger a
+validation error from the missing pipeline input, exposing the mismatch immediately.
+
+When `vertexInputCount == 0` (legacy v3-v5 `.refl` files predating the field),
+`CreatePipeline` falls back to declaring all 4 attribs — preserves correctness for
+shaders cooked before the field existed, at the cost of the original
+"attribute at location N not consumed" warnings on shaders that read fewer locs.
 
 ### Image Layout Map
 
@@ -1057,6 +1112,17 @@ that receive `MaterialOverrideComponent` overrides.
 | `b.WriteDepth(tex)` | `DepthWrite` | `DEPTH_ATTACHMENT_OPTIMAL` |
 | `b.WriteUAV(tex)` | `UnorderedAccess` | `GENERAL` |
 | `b.Read(tex)` | `ShaderRead` | `SHADER_READ_ONLY_OPTIMAL` |
+
+**Read+Write on the same texture is ordering-only.** The topological sort builds
+edges from Read→Write only (pure Write→Write does *not* constrain order). When a
+pass needs to composite onto a texture written by an earlier pass (e.g.
+`InfiniteGrid` / `DebugOverlay` / `SelectionOutline` drawing on top of Tonemap's
+swapchain output), declare both `b.Read(rgSwap)` and `b.Write(rgSwap)`. The
+executor recognises this combination and **skips the SHADER_READ transition**
+— layout stays in `RenderTarget`, the Write block emits a `RT→RT` memory barrier
+for the write-after-write hazard. This is essential for the swapchain, which is
+not created with `VK_IMAGE_USAGE_SAMPLED_BIT` and cannot legally transition to
+`SHADER_READ_ONLY_OPTIMAL`.
 
 ### Compile & Execute
 
@@ -1401,6 +1467,15 @@ EditorMode::LoadProject()
 Outputs land in `cook_cache/shaders/` (SPV + refl) and `cook_cache/generated/shaders/` (dispatch GLSL).
 `cook_cache/.shader_manifest.json` records per-file mtime for incremental cook on subsequent loads.
 
+**Cross-directory vertex shader resolution.** Project material types live in
+`cook_cache/shaders/` but typically reference `deferred_geometry.vert` from the
+engine builtin dir. `FeatureInitContext` carries an `engineShaderDir` field as a
+fallback for `MaterialManager::RegisterTypeFromShaders`: each vert/frag SPV +
+.refl path is first looked up under `ctx.shaderDir`, then under
+`ctx.engineShaderDir` if missing. At engine init both fields point to the engine
+dir; `ApplyProjectShaderTypes` sets `shaderDir = cook_cache/shaders/` while
+keeping `engineShaderDir` on the engine dir.
+
 ### Key Properties
 
 - `MaterialType::isProjectType = true` marks types that come from `.saglsl` files; `ClearProjectTypes()` removes them on project switch, preserving builtin types (PBR, DeferredLighting, etc.).
@@ -1419,6 +1494,10 @@ Outputs land in `cook_cache/shaders/` (SPV + refl) and `cook_cache/generated/sha
 
 window->PollEvents()
 input.Poll()                               // snapshot devices + evaluate active map
+sync swapchain extent if window->Get{W,H}() != device->GetSwapchain{W,H}() — pre-stages
+                                              ResizeSwapchain() so RenderFrame and its
+                                              internal RTs see the new size in the same
+                                              frame the OS callback fires
 mode.OnUpdate(dt)                          // editor camera / gameplay logic
 [Playing] physics.SyncIn / Step / SyncOut (fixedDt accumulator, GetActiveScene())
 [Playing] scriptSystem.FixedUpdate(fixedDt, GetActiveScene().Registry())
@@ -1870,6 +1949,17 @@ The same shader can be used in passes with different RT format combinations.
 `AttachmentKey` is a compact struct (up to 4 color formats + 1 depth format)
 that hashes to a unique `VkPipeline`. Compiled once per combination, cached per `ShaderProgram`.
 
+### VulkanCommandList Per-Frame State Reset
+`VulkanCommandList::Bind(VkCommandBuffer, VulkanDevice*)` is called at the start
+of every frame and from `ImmediateCompute`/`ImmediateSubmit` to wrap a different
+command buffer. It clears `m_boundPipeline` to an invalid handle so that
+`SetDescriptorSet`/`SetPushConstants` — both of which derive the active
+`VkPipelineLayout` from `m_boundPipeline` — cannot leak the layout of the last
+pipeline bound on a previous (now-unrelated) command buffer. Without this reset,
+init-time `ImmediateCompute` runs (e.g. `GpuIblBake::BakeBrdfLut`) leak a
+1-descriptor compute layout into frame 0, causing descriptor set / push-constant
+compatibility errors when callers issue `SetDescriptorSet` before `SetPipeline`.
+
 ### ComputeProgram Has No AttachmentKey Cache
 Compute pipelines have no render targets. One `VkComputePipeline` per shader,
 created on first call to `GetPipeline()`.
@@ -1915,7 +2005,7 @@ a `Pimpl` struct. Callers never include Jolt headers, keeping compile times fast
 the physics backend swappable.
 
 ### Scripting: Function Table Instead of Shared Library
-`StellarAlia.Runtime` is a managed-only assembly. The C++ side exposes engine APIs through `ScriptApiFunctionTable` — a plain struct of function pointers passed to `Initialize`. This avoids requiring `StellarAlia.Runtime` to P/Invoke into a named native DLL, keeping the build simple (no `SHARED` target) and the pointer table stable across reloads.
+`StellarAlia.Runtime` is a managed-only assembly. The C++ side exposes engine APIs through `ScriptApiFunctionTable` — a plain struct of function pointers passed to `Initialize`. The first field is `uint32_t version` (currently `2`); if C++ and C# structs are out of sync, the managed side detects the version mismatch immediately. This avoids requiring `StellarAlia.Runtime` to P/Invoke into a named native DLL, keeping the build simple (no `SHARED` target) and the pointer table stable across reloads.
 
 ### Scripting: SDK Reference Pack for Roslyn
 Roslyn compilation references the .NET SDK reference assembly pack (`Microsoft.NETCore.App.Ref`) rather than the runtime implementation assemblies. This mirrors Unity/Godot's approach: ref-pack DLLs expose only the managed API surface with no native blobs, preventing CS0433 duplicate-type errors that arise when both ref-pack and runtime assemblies define the same types (e.g. `Vector3`).

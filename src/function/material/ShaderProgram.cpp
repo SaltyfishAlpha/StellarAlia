@@ -82,15 +82,30 @@ RHI::RHIPipelineHandle ShaderProgram::GetOrCreatePipeline(
     pipeDesc.vertShader  = m_vertShader;
     pipeDesc.fragShader  = m_fragShader;
 
-    // set=0 = frame uniforms, set=1 = material params, set=2 = GPU skinning (optional)
-    uint32_t layoutCount = 0;
-    if (m_frameLayout.IsValid())    pipeDesc.descriptorLayouts[layoutCount++] = m_frameLayout;
-    if (m_materialLayout.IsValid()) pipeDesc.descriptorLayouts[layoutCount++] = m_materialLayout;
-    if (m_set2Layout.IsValid())     pipeDesc.descriptorLayouts[layoutCount++] = m_set2Layout;
-    pipeDesc.descriptorLayoutCount = layoutCount;
+    // Fixed slot assignment: index == set index, always.
+    // VulkanDevice::CreatePipeline substitutes m_emptyDescLayout for invalid handles,
+    // so materialLayout is always at set=1, never accidentally promoted to set=0 when
+    // frameLayout is absent.
+    pipeDesc.descriptorLayouts[0] = m_frameLayout;
+    pipeDesc.descriptorLayouts[1] = m_materialLayout;
+    pipeDesc.descriptorLayouts[2] = m_set2Layout;
+    pipeDesc.descriptorLayoutCount =
+        m_set2Layout.IsValid()     ? 3u :
+        m_materialLayout.IsValid() ? 2u :
+        m_frameLayout.IsValid()    ? 1u : 0u;
 
     pipeDesc.pushConstantSize   = m_merged.pushConstantSize;
     pipeDesc.pushConstantStages = m_merged.pushConstantStages;
+
+    // Forward reflection-driven vertex inputs (empty for noVertexInput pipelines,
+    // and falls back to the backend's legacy 4-attrib layout for v3-v5 .refl files
+    // that predate the vertexInputs field).
+    const uint32_t viCount = std::min<uint32_t>(
+        static_cast<uint32_t>(m_merged.vertexInputs.size()),
+        RHI::RHIPipelineDesc::kMaxVertexAttribs);
+    for (uint32_t i = 0; i < viCount; ++i)
+        pipeDesc.vertexInputs[i] = m_merged.vertexInputs[i];
+    pipeDesc.vertexInputCount = viCount;
 
     pipeDesc.colorFormatCount = key.colorCount;
     for (uint32_t i = 0; i < key.colorCount; ++i)

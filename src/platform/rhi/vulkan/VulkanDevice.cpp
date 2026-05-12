@@ -312,9 +312,16 @@ void VulkanDevice::InitDevice() {
     qci.queueCount       = 1;
     qci.pQueuePriorities = &priority;
 
-    // Enable dynamic rendering + synchronization2 (Vulkan 1.3 core)
+    VkPhysicalDeviceVulkan12Features features12{};
+    features12.sType                                          = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    features12.descriptorBindingUniformBufferUpdateAfterBind  = VK_TRUE;
+    features12.descriptorBindingSampledImageUpdateAfterBind   = VK_TRUE;
+    features12.descriptorBindingStorageBufferUpdateAfterBind  = VK_TRUE;
+    features12.descriptorBindingStorageImageUpdateAfterBind   = VK_TRUE;
+
     VkPhysicalDeviceVulkan13Features features13{};
     features13.sType              = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    features13.pNext              = &features12;
     features13.dynamicRendering   = VK_TRUE;
     features13.synchronization2   = VK_TRUE;
 
@@ -675,6 +682,7 @@ VulkanDevice::ImGuiVulkanContext VulkanDevice::GetImGuiContext() const {
         m_graphicsFamily,
         static_cast<uint32_t>(m_swapImages.size()),
         m_swapMinImageCount,
+        m_swapchainVkFormat,
     };
 }
 
@@ -720,7 +728,8 @@ void VulkanDevice::InitDescriptorPool() {
 
     VkDescriptorPoolCreateInfo ci{};
     ci.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    ci.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    ci.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT |
+                       VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
     ci.maxSets       = 1024;
     ci.poolSizeCount = static_cast<uint32_t>(std::size(sizes));
     ci.pPoolSizes    = sizes;
@@ -1245,8 +1254,18 @@ RHIDescLayoutHandle VulkanDevice::CreateDescriptorSetLayout(const ShaderReflecti
         bindings.push_back(vkb);
     }
 
+    std::vector<VkDescriptorBindingFlags> bindingFlags(bindings.size(),
+        VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+
+    VkDescriptorSetLayoutBindingFlagsCreateInfo flagsCI{};
+    flagsCI.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+    flagsCI.bindingCount  = static_cast<uint32_t>(bindingFlags.size());
+    flagsCI.pBindingFlags = bindingFlags.empty() ? nullptr : bindingFlags.data();
+
     VkDescriptorSetLayoutCreateInfo ci{};
     ci.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    ci.pNext        = &flagsCI;
+    ci.flags        = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
     ci.bindingCount = static_cast<uint32_t>(bindings.size());
     ci.pBindings    = bindings.data();
 
@@ -1482,26 +1501,76 @@ RHIPipelineHandle VulkanDevice::CreatePipeline(const RHIPipelineDesc& desc) {
     addStage(desc.fragShader, VK_SHADER_STAGE_FRAGMENT_BIT);
 
     // Vertex input
-    // Standard 48-byte interleaved layout: pos(vec3) + normal(vec3) + tangent(vec4) + uv(vec2)
+    // The mesh data on disk is always 48-byte interleaved (pos+normal+tangent+uv),
+    // so binding stride is fixed at 48. Which attributes the pipeline declares,
+    // however, comes from shader reflection — the pipeline emits one attrib per
+    // location the SPIR-V actually consumes, eliminating "attribute at location N
+    // not consumed" validation warnings.
     VkVertexInputBindingDescription binding{};
     binding.binding   = 0;
     binding.stride    = 48;
     binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    const VkVertexInputAttributeDescription attribs[4] = {
-        {0, 0, VK_FORMAT_R32G32B32_SFLOAT,    0},   // a_Position
-        {1, 0, VK_FORMAT_R32G32B32_SFLOAT,   12},   // a_Normal
-        {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 24},  // a_Tangent
-        {3, 0, VK_FORMAT_R32G32_SFLOAT,       40},  // a_TexCoord0
+    // location → offset within the 48-byte interleaved CookedMesh::Vertex.
+    // Keep this table in sync with the mesh data convention (CookedMesh.hpp).
+    auto LocationToOffset = [](uint32_t loc) -> int32_t {
+        switch (loc) {
+            case 0: return  0;  // a_Position  (vec3)
+            case 1: return 12;  // a_Normal    (vec3)
+            case 2: return 24;  // a_Tangent   (vec4)
+            case 3: return 40;  // a_TexCoord0 (vec2)
+            default: return -1; // not in mesh layout — caller error
+        }
     };
+    auto ToVkVertexFormat = [](RHIVertexFormat f) {
+        switch (f) {
+            case RHIVertexFormat::R32_SFLOAT:           return VK_FORMAT_R32_SFLOAT;
+            case RHIVertexFormat::R32G32_SFLOAT:        return VK_FORMAT_R32G32_SFLOAT;
+            case RHIVertexFormat::R32G32B32_SFLOAT:     return VK_FORMAT_R32G32B32_SFLOAT;
+            case RHIVertexFormat::R32G32B32A32_SFLOAT:  return VK_FORMAT_R32G32B32A32_SFLOAT;
+            default:                                    return VK_FORMAT_UNDEFINED;
+        }
+    };
+
+    // Legacy fallback layout for .refl files predating v6 (vertexInputCount==0).
+    static const VkVertexInputAttributeDescription kLegacyAttribs[4] = {
+        {0, 0, VK_FORMAT_R32G32B32_SFLOAT,    0},
+        {1, 0, VK_FORMAT_R32G32B32_SFLOAT,   12},
+        {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 24},
+        {3, 0, VK_FORMAT_R32G32_SFLOAT,       40},
+    };
+
+    VkVertexInputAttributeDescription attribs[RHIPipelineDesc::kMaxVertexAttribs]{};
+    uint32_t attribCount = 0;
 
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     if (!desc.noVertexInput) {
-        vertexInput.vertexBindingDescriptionCount   = 1;
-        vertexInput.pVertexBindingDescriptions      = &binding;
-        vertexInput.vertexAttributeDescriptionCount = 4;
-        vertexInput.pVertexAttributeDescriptions    = attribs;
+        if (desc.vertexInputCount > 0) {
+            for (uint32_t i = 0; i < desc.vertexInputCount; ++i) {
+                const auto& vi = desc.vertexInputs[i];
+                const int32_t offset = LocationToOffset(vi.location);
+                if (offset < 0) {
+                    SA_LOG_ERROR("VulkanDevice::CreatePipeline — vertex location {} not in mesh layout (pipeline '{}')",
+                                 vi.location, desc.debugName ? desc.debugName : "?");
+                    continue;
+                }
+                attribs[attribCount].location = vi.location;
+                attribs[attribCount].binding  = 0;
+                attribs[attribCount].format   = ToVkVertexFormat(vi.format);
+                attribs[attribCount].offset   = static_cast<uint32_t>(offset);
+                ++attribCount;
+            }
+            vertexInput.vertexBindingDescriptionCount   = 1;
+            vertexInput.pVertexBindingDescriptions      = &binding;
+            vertexInput.vertexAttributeDescriptionCount = attribCount;
+            vertexInput.pVertexAttributeDescriptions    = attribs;
+        } else {
+            vertexInput.vertexBindingDescriptionCount   = 1;
+            vertexInput.pVertexBindingDescriptions      = &binding;
+            vertexInput.vertexAttributeDescriptionCount = 4;
+            vertexInput.pVertexAttributeDescriptions    = kLegacyAttribs;
+        }
     }
 
     // Input assembly

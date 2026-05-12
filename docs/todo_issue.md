@@ -904,532 +904,18 @@ editor/ui/drawers/
 
 ---
 
-## Issue #56 — Script 热编译（Editor 内无需重启即可重新编译脚本）✅
-
-**状态：已完成**  
-**优先级：中（依赖 #29 已完成）**
-
-### 目标
-
-Editing 状态下，主窗口**聚焦**时若检测到 `.cs` 文件变化则立即后台编译（Roslyn only，不 Instantiate），诊断路由至 Diagnostics tab；主窗口**失焦**期间积压变更标记，待窗口重获焦点时立即触发；Playing / Paused 状态下不自动重编。
-
-### 设计
-
-#### 1. `FileWatcher`（新建）
-
-```
-src/platform/io/FileWatcher.hpp
-src/platform/io/FileWatcher.cpp
-```
-
-```cpp
-class FileWatcher {
-public:
-    void Watch(const std::filesystem::path& dir); // 启动后台监听线程
-    void Stop();                                   // 析构时自动调用
-    void PollChanges(std::vector<std::filesystem::path>& out); // 主线程每帧轮询
-private:
-    std::thread              m_thread;
-    std::mutex               m_mutex;
-    std::vector<std::filesystem::path> m_pending;
-    std::atomic<bool>        m_running{false};
-    // Windows: ReadDirectoryChangesW 循环写入 m_pending
-};
-```
-
-- Windows 实现：`ReadDirectoryChangesW`（`FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME`），监听目录递归；后台线程持续 append 到 `m_pending`，`PollChanges` 加锁 swap 到 `out`
-- Linux 留接口存根，等移植期加 `inotify`
-
-#### 2. `IWindow::IsFocused()` + GLFWWindow focus callback
-
-```cpp
-// IWindow.hpp
-virtual bool IsFocused() const = 0;
-
-// GLFWWindow.hpp
-bool m_focused = true;   // 初始视为已聚焦，避免首帧漏过
-
-// GLFWWindow.cpp — Create() 中追加：
-glfwSetWindowFocusCallback(handle, OnWindowFocus);
-
-// 静态回调：
-static void OnWindowFocus(GLFWwindow* w, int focused) {
-    static_cast<GLFWWindow*>(glfwGetWindowUserPointer(w))->m_focused = (focused != 0);
-}
-bool GLFWWindow::IsFocused() const { return m_focused; }
-```
-
-#### 3. `ScriptSystem::RecompileEditing(entt::registry& reg)`
-
-- 复用 `OnPlayStart` 中的路径收集 + `m_fnCompile` 调用
-- 不调用 `m_fnInstantiate`（此时 ALC 未加载，直接编译出诊断即可）
-- 编译 Diagnostic 通过 `ScriptLogger()` spdlog 通道输出（#58 已完成，自动路由 Diagnostics tab）
-- 返回 `bool`（成功/失败）；`m_playing` 必须为 `false`，否则 early-return
-
-#### 4. EditorMode 集成
-
-新增成员：
-```cpp
-Platform::FileWatcher m_scriptWatcher;
-bool                  m_pendingRecompile = false;
-```
-
-流程：
-```
-LoadProject() 时:
-    m_scriptWatcher.Stop();
-    m_scriptWatcher.Watch(projectDir / "assets");   // 递归
-
-OnUpdate() 帧末:
-    vector<path> changed;
-    m_scriptWatcher.PollChanges(changed);
-    for each path: if extension == ".cs" → m_pendingRecompile = true
-
-    if m_pendingRecompile
-       && m_app->GetWindow()->IsFocused()
-       && m_app->GetPlayState() == EnginePlayState::Editing:
-        m_app->GetScriptSystem().RecompileEditing(scene.Registry())
-        m_pendingRecompile = false
-
-OnPlayStateChanged(Playing/Paused):
-    m_pendingRecompile = false   // 进入 Play 时清空，不干扰运行时
-
-OnPlayStateChanged(Editing):     // Stop Play → 回 Edit
-    if m_pendingRecompile && m_app->GetWindow()->IsFocused():
-        立即重编（可直接在此调用 RecompileEditing）
-```
-
-#### 关系图
-
-```
-FileWatcher bg-thread
-    ReadDirectoryChangesW → m_pending (mutex)
-                                ↓ PollChanges() each frame
-                         EditorMode::OnUpdate
-                                ↓ .cs 变化?
-                         m_pendingRecompile = true
-                                ↓ IsFocused() + Editing?
-                         ScriptSystem::RecompileEditing()
-                                ↓
-                         spdlog "script" logger
-                                ↓
-                         Diagnostics tab (#58 路由已完成)
-```
-
-### 实施步骤
-
-1. **`IWindow` / `GLFWWindow`**：添加 `IsFocused()` 纯虚函数 + `m_focused` 字段 + `glfwSetWindowFocusCallback`（~10 行）
-2. **新建 `FileWatcher`**：`src/platform/io/FileWatcher.hpp` + `.cpp`，Windows `ReadDirectoryChangesW` 后台线程 + 线程安全轮询
-3. **CMakeLists**：将 `FileWatcher.cpp` 加入 engine/platform target
-4. **`ScriptSystem::RecompileEditing(reg)`**：收集路径 → `m_fnCompile` → log diagnostics，无 Instantiate；`ScriptSystem.hpp` 声明为 `public`
-5. **`EditorMode`**：添加 `m_scriptWatcher` + `m_pendingRecompile`；`LoadProject()` 中启动监听；`OnUpdate()` 末尾轮询 + 焦点判断触发重编；`OnPlayStateChanged` 中清空 / 触发 pending
-6. **验证**：① 聚焦时改 `.cs` → 自动编译，Diagnostics 出现结果；② 失焦时改 `.cs` → 重新聚焦才编译；③ Playing 时改 → 不触发
-
-### 边界情况与约束
-
-| 约束 | 说明 |
-|------|------|
-| 监听范围 | `projectDir / "assets"` 递归，仅过滤 `.cs`；非 `.cs` 变化直接丢弃 |
-| 项目未加载 | Project Browser 选择前不启动 FileWatcher；`LoadProject()` 是唯一启动点 |
-| 编译同步阻塞 | Roslyn 在主线程同步执行，单次编译约 100–500ms；当前帧轻微卡顿可接受，异步化属 Phase 2 |
-| Play 时变更 | `m_pendingRecompile` 继续积累，Stop Play 回 Editing 后若 pending 且聚焦则立即重编 |
-| 不做 Linux | FileWatcher Windows 实现；Linux 接口存根，等移植期填充 `inotify` |
-| 不做 Playing 热重载 | ALC Unload → Reload 序列属原规划 Phase 2，本 issue 不涉及 |
-| 不做字段保留 | 重编不保留脚本字段值，Phase 2 做序列化 |
-| `.cs` 删除/重命名 | 视作变更触发重编（编译会因文件消失失败，Diagnostic 正常输出错误）|
-
-### 受益 issues
-
-- **#58**（Diagnostics 路由）：编译错误自动出现在 Diagnostics tab，无需额外 UI
-- **#69**（Runtime API 扩展）：API 稳定后自动重编不因签名变更静默失效
-
----
+## Issue #71 — Script 热编译（Editor 内无需重启即可重新编译脚本）✅ DONE
+<!-- FileWatcher(ReadDirectoryChangesW后台线程) + IWindow::IsFocused() + ScriptSystem::RecompileEditing + EditorMode 轮询；失焦积压 m_pendingRecompile，重获焦点触发；Playing 状态不重编；诊断自动路由 Diagnostics tab -->
 
 ---
 
 ## Issue #58 — 日志分层路由：Script 消息自动出现在 Diagnostics tab ✅ DONE
 <!-- "script" 命名 spdlog logger + LogEntry::loggerName + ConsolePanelPresenter（Drain/路由/状态）+ ConsolePanel 纯 View；移除 ScriptSystem::CompileErrors() 死代码 -->
 
-### 边界情况与约束
-
-- `ScriptLogger()` 懒初始化时复制 sinks 快照；EditorLogCapture 必须在首次 `SA_Log_*` 调用前已注入。Play 模式下成立：EditorMode 构造时即加入 sink，Play 开始才触发 `SA_Log_*`。
-- 不修改 EditorDiagnostics 用于 ShaderCook/Material/Scene 的路径——该路径提供 `assetPath` 链接，script logger 无法提供此功能。
-- `m_scriptEntries` 无持久化（Unload 时可选 `ClearScript()`），与 Engine Logs 行为一致。
-- #56 热编译 issue 中规划的 `ScriptDrawer` 显示编译错误依赖 `m_compileErrors`；删除前需确认 #56 是否改为读取 Diagnostics tab 内容。
-
-### 受益 issues
-
-- **#29**（脚本系统）：`Debug.Log` 正式可用，不再埋没于 Engine Logs 噪音中
-- **#56**（热编译）：编译错误自动出现在 Diagnostics，Inspector 仍可读 `m_compileErrors`（或改读 script logger）
-
 ---
 
-## Issue #69 — Script Runtime Library（脚本运行时库扩展）
-
-**优先级：中（依赖 #29 已完成）**
-
-### 目标
-
-将 `StellarAlia.Runtime` 从薄包装层提升为功能完整的游戏脚本 API 库，覆盖 Mathf 数学工具、输入边沿检测、实体生命周期（Create/Destroy）、物理读写（Velocity/AddForce）、物理射线查询（Raycast）、灯光控制六个维度，使常见游戏逻辑可完全在脚本中实现而无需修改引擎 C++ 代码。
-
-### 架构现状与参照
-
-**现状**：`ScriptApiFunctionTable` 是一个平铺 C 结构体，C++ 与 C# 两侧依赖相同字段顺序。好处是直接函数指针调用、零额外开销、无需共享库；弱点是每增加一个 API 须同步修改五处（C++ 实现、C++ 表字段、C# 表字段、NativeApi 绑定、公开类）。
-
-**Unity**：`MonoBehaviour` API 通过 icall / P/Invoke `__Internal` 绑定，用户看到的是干净的 `UnityEngine.dll` 公开 API，底层 marshalling 完全隐藏。关键 API 层次：Mathf、GameObject.Instantiate/Destroy、GetComponent<T>、Input.GetKeyDown/Up、Physics.Raycast、Rigidbody.AddForce。
-
-**UE**：C++ Actor/Component 树，蓝图通过宏反射访问同一套对象，没有额外 marshalling 层。核心理念：用户操作的是 AActor/UActorComponent 实例，Get/SetActorLocation 直接修改世界状态。
-
-**StellarAlia 结论**：函数指针表机制本身合理，保持。改进方向：① 加 `version` 字段以快速捕捉两侧不同步；② 纯 managed 改动优先（不需 C++ recompile）；③ 字符串编码从 Latin-1 统一改为 UTF-8。分多个 phase 增量扩展，每 phase 独立可验证。
-
-### 设计
-
-#### 文件布局
-
-```
-managed/StellarAlia.Runtime/
-├─ ScriptBase.cs         ← 生命周期（不变）
-├─ Entity.cs             ← 新增 Destroy / static Create / Forward·Right·Up 属性
-├─ Input.cs              ← 新增 GetKeyJustPressed / GetKeyJustReleased（managed 帧状态）
-├─ Mathf.cs              ← 新增：Lerp·Clamp·Clamp01·PingPong·SmoothStep·Approximately
-├─ Physics.cs            ← 新增：Raycast → RaycastHit
-├─ RigidBodyProxy.cs     ← 扩展：Velocity·AddForce·AddImpulse
-├─ LightProxy.cs         ← 新增：PointLight/Directional intensity·color
-├─ Debug.cs / Time.cs    ← 不变
-└─ NativeApi.cs          ← 新增函数指针槽（version 字段首位）
-
-src/function/script/
-├─ ScriptApiExports.hpp  ← version 字段 + 新槽声明
-└─ ScriptApiExports.cpp  ← 新 extern "C" 函数实现
-```
-
-#### C++ 函数表扩展（version 字段首位，旧字段位置不动）
-
-```cpp
-struct ScriptApiFunctionTable {
-    uint32_t version = 2;                       // ← 新增，首位
-    // ── 原有字段（Block 1）— 位置不变 ─────────
-    void    (*Entity_GetPosition)    (uint64_t, float*, float*, float*);
-    // ... (所有现有字段) ...
-    float   (*Time_GetTotalTime)     ();
-    // ── Block 2 — v2 新增 ──────────────────────
-    int32_t  (*Entity_GetRotationQuat) (uint64_t id, float* w, float* x, float* y, float* z);
-    void     (*Entity_SetRotationQuat) (uint64_t id, float w, float x, float y, float z);
-    void     (*Entity_Destroy)        (uint64_t id);
-    uint64_t (*Entity_Create)         (const char* name, float x, float y, float z);
-    void     (*RigidBody_GetVelocity) (uint64_t id, float*, float*, float*);
-    void     (*RigidBody_SetVelocity) (uint64_t id, float, float, float);
-    void     (*RigidBody_AddForce)    (uint64_t id, float, float, float);
-    void     (*RigidBody_AddImpulse)  (uint64_t id, float, float, float);
-    int32_t  (*Physics_Raycast)       (float ox, float oy, float oz,
-                                       float dx, float dy, float dz, float maxDist,
-                                       float* hitX, float* hitY, float* hitZ,
-                                       uint64_t* hitEntity);
-    void     (*Light_GetColor)        (uint64_t id, float*, float*, float*);
-    void     (*Light_SetColor)        (uint64_t id, float, float, float);
-    float    (*Light_GetIntensity)    (uint64_t id);
-    void     (*Light_SetIntensity)    (uint64_t id, float);
-};
-```
-
-#### C# Input 帧状态追踪（纯 managed，无 C++ 改动）
-
-```csharp
-// Input.cs — 新增字段（ScriptBridgeEntry.InvokeLifecycle 开头调 Input.BeginFrame()）
-internal static void BeginFrame() { /* swap prev/curr, sample all pressed keys */ }
-public static bool IsKeyJustPressed (Key k) => _curr.Contains(k) && !_prev.Contains(k);
-public static bool IsKeyJustReleased(Key k) => !_curr.Contains(k) && _prev.Contains(k);
-```
-
-#### C# RaycastHit
-
-```csharp
-public readonly struct RaycastHit {
-    public readonly Vector3 Point;
-    public readonly Entity  Entity;
-    public readonly bool    Hit;
-}
-// Physics.cs
-public static bool Raycast(Vector3 origin, Vector3 direction, out RaycastHit hit, float maxDistance = 1000f);
-```
-
-#### Entity 方向向量（纯 managed，依赖 System.Numerics）
-
-```csharp
-// Entity.cs
-public Quaternion GetRotation() { /* Entity_GetRotationQuat slot — 直读 glm::quat，无精度损耗 */ }
-public void       SetRotation(Quaternion q) { /* Entity_SetRotationQuat slot */ }
-public Vector3 Forward => Vector3.Transform(-Vector3.UnitZ, GetRotation());
-public Vector3 Right   => Vector3.Transform( Vector3.UnitX, GetRotation());
-public Vector3 Up      => Vector3.Transform( Vector3.UnitY, GetRotation());
-```
-> `GetRotationQuat` / `SetRotationQuat` 直接读写 `glm::quat`（WXYZ），避免 Euler 往返引入万向节锁噪声；Euler 接口保留作便捷重载。
-
-### 实施步骤
-
-- [ ] **Step 1 — Mathf 工具类**（纯 managed，`managed/StellarAlia.Runtime/Mathf.cs`）
-  - `Lerp(a,b,t)`、`Clamp(v,min,max)`、`Clamp01`、`PingPong(t,len)`、`SmoothStep(a,b,t)`、`Approximately(a,b,eps=1e-5f)`、`MoveTowards(cur,target,maxDelta)`
-  - 包装 `MathF.*`，不依赖任何 NativeApi 槽
-
-- [ ] **Step 2 — 字符串编码从 Latin-1 改为 UTF-8**（`NativeApi.cs` 全局替换）
-  - 将所有 `Encoding.Latin1.GetBytes(str + '\0')` 替换为 `Encoding.UTF8.GetBytes(str + '\0')`
-  - C++ 侧已是 UTF-8 字符串，无需修改
-  - 验证：实体名含中文/日文时 FindByName 仍可正确匹配
-
-- [ ] **Step 3 — Input 帧状态（GetKeyJustPressed/Released）**（纯 managed）
-  - `Input.cs` 添加 `static HashSet<Key> _prev, _curr`
-  - `internal static void BeginFrame()` 中 swap 两集合，重新采样 `IsKeyDown(k)` 填入 `_curr`
-  - `ScriptBridgeEntry.InvokeLifecycle` 在 `method == OnUpdate` 之前调用 `Input.BeginFrame()`（或统一在帧开始处）
-  - 暴露 `IsKeyJustPressed(Key)` / `IsKeyJustReleased(Key)`
-
-- [ ] **Step 4 — version 字段 + 四元数旋转 API + Entity 方向向量**
-  - `ScriptApiFunctionTable` 首字段加 `uint32_t version = 2`（C# 侧同步加 `uint version`）
-  - C++：新增 `SA_Entity_GetRotationQuat(id, w*, x*, y*, z*)` 和 `SA_Entity_SetRotationQuat(id, w, x, y, z)`，直接读写 `TransformComponent::rotation`（`glm::quat`），无 Euler 往返损耗
-  - C# `NativeApi.cs`：新增对应两个函数指针槽绑定
-  - `Entity.cs` 公开 `Quaternion GetRotation()` / `void SetRotation(Quaternion)`；`Forward`、`Right`、`Up` 只读属性（通过 `GetRotation()` 推导，不再依赖 Euler 反算）；保留 `GetRotationEuler`/`SetRotationEuler` 用于 Inspector 兼容
-  - 新建 `managed/StellarAlia.Runtime/QuaternionExt.cs`（纯 managed）：
-    - `QuaternionExt.LookRotation(Vector3 forward, Vector3 up)` — 从前向量构造朝向
-    - `QuaternionExt.Slerp(Quaternion a, Quaternion b, float t)` — 包装 `Quaternion.Slerp`
-    - `QuaternionExt.FromEuler(float x, float y, float z)` — 角度制 Euler → Quat（消除用户手写 `MathF.PI/180` 的需要）
-    - `QuaternionExt.ToEuler(Quaternion q)` — Quat → 角度制 Vector3，供调试用
-
-- [ ] **Step 5 — Entity 生命周期：Destroy / Create**
-  - C++：`SA_Entity_Destroy(id)` — `g_ctx.scene->Registry().destroy(entity)`；`SA_Entity_Create(name, x, y, z)` — `EntityFactory::SpawnEmpty(scene, name, {x,y,z})`
-  - C# 侧：`Entity.Destroy()` 实例方法；`Entity.Create(string name, Vector3 pos)` 静态工厂
-  - 边界：非 Play 期间（`g_ctx.scene == nullptr`）返回 invalid entity / no-op
-  - 验证：脚本中 `Entity.Create("Bullet", pos)` → Stop 后层级面板无残留（因 Play 在游戏副本）
-
-- [ ] **Step 6 — RigidBodyProxy 扩展：Velocity / AddForce / AddImpulse**
-  - C++：通过 Jolt `PhysicsSystem::GetBodyInterface()` 读写速度、施力（需 PhysicsSystem 暴露 `GetBodyInterface()` 或新增 helper）
-  - `SA_RigidBody_GetVelocity` / `SetVelocity` / `AddForce` / `AddImpulse`
-  - `Entity.cs` 添加 `GetRigidBody()` → `RigidBodyProxy`（现有 GetAnimator 模式）
-  - `RigidBodyProxy.cs` 添加 `Velocity`（get/set Vector3）、`AddForce(Vector3, ForceMode)`、`AddImpulse(Vector3)`
-
-- [ ] **Step 7 — LightProxy：PointLight intensity / color**
-  - C++：`SA_Light_GetColor` / `SetColor` / `GetIntensity` / `SetIntensity`，通过 `try_get<PointLightComponent>` 操作
-  - `Entity.cs` 添加 `GetPointLight()` → `LightProxy`
-  - `LightProxy.cs`：`Color`（Vector3 get/set）、`Intensity`（float get/set）
-
-- [ ] **Step 8 — Physics.Raycast**
-  - C++：`SA_Physics_Raycast(...)` — 调用 Jolt `NarrowPhaseQuery::CastRay`；需 PhysicsSystem 暴露查询接口（pimpl 内添加 `bool Raycast(Ray, float, RaycastHit&)`）
-  - C# 侧：`Physics.Raycast(Vector3 origin, Vector3 dir, out RaycastHit hit, float maxDist)` 静态方法
-  - 边界：仅 Play 期间有效（Jolt 在 Editing 时已 Reset）；非 Play 返回 false
-
-- [ ] **Step 9 — 外部 IDE 支持（XML 文档 + 项目模板 + .csproj / .sln / .gitignore 生成）**
-
-  **文件职责一览**（三类文件共存，不互相替代）：
-
-  | 文件 | 职责 | 纳入版本控制？ |
-  |------|------|--------------|
-  | `{Name}.saproject` | 引擎项目描述符（startupScene、name、version），由编辑器读取 | ✓ 是 |
-  | `{Name}.csproj` | IDE C# 补全，含机器绝对路径 HintPath，由编辑器生成 | ✗ gitignore |
-  | `{Name}.sln` | Visual Studio Solution，引用 `.csproj`，供 VS/Rider 双击打开 | ✗ gitignore |
-  | `.gitignore` | 排除 IDE 生成文件和 cook cache | ✓ 是 |
-
-  **关于扩展名**：`.csproj` 和 `.sln` 是 IDE 识别 C# 项目的标准格式，不可替换为自定义扩展名（如 `.scproj`），否则 Rider / VS Code / Visual Studio 无法提供 IntelliSense。
-
-  **关于版本控制**：Unity 的 `.csproj`/`.sln` 本身**提交到 git**，因为它们用 MSBuild 变量引用 UnityEngine.dll 而非硬编码绝对路径，内容可跨机器复现。StellarAlia 采用同样策略：`.csproj`/`.sln` 提交，把机器相关的绝对路径单独放进 `Directory.Build.props`，只有这一个文件被 gitignore。
-
-  ---
-
-  **子任务 9a — Runtime XML 文档**
-  - `managed/StellarAlia.Runtime/StellarAlia.Runtime.csproj` 添加 `<GenerateDocumentationFile>true</GenerateDocumentationFile>`
-  - 对所有公开 API 补充 `/// <summary>` 注释（`ScriptBase`、`Entity`、`Input`、`Mathf`、`Debug`、`Time`、`AnimatorProxy`、`RigidBodyProxy`、`Physics`、`QuaternionExt`）
-  - 构建产物 `StellarAlia.Runtime.xml` 随 `StellarAlia.Runtime.dll` 输出到 `bin/managed/`；IDE 自动读取同目录 XML 显示 tooltip
-
-  ---
-
-  **子任务 9b — 项目目录模板（新项目创建时）**
-
-  `assets/templates/project/` 存放静态模板（随引擎分发，无机器相关路径）：
-
-  ```
-  assets/templates/project/
-  └─ .gitignore.template
-  ```
-
-  新建项目时（`ProjectBrowserPanel` "New Project" 流程）生成的完整结构：
-
-  ```
-  {ProjectName}/
-  ├─ assets/
-  │   ├─ scenes/
-  │   │   └─ default.sascene        (从 templates/scenes/ 复制)
-  │   ├─ scripts/                   (空目录)
-  │   └─ materials/                 (空目录)
-  ├─ {ProjectName}.saproject        ✓ 版本控制 — 引擎描述符
-  ├─ {ProjectName}.csproj           ✓ 版本控制 — 用变量引用 Runtime.dll
-  ├─ {ProjectName}.sln              ✓ 版本控制 — VS Solution
-  ├─ Directory.Build.props          ✗ gitignore — 仅含机器绝对路径
-  └─ .gitignore                     ✓ 版本控制 — 从模板生成
-  ```
-
-  `.gitignore.template` 内容（只排除机器相关文件，不排除 `.csproj`/`.sln`）：
-
-  ```gitignore
-  # Machine-specific: auto-regenerated by the editor on project open
-  Directory.Build.props
-
-  # IDE intermediate files
-  .vs/
-  .idea/
-  obj/
-
-  # Cook cache
-  cook_cache/
-
-  # OS artifacts
-  .DS_Store
-  Thumbs.db
-  ```
-
-  实现：`.gitignore` 只在不存在时写入（不覆盖用户修改）；`.saproject` 写入 `{"name":"{stem}","version":1,"startupScene":"assets/scenes/default.sascene"}`。
-
-  ---
-
-  **子任务 9c — `{ProjectName}.csproj`、`{ProjectName}.sln`、`Directory.Build.props` 生成**
-
-  **`Directory.Build.props`**（gitignore，机器相关，每次打开项目重写）：
-
-  ```xml
-  <!-- Auto-generated by StellarAlia Editor — gitignored, do not commit -->
-  <Project>
-    <PropertyGroup>
-      <StellarAliaManaged>{managedDir_绝对路径}</StellarAliaManaged>
-    </PropertyGroup>
-  </Project>
-  ```
-
-  **`{ProjectName}.csproj`**（提交到 git，使用变量，跨机器内容一致）：
-
-  ```xml
-  <!-- IDE project file — commit to version control -->
-  <Project Sdk="Microsoft.NET.Sdk">
-    <PropertyGroup>
-      <TargetFramework>net8.0</TargetFramework>
-      <Nullable>enable</Nullable>
-      <ImplicitUsings>disable</ImplicitUsings>
-      <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
-      <IsPackable>false</IsPackable>
-    </PropertyGroup>
-    <ItemGroup>
-      <Reference Include="StellarAlia.Runtime">
-        <HintPath>$(StellarAliaManaged)/StellarAlia.Runtime.dll</HintPath>
-      </Reference>
-    </ItemGroup>
-    <ItemGroup>
-      <Compile Include="assets/scripts/**/*.cs" />
-    </ItemGroup>
-  </Project>
-  ```
-
-  > MSBuild 会自动在当前目录及所有父目录搜索 `Directory.Build.props`，无需在 `.csproj` 中显式引用。
-
-  **`{ProjectName}.sln`**（提交到 git，无路径，跨机器内容一致）：
-
-  ```
-  Microsoft Visual Studio Solution File, Format Version 12.00
-  # Visual Studio Version 17
-  Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "{stem}", "{stem}.csproj", "{GUID}"
-  EndProject
-  Global
-    GlobalSection(SolutionConfigurationPlatforms) = preSolution
-      Debug|Any CPU = Debug|Any CPU
-    EndGlobalSection
-    GlobalSection(ProjectConfigurationPlatforms) = postSolution
-      {GUID}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-    EndGlobalSection
-  EndGlobal
-  ```
-
-  > 类型 GUID `{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}` 是 C# MSBuild 项目固定值；实例 GUID 由 `{stem}` SHA-1 UUID v5 确定性生成（同名项目内容完全相同）。
-
-  **C++ 实现**（`Application::UpdateProjectPaths` 末尾）：
-  - 私有方法 `GenerateIdeProjectFiles(projectDir, managedDir)`
-  - `Directory.Build.props`：始终重写（内含绝对路径，每次打开须刷新）
-  - `{stem}.csproj`：仅在不存在时写入（内容与路径无关，用户可安全修改）
-  - `{stem}.sln`：仅在不存在时写入（同上）
-  - 输出 UTF-8 无 BOM，换行 `\n`
-
-  **首次打开克隆仓库的完整序列**（git 过滤后缺失 `Directory.Build.props` 和 `cook_cache/`）：
-
-  ```
-  1. 编辑器启动（projectDir 为空，无项目加载）
-  2. ProjectBrowserPanel — 用户选择 {Name}.saproject
-  3. EditorMode 读取 .saproject → 取 name、startupScene
-  4. Application::UpdateProjectPaths(projectDir, cookCacheDir)
-       ├─ a. m_scriptSystem.SetProjectDir(projectDir)
-       ├─ b. fs::create_directories(cookCacheDir)          ← cook_cache/ 补建
-       ├─ c. m_resMgr / m_renderer 更新 cook cache 路径
-       └─ d. GenerateIdeProjectFiles(projectDir, managedDir)
-                ├─ 写 Directory.Build.props（始终）        ← gitignore 的文件在此补建
-                ├─ 跳过 {stem}.csproj（git 中已有）
-                └─ 跳过 {stem}.sln（git 中已有）
-  5. EditorMode 加载 startupScene
-  6. IDE（Rider/VS）此时刷新项目 → 读到 Directory.Build.props → IntelliSense 可用
-  ```
-
-  步骤 4d 是本 step 新增的唯一内容；步骤 4a-c 是现有代码，无需修改。
-
-  ---
-
-  **子任务 9d — 发布场景（各阶段文件清单）**
-
-  | 文件 | 版本控制 | 引擎分发包 | 游戏导出包 |
-  |------|---------|-----------|-----------|
-  | `{Name}.saproject` | ✓ | 不含（项目方拥有）| 不含 |
-  | `{Name}.csproj` / `.sln` | ✓ | 不含 | 不含 |
-  | `Directory.Build.props` | ✗ gitignore | 不含，打开时重生成 | 不含 |
-  | `StellarAlia.Runtime.dll` + `.xml` | — | ✓ | ✓ |
-  | `StellarAlia.ScriptBridge.dll` | — | ✓ | ✓ |
-  | `.cs` 源码 | ✓ | 不含 | 不含（见 #70）|
-  | `GameScripts.dll` | 不含 | 不含 | ✓（见 #70）|
-
-  **引擎分发**：`bin/managed/` 随引擎可执行打包；`.gitignore.template` 随 `assets/templates/project/` 打包。
-
-  **游戏导出**：AOT 预编译脚本 → `GameScripts.dll`，详见 **Issue #70**。
-
-  ---
-
-  **参照对比**：
-
-  | | Unity | UE | StellarAlia |
-  |---|---|---|---|
-  | 生成时机 | Asset 变化 / 手动 Regenerate | 手动 "Generate project files" | 项目加载时自动 |
-  | 文件格式 | `Assembly-CSharp.csproj` + `.sln` | `.vcxproj` + `.sln` | `{Name}.csproj` + `{Name}.sln` |
-  | 路径隔离方案 | Unity 内部变量（不暴露给用户）| `$(UE_ROOT)` 环境变量 | `Directory.Build.props`（gitignore）|
-  | `.csproj`/`.sln` 提交？ | ✓（无绝对路径）| ✓（无绝对路径）| ✓（无绝对路径）|
-  | 机器特定文件 | 无 | `.vs/` 等 IDE 文件 | `Directory.Build.props` |
-  | 项目描述符 | `ProjectSettings/*.asset` | `{Name}.uproject` | `{Name}.saproject` |
-  | 文档来源 | `UnityEngine.xml` 随 SDK 分发 | 头文件注释 | `StellarAlia.Runtime.xml` 随引擎 |
-
-  验证：克隆仓库到新机器，编辑器打开项目后 `Directory.Build.props` 自动生成；Rider / Visual Studio 打开 `{ProjectName}.sln`，输入 `Entity.` 弹出补全，Hover 显示 `<summary>`；`git status` 不显示 `Directory.Build.props`（已 gitignore），`.csproj`/`.sln` 已提交。
-
-### 边界情况与约束
-
-| 约束 | 说明 |
-|------|------|
-| `version` 字段位置 | 必须是结构体第一个字段（C# StructLayout.Sequential 依赖顺序），旧字段位置不可变 |
-| `SetRotationQuat` 与 `SetRotationEuler` 并存 | 两者都写 `TransformComponent::rotation`，用户选其一即可；`GetRotationEuler` 内部调 `glm::eulerAngles`，仍有万向节问题，文档注明不应在帧循环内往返转换 |
-| `.csproj`/`.sln` 仅供 IDE，不参与引擎编译 | Roslyn 编译路径不读这两个文件；`<Compile>` 与 Roslyn 的源文件列表独立维护 |
-| `.csproj` 扩展名不可更改 | Rider / VS Code / Visual Studio 均需标准 `.csproj`；自定义扩展名需专用插件，超出范围 |
-| `Directory.Build.props` 每次打开项目重写 | 含绝对路径，必须随 `managedDir` 刷新；`.csproj`/`.sln` 本身无绝对路径，提交后跨机器内容一致 |
-| `.gitignore` 只在文件不存在时生成 | 不覆盖用户已有的 `.gitignore`，避免丢失自定义规则 |
-| `EnableDefaultCompileItems=false` | 防止 SDK-style csproj 把引擎源目录的 `.cs` 纳入；IDE Build 可能报错但 IntelliSense 不受影响 |
-| 游戏导出 AOT 编译 | 超出 #69 范围，见 Issue #70 |
-| Entity_Create 场景上下文 | 非 Play 期间 `g_ctx.scene == nullptr`，直接返回 `~0ull`（invalid），不崩溃 |
-| Physics.Raycast Play-only | Jolt 在 `PhysicsSystem::Reset` 后无 body，Raycast 返回 false；非 Play 不暴露 crash 风险 |
-| LightProxy 仅 PointLight | DirectionalLight / SpotLight / AreaLight 暂不支持（类型区分逻辑留后） |
-| Input.BeginFrame 调用时机 | 必须在每帧第一个 `InvokeLifecycle(OnUpdate)` 前调用，否则首帧 JustPressed 可能漏帧 |
-| AddForce / AddImpulse | Jolt 要求在 Step 外调用（FixedUpdate 之前或之后），不可在 Step 内并发修改 body |
-| 不做：GetComponent<T>() 泛型 | 需要 C# 反射 + 引擎侧类型注册，复杂度高，属 #68 ComponentSchema 范围 |
-| 不做：Coroutine / Invoke(delay) | 需托管调度器，留 Phase 2 独立 issue |
-
-### 受益 issues
-
-- **#33**（贝塞尔曲线与相机移动）：Entity.Forward / Raycast / Mathf.Lerp 是脚本驱动相机的基础
-- **#56**（热编译）：Runtime API 稳定后热重载不会因 API 签名变更失效
-- **#29**（脚本系统）：`BouncingRotator.cs` 之类示例可升级为展示 Raycast + Physics 的完整游戏原型
+## Issue #69 — Script Runtime Library（脚本运行时库扩展）✅ DONE
+<!-- Mathf.cs纯managed数学工具、UTF-8字符串编码修正、Input帧状态(IsKeyJustPressed/Released)、四元数API+Entity方向向量(Forward/Right/Up)、Entity.Destroy/static Create、RigidBodyProxy(Velocity/AddForce/AddImpulse)、PointLightProxy(Color/Intensity/Range)、Physics.Raycast(Jolt NarrowPhaseQuery)、ScriptApiFunctionTable version=2、IDE项目文件生成(Directory.Build.props+.csproj+.sln) -->
 
 ---
 
@@ -1589,9 +1075,342 @@ output/{ProjectName}/
 
 ---
 
+## Issue #71 — 脚本库扩展 Phase 2：InputMap 资产 + Mesh / Material 组件代理
+
+**优先级：中（依赖 #69 已完成；#29 脚本系统基础稳定）**
+
+### 目标
+
+在现有脚本 API（version 2）基础上增加三类能力：
+① 将 InputSystem 的 ActionMapDef 定义外化为可编辑的 `.sainputmap` 资产（含 `.sameta` + cook 流程），脚本通过具名 action 查询而非裸设备路径；
+② 暴露 `StaticMeshComponent` / `MeshRendererComponent` 读写接口（`MeshProxy`），支持运行时换材质槽；
+③ 暴露 `MaterialOverrideComponent` 标量参数读写接口（`MaterialOverrideProxy`），支持运行时改 shader 参数（颜色、强度等）。
+完成后 ScriptApiFunctionTable 升至 version 3。
+
+### 设计
+
+#### 文件布局概览
+
+```
+tools/importer/
+├─ InputMapImporter.hpp / .cpp      ← NEW: cook .sainputmap → cook cache
+
+managed/StellarAlia.Runtime/
+├─ AssetRef.cs                      ← NEW: 轻量 UUID 句柄（纯 managed）
+├─ MeshProxy.cs                     ← NEW: StaticMesh + MeshRenderer 代理
+├─ MaterialOverrideProxy.cs         ← NEW: MaterialOverride 参数代理
+└─ Input.cs                         ← 追加 InputAction 静态类（具名 action 查询）
+
+src/function/input/
+└─ ActionMapJsonParser.hpp / .cpp   ← NEW: JSON → ActionMapDef 解析器
+   InputMapLoader.hpp / .cpp        ← NEW: 项目加载时批量注册所有 InputMap 资产
+
+src/function/script/
+├─ ScriptApiExports.hpp             ← 追加 Block 3 槽位，version 2→3
+└─ ScriptApiExports.cpp             ← 追加对应 extern "C" 实现
+
+src/engine/
+└─ Application.cpp                  ← UpdateProjectPaths() 末尾调 InputMapLoader::LoadAll()
+```
+
+---
+
+#### A — `.sainputmap` 资产与 cook 流程
+
+**源文件格式**（JSON，扩展名 `.sainputmap`）：
+
+```json
+{
+  "name": "Gameplay",
+  "passthrough": false,
+  "actions": [
+    {
+      "name": "Move",
+      "type": "Axis2D",
+      "bindings": [
+        { "kind": "WASD" },
+        { "kind": "Direct", "path": "Gamepad/LeftStick", "deadZone": 0.12 }
+      ]
+    },
+    {
+      "name": "Jump",
+      "type": "Button",
+      "activationThreshold": 0.5,
+      "bindings": [
+        { "kind": "Direct", "path": "Keyboard/Space" },
+        { "kind": "Direct", "path": "Gamepad/ButtonSouth" }
+      ]
+    },
+    {
+      "name": "Look",
+      "type": "Axis2D",
+      "bindings": [
+        { "kind": "Direct", "path": "Mouse/Delta", "scale": 0.08 },
+        { "kind": "Direct", "path": "Gamepad/RightStick", "deadZone": 0.12 }
+      ]
+    }
+  ]
+}
+```
+
+Binding 支持的 `kind`：
+
+| kind | 额外字段 | 对应 `BindingDef` |
+|------|---------|-----------------|
+| `"Direct"` | `path`, `scale`(float 或 [x,y]), `deadZone`, `invert`(bool), `normalize`(bool) | `BindingDef::Direct(path).WithXxx()` |
+| `"WASD"` | `up/down/left/right`（可选覆盖）, `normalize`(bool) | `BindingDef::WASD(...)` |
+| `"TwoButton"` | `negative`, `positive` | `BindingDef::TwoButton(...)` |
+| `"Composite"` | `modifiers`(string[]), `key` | `BindingDef::Composite(...)` |
+
+**`.sameta` 格式**（`controls.sainputmap.sameta` 紧邻源文件）：
+```
+# StellarAlia Asset Meta v1
+uuid=<UUID>
+type=InputMap
+```
+
+**ImportScanner**（`ImportScanner.cpp::AssetTypeFromExtension`）：
+```cpp
+if (e == ".sainputmap")  return "InputMap";
+```
+
+**Cook tool dispatch**（`tools/cook/main.cpp`）：
+```cpp
+} else if (entry.meta.type == "InputMap") {
+    ok = CookInputMap(entry, opts.outputDir, opts.force);
+}
+```
+
+**CookInputMap**（`tools/importer/InputMapImporter.cpp`）：
+- 用 `nlohmann::json` 解析源文件做结构验证（必须含 `name` 和 `actions` 数组）
+- 输出路径：`<cookCacheDir>/<uuid>.sainputmap`（写入验证后的 JSON bytes）
+- 增量检测：比较 src/out mtime，`force` 时强制重新生成
+
+**`ActionMapJsonParser`**（`src/function/input/ActionMapJsonParser.hpp/.cpp`）：
+```cpp
+namespace StellarAlia {
+// Parse one .sainputmap JSON string → one ActionMapDef.
+bool ActionMapJsonParser::Parse(std::string_view json, ActionMapDef& out);
+}
+```
+支持所有 `BindingDef::Kind` 及 processor 字段（scale / deadZone / invert / normalize）。
+
+**`InputMapLoader`**（`src/function/input/InputMapLoader.hpp/.cpp`）：
+```cpp
+namespace StellarAlia {
+struct InputMapLoader {
+    // 扫描 projectDir 下所有 .sainputmap.sameta → 解析 → RegisterMaps
+    // 若 stack 为空则 PushMap(defs[0].name) 建立默认上下文
+    static void LoadAll(const fs::path& projectDir,
+                        const fs::path& cookCacheDir,
+                        InputSystem&    inputSystem);
+};
+}
+```
+在 `Application::UpdateProjectPaths()` 末尾调用。
+
+---
+
+#### B — 函数表 Block 3（version 2 → 3）
+
+新增槽位全部追加末尾（Block 1 & 2 位置不变）：
+
+```cpp
+struct ScriptApiFunctionTable {
+    uint32_t version = 3;   // 2 → 3
+    // … Block 1 & 2 不变 …
+
+    // ── Block 3 — v3 新增 ─────────────────────────────────────────────
+    // InputAction — 具名 action 查询
+    float   (*InputAction_ReadFloat)       (const char* action);
+    void    (*InputAction_ReadVec2)        (const char* action, float*, float*);
+    int32_t (*InputAction_IsActive)        (const char* action);
+    int32_t (*InputAction_WasActivated)    (const char* action);
+    int32_t (*InputAction_WasDeactivated)  (const char* action);
+    // StaticMesh
+    void    (*StaticMesh_GetAssetUUID)     (uint64_t entity, char* buf, int32_t bufLen);
+    // MeshRenderer
+    int32_t (*MeshRenderer_GetSlotCount)   (uint64_t entity);
+    void    (*MeshRenderer_GetSlotUUID)    (uint64_t entity, int32_t slot, char* buf, int32_t bufLen);
+    int32_t (*MeshRenderer_SetSlotUUID)    (uint64_t entity, int32_t slot, const char* uuid);
+    int32_t (*MeshRenderer_GetCastShadow)  (uint64_t entity);
+    void    (*MeshRenderer_SetCastShadow)  (uint64_t entity, int32_t value);
+    int32_t (*MeshRenderer_GetReceiveShadow)(uint64_t entity);
+    void    (*MeshRenderer_SetReceiveShadow)(uint64_t entity, int32_t value);
+    // MaterialOverride
+    float   (*MaterialOverride_GetFloat)   (uint64_t entity, const char* param);
+    void    (*MaterialOverride_SetFloat)   (uint64_t entity, const char* param, float value);
+    void    (*MaterialOverride_GetVec3)    (uint64_t entity, const char* param, float*, float*, float*);
+    void    (*MaterialOverride_SetVec3)    (uint64_t entity, const char* param, float, float, float);
+    void    (*MaterialOverride_GetVec4)    (uint64_t entity, const char* param, float*, float*, float*, float*);
+    void    (*MaterialOverride_SetVec4)    (uint64_t entity, const char* param, float, float, float, float);
+};
+```
+
+---
+
+#### C — C++ 实现要点
+
+**InputAction**：委托 `g_ctx.input->ReadFloat/WasActivated` 等；`g_ctx.input == nullptr` 时返回 0。
+
+**StaticMesh_GetAssetUUID**：`try_get<StaticMeshComponent>` → `uuid.ToString()` → `strncpy`；无组件时 `buf[0]='\0'`。
+
+**MeshRenderer_SetSlotUUID**：`slot >= mr->materialSlots.size()` 时返回 0（不扩充 vector）；否则 `mr->materialSlots[slot] = AssetID::FromString(uuid)`，渲染器下帧自动绑定。
+
+**MaterialOverride_SetFloat**：`try_get<MaterialOverrideComponent>`；不存在则 no-op；存在则 `mo->scalars[param] = ParamValue{value}(float variant)`。
+
+---
+
+#### D — C# 托管层
+
+**`AssetRef.cs`**（新文件，纯 managed）：
+```csharp
+public readonly struct AssetRef {
+    public readonly string Uuid;
+    public bool IsValid => !string.IsNullOrEmpty(Uuid);
+    public static readonly AssetRef Invalid = new(string.Empty);
+    public AssetRef(string uuid) { Uuid = uuid; }
+}
+```
+
+**`Input.cs` 追加 `InputAction` 静态类**：
+```csharp
+public static class InputAction {
+    public static float   ReadFloat    (string action) => NativeApi.SA_InputAction_ReadFloat(action);
+    public static Vector2 ReadVec2     (string action) { NativeApi.SA_InputAction_ReadVec2(action, out float x, out float y); return new(x, y); }
+    public static bool    IsActive     (string action) => NativeApi.SA_InputAction_IsActive(action) != 0;
+    public static bool    WasActivated (string action) => NativeApi.SA_InputAction_WasActivated(action) != 0;
+    public static bool    WasDeactivated(string action)=> NativeApi.SA_InputAction_WasDeactivated(action) != 0;
+}
+```
+
+**`MeshProxy.cs`** 关键接口：`MeshAsset`（只读 AssetRef）、`MaterialCount`、`GetMaterial(slot)`、`SetMaterial(slot, AssetRef)`、`CastShadow`/`ReceiveShadow`（get/set bool）。
+
+**`MaterialOverrideProxy.cs`** 关键接口：`GetFloat/SetFloat(param)`、`GetVec3/SetVec3(param)`、`GetVec4/SetVec4(param)`，`GetColor/SetColor` 作为 Vec4 别名。
+
+**`Entity.cs` 追加**：`public MeshProxy GetMesh() => new(this);` 和 `public MaterialOverrideProxy GetMaterialOverride() => new(this);`
+
+---
+
+### 实施步骤
+
+- [ ] **Step 1 — ImportScanner + Cook 分派 + CookInputMap**
+  - `ImportScanner.cpp`：`AssetTypeFromExtension` 加 `.sainputmap` → `"InputMap"`
+  - `tools/cook/main.cpp`：dispatch 加 `"InputMap"` 分支
+  - 新建 `tools/importer/InputMapImporter.hpp / .cpp`：nlohmann/json 验证 + 复制 JSON 到 `<uuid>.sainputmap`
+  - 验证：`StellarAliaCook --input assets/ --output cook_cache/` 后 cook cache 中出现 `<uuid>.sainputmap`
+
+- [ ] **Step 2 — ActionMapJsonParser**
+  - 新建 `src/function/input/ActionMapJsonParser.hpp / .cpp`
+  - 支持所有 BindingDef::Kind 及 processor 字段
+  - 验证：手动测试解析示例 JSON → ActionMapDef 字段正确
+
+- [ ] **Step 3 — InputMapLoader + Application 集成**
+  - 新建 `src/function/input/InputMapLoader.hpp / .cpp`：`LoadAll()` 扫描 + 解析 + `RegisterMaps` + 条件 `PushMap`
+  - `Application::UpdateProjectPaths()` 末尾调用
+  - 验证：打开含 `.sainputmap` 项目后 `InputSystem::ReadFloat("Move")` 在 PIE 中返回非零
+
+- [ ] **Step 4 — InputAction 脚本 API（Block 3 InputAction 五槽）**
+  - `ScriptApiExports.hpp`：version 2→3，添加 InputAction 五槽
+  - `ScriptApiExports.cpp`：实现五个 `SA_InputAction_*` 函数
+  - `NativeApi.cs`：同步五个函数指针槽，`ExpectedTableVersion = 3`
+  - `Input.cs`：追加 `InputAction` 静态类
+  - 验证：`if (InputAction.WasActivated("Jump")) Debug.Log("jumped!")` — PIE 按 Space 触发一次
+
+- [ ] **Step 5 — AssetRef C# 类型**
+  - 新建 `managed/StellarAlia.Runtime/AssetRef.cs`（纯 managed）
+  - 验证：构造、比较、IsValid 正常
+
+- [ ] **Step 6 — MeshProxy 脚本 API（Block 3 StaticMesh + MeshRenderer 槽）**
+  - `ScriptApiExports.hpp / .cpp`：追加 StaticMesh 1 槽 + MeshRenderer 6 槽（slot 越界返回 0）
+  - `NativeApi.cs`：同步 7 个函数指针槽
+  - 新建 `managed/StellarAlia.Runtime/MeshProxy.cs`
+  - `Entity.cs`：追加 `GetMesh()`
+  - 验证：`Self.GetMesh().SetMaterial(0, new AssetRef("<uuid>"))` 运行时换材质下帧生效
+
+- [ ] **Step 7 — MaterialOverrideProxy 脚本 API（Block 3 MaterialOverride 槽）**
+  - `ScriptApiExports.hpp / .cpp`：追加 MaterialOverride 6 槽（无组件时 GetFloat→0，SetFloat→no-op）
+  - `NativeApi.cs`：同步 6 个函数指针槽
+  - 新建 `managed/StellarAlia.Runtime/MaterialOverrideProxy.cs`
+  - `Entity.cs`：追加 `GetMaterialOverride()`
+  - 验证：`Self.GetMaterialOverride().SetColor("albedo", new Vector4(1,0,0,1))` 运行时变色
+
+### 边界情况与约束
+
+| 约束 | 说明 |
+|------|------|
+| version 字段 | Block 3 全部追加末尾；version 2→3 让运行时快速发现两侧不同步 |
+| InputMapLoader 调用时机 | `UpdateProjectPaths()` 内；Play 时不重复（map 已注册）；切换项目时调 `RegisterMaps` 替换同名 def |
+| MapStack 非空判断 | `LoadAll` 仅在 stack 为空时 `PushMap`，避免覆盖编辑器侧已 push 的 map |
+| MeshRenderer_SetSlotUUID 越界 | `slot >= materialSlots.size()` 返回 0，不扩充 vector |
+| MaterialOverrideComponent 不自动添加 | 无此组件时 Set 为 no-op，Get 返回 0；需编辑器手动添加组件 |
+| .sainputmap cook 输出格式 | 保持 JSON（不二进制化）；体积小，便于调试；未来需要压缩时切换无需改接口 |
+| 多 .sainputmap 自动 push 策略 | 只 push 扫描到的第一个 map；后续 issue 可暴露 `InputAction.Push/Pop(name)` 给脚本 |
+| 不做：AssetRef::FromPath() | 需 AssetRegistry 查询，留后续 issue |
+| 不做：StaticMesh_SetAssetUUID | 运行时换 mesh 需重新上传 GPU buffer，复杂度高 |
+| 不做：MaterialOverride 纹理槽 | 涉及 GPU 描述符更新，留后续 issue |
+
+### 受益 issues
+
+- **#33**（贝塞尔曲线相机）：`InputAction.ReadVec2("Look")` + MeshProxy 是脚本驱动相机和换材质的基础工具
+- **#69**（脚本库）：AssetRef 类型可回头补充 AnimatorProxy 的 clip 换用功能
+- **#70**（游戏发布）：`.sainputmap` 随项目资产打包，GameMode 无需内置硬编码的 input map 定义
+
+---
+
 ### UI Bug Issues
 ~~长双击重命名目前无法起效~~ ✅ 已修：AssetsPanel 引入 DoubleClickClassifier，长按触发重命名，短按保留原导航/打开行为
 ~~asset panel重命名缩略图会消失~~ ✅ 已修
 ~~目前没有在asset panel空白处交互（右键创建文件， 点击选择等）的功能~~ ✅ 已修：右键空白弹出 Create 菜单，左键空白清除选中
 ~~视角操作会影响ui~~ ✅ 已修：RMB mouselook 激活时将 ImGui::GetIO().MousePos 置为 (-FLT_MAX,-FLT_MAX)，消除面板悬停残留
 ~~场景继承树根节点拖拽排序无效~~ ✅ 已修：Scene::m_rootOrder 维护根节点用户定序，SceneHierarchyPresenter DnD 分支调用 MoveRootBefore/After，SceneHierarchyPanel 和 SceneSerializer 改用 GetRootOrder() 迭代
+
+---
+
+## Vulkan Error D — vkUpdateDescriptorSets on in-flight descriptor set ✅ DONE
+
+**修复方案：`VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT`**
+
+### 背景与分析
+
+`FlushBindings()` 在 `AllocateSlots` 后、`Execute` 前调用 `vkUpdateDescriptorSets`，此时上一帧的 command buffer 可能仍在 GPU 执行（双帧槽中另一槽的 fence 未等待）。Vulkan spec 默认禁止更新 pending command buffer 引用的 descriptor set。
+
+深入分析后确认：RenderGraph 的瞬态资源走 **greedy interval slot coloring**——非重叠生命周期的逻辑纹理复用同一 `RGPhysicalSlot`（同一 VkImage/VkImageView）。Slot 的物理 handle 由 `AllocateSlots` 的 `if (!slot.handle.IsValid())` 保证仅创建一次，跨帧持久。因此 FlushBindings 实际上每帧写入的是**相同的 VkImageView**——无真实数据竞争，仅 spec 合规问题。Issue #36 的 VkDeviceMemory 级别别名也不改变 VkImageView 稳定性。
+
+**正确修法**：为 descriptor layout 和 pool 加 `UPDATE_AFTER_BIND` flag，让 spec 明确允许 pending 时更新（只需在 GPU 执行该 draw 前完成，RG 调用顺序已保证）。无需双缓冲任何 descriptor set。
+
+### 实施
+
+三处改动，均在 `VulkanDevice.cpp`：
+
+1. `CreateDescriptorSetLayout` — layout binding flags + layout create flag
+2. `InitDescriptorPool` — pool create flag
+3. `AllocateDescriptorSet` — pool 分配时对应 flag（`VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT` 已覆盖）
+  - 验证：DoF 效果不变，Validation 无报错
+
+- [ ] **Step 7 — TonemapFeature / SelectionOutlineFeature / 其余 Feature**
+  - 同上模式逐一处理
+  - `AutoExposureFeature`：先确认 AddPasses 是否有 BindTexture 调用，再决定是否需要双缓冲
+
+- [ ] **Step 8 — 最终 Validation 扫描**
+  - 开启 Vulkan Validation Layer，运行 3~5 帧
+  - 目标：`vkUpdateDescriptorSets` 相关 Error 归零
+  - 检查 `DebugOverlayFeature` 是否仍有报错（若有则补 Step 2 类处理）
+
+### 边界情况与约束
+
+| 约束 | 说明 |
+|------|------|
+| `kMaxBloomMips` 是编译期常量 | `m_downsampleDescSet[N][2]` 是栈上数组，无需额外分配，但改声明时注意行列顺序（`[mip][frame]` vs `[frame][mip]`） |
+| TAAFeature history 对应关系 | `m_resolveSet[i]` 的 binding 要与 `m_historyTex[i]` 保持一致，否则 TAA 读错 history 导致拖影 |
+| DebugOverlayFeature 特殊性 | 该 feature 的 descSet 绑定的是持久 SSBO（m_lineBuffer），每帧不调用 BindTexture/BindBuffer，FlushBindings 不写该 set，理论上暂时安全；若 Validation 仍报错则统一改 |
+| FreeDescriptorSet 幂等性 | `IRHIDevice::FreeDescriptorSet` 接受 invalid handle 时应 no-op；OnDestroy 前先检查 IsValid() |
+| 不做：push descriptor | 使用 `VK_KHR_push_descriptor` 可完全绕开 update 问题，但需 pipeline layout 改动及 ImGui/DebugOverlay 兼容验证，范围超出此 fix |
+
+### 受益 issues
+
+- **Error E**（未使用顶点属性）：独立于此 fix，但同一 Vulkan Validation 扫描运行可一并确认
+- **#42 TAA**：Step 4 完成后 TAA descriptor update 路径更稳定，为后续 velocity buffer 扩展打基础
+
+---
+

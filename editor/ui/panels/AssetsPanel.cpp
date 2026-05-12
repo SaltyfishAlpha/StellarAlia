@@ -306,6 +306,7 @@ void AssetsPanel::RequestRefresh() {
 
 void AssetsPanel::RequestReimportAll() {
     ReimportDir(m_assetsRoot);
+    m_presenter.RequestRecompileScripts();
 }
 
 // ── Create new asset file ─────────────────────────────────────────────────────
@@ -939,8 +940,10 @@ void AssetsPanel::DrawDirPane(const fs::path& dir) {
                     m_deleteConfirmOpen = true;
                 }
                 ImGui::Separator();
-                if (ImGui::MenuItem("Reimport All in Folder"))
+                if (ImGui::MenuItem("Reimport All in Folder")) {
                     ReimportDir(entry.path());
+                    m_presenter.RequestRecompileScripts();
+                }
                 ImGui::EndPopup();
             }
 
@@ -1030,6 +1033,11 @@ void AssetsPanel::DrawFilePane() {
                 if (ImGui::MenuItem("Shader (.saglsl)"))   CreateNewFile(CreateKind::Saglsl, m_selectedDir);
                 if (ImGui::MenuItem("Script (.cs)"))       CreateNewFile(CreateKind::Script, m_selectedDir);
                 ImGui::EndMenu();
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Reimport All")) {
+                ReimportDir(m_selectedDir);
+                m_presenter.RequestRecompileScripts();
             }
             ImGui::EndPopup();
         }
@@ -1153,7 +1161,10 @@ void AssetsPanel::DrawFilePane() {
                     m_deleteConfirmOpen = true;
                 }
                 ImGui::Separator();
-                if (ImGui::MenuItem("Reimport All in Folder")) ReimportDir(p);
+                if (ImGui::MenuItem("Reimport All in Folder")) {
+                    ReimportDir(p);
+                    m_presenter.RequestRecompileScripts();
+                }
                 ImGui::EndPopup();
             }
             // Drop target: drag assets onto a folder in the right pane
@@ -1181,6 +1192,8 @@ void AssetsPanel::DrawFilePane() {
                 if (hasMeta && ImGui::MenuItem("Reimport")) ReimportFile(p);
                 if (isSascene && ImGui::MenuItem("Load Scene") && m_onSceneLoad)
                     m_onSceneLoad(p);
+                if (ext == ".cs" && ImGui::MenuItem("Recompile"))
+                    m_presenter.RequestRecompileScripts();
                 if (isSaglsl && ImGui::MenuItem("Create Material from Shader")) {
                     const SaglslMeta meta = ParseSaglslMeta(p);
                     if (meta.shadingModel.empty()) {
@@ -1395,6 +1408,11 @@ void AssetsPanel::DrawFilePane() {
             if (ImGui::MenuItem("Shader (.saglsl)"))   CreateNewFile(CreateKind::Saglsl, m_selectedDir);
             if (ImGui::MenuItem("Script (.cs)"))       CreateNewFile(CreateKind::Script, m_selectedDir);
             ImGui::EndMenu();
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Reimport All")) {
+            ReimportDir(m_selectedDir);
+            m_presenter.RequestRecompileScripts();
         }
         ImGui::EndPopup();
     }

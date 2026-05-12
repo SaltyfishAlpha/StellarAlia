@@ -12,7 +12,11 @@ int main() {
     desc.height       = 720;
     desc.title        = "StellarAlia Editor";
     desc.vsync        = true;
+#ifdef NDEBUG
     desc.validation   = false;
+#else
+    desc.validation   = true;
+#endif
     desc.engineAssetsDir    = StellarAliaApp::ASSETS_DIR;
     desc.engineCookCacheDir = StellarAliaApp::COOK_CACHE_DIR;
     desc.shaderDir          = StellarAliaApp::BUILTIN_SHADER_DIR;

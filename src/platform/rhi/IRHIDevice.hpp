@@ -49,6 +49,14 @@ struct RHIPipelineDesc {
     // When true, vertex input is skipped (gl_VertexIndex fullscreen-tri trick)
     bool                noVertexInput    = false;
 
+    // Reflection-driven vertex input. Populated from ShaderReflection::vertexInputs
+    // by ShaderProgram; the backend emits one VkVertexInputAttributeDescription per
+    // entry. Empty (count == 0) with noVertexInput == false → backend falls back to
+    // the legacy 4-attrib hardcoded layout for backward compat with v3-v5 .refl.
+    static constexpr uint32_t kMaxVertexAttribs = 8;
+    ShaderVertexInputDesc vertexInputs[kMaxVertexAttribs] = {};
+    uint32_t              vertexInputCount = 0;
+
     const char*         debugName        = nullptr;
 };
 

@@ -76,7 +76,11 @@ int main() {
     desc.height       = 720;
     desc.title        = "PhysicsDemo";
     desc.vsync        = true;
+#ifdef NDEBUG
     desc.validation   = false;
+#else
+    desc.validation   = true;
+#endif
     desc.assetsDir    = PhysicsDemo::SA_ASSETS_DIR;
     desc.cookCacheDir = PhysicsDemo::COOK_CACHE_DIR;
     desc.shaderDir    = PhysicsDemo::BUILTIN_SHADER_DIR;

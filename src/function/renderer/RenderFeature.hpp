@@ -18,6 +18,10 @@ namespace Resource { class ResourceManager; }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FeatureInitContext — all initialisation-time dependencies in one place.
+// `shaderDir` is the primary lookup dir (engine builtin at init; project's
+// cook_cache/shaders/ when scanning project material types). `engineShaderDir`
+// is a fallback used by MaterialManager when project material types reference
+// vert/frag SPV (e.g. deferred_geometry.vert) that lives in the engine dir.
 // ─────────────────────────────────────────────────────────────────────────────
 struct FeatureInitContext {
     RHI::IRHIDevice*           device      = nullptr;
@@ -25,6 +29,7 @@ struct FeatureInitContext {
     Resource::ResourceManager* resMgr      = nullptr;
     RHI::RHIDescLayoutHandle   frameLayout;
     std::string                shaderDir;
+    std::string                engineShaderDir; // fallback for cross-dir vert lookups
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

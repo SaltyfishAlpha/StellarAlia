@@ -104,6 +104,7 @@ public:
         uint32_t         graphicsFamily;
         uint32_t         swapchainImageCount;    // total images in the swapchain
         uint32_t         swapchainMinImageCount; // VkSurfaceCapabilitiesKHR::minImageCount
+        VkFormat         swapchainFormat;        // actual swapchain surface format
     };
     [[nodiscard]] ImGuiVulkanContext GetImGuiContext() const;
 

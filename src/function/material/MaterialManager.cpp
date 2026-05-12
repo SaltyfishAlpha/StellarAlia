@@ -72,10 +72,22 @@ MaterialType* MaterialManager::RegisterType(std::unique_ptr<MaterialType> type) 
 bool MaterialManager::RegisterTypeFromShaders(const MaterialTypeDesc&   desc,
                                                const FeatureInitContext& ctx)
 {
-    const std::string vertSpvPath  = ctx.shaderDir + "/" + desc.vertShader + ".vert.spv";
-    const std::string fragSpvPath  = ctx.shaderDir + "/" + desc.fragShader + ".frag.spv";
-    const std::string vertReflPath = ctx.shaderDir + "/" + desc.vertShader + ".vert.refl";
-    const std::string fragReflPath = ctx.shaderDir + "/" + desc.fragShader + ".frag.refl";
+    // Project material types may reference vert/frag SPV that live in the engine
+    // builtin dir (e.g. deferred_geometry.vert), so resolve each file by trying
+    // ctx.shaderDir first then falling back to ctx.engineShaderDir.
+    auto resolve = [&](const std::string& rel) {
+        const std::string primary = ctx.shaderDir + "/" + rel;
+        if (std::filesystem::exists(primary)) return primary;
+        if (!ctx.engineShaderDir.empty() && ctx.engineShaderDir != ctx.shaderDir) {
+            const std::string fallback = ctx.engineShaderDir + "/" + rel;
+            if (std::filesystem::exists(fallback)) return fallback;
+        }
+        return primary;  // let the caller report the missing primary path
+    };
+    const std::string vertSpvPath  = resolve(desc.vertShader + ".vert.spv");
+    const std::string fragSpvPath  = resolve(desc.fragShader + ".frag.spv");
+    const std::string vertReflPath = resolve(desc.vertShader + ".vert.refl");
+    const std::string fragReflPath = resolve(desc.fragShader + ".frag.refl");
 
     const auto vertSpv = LoadSpv(vertSpvPath);
     const auto fragSpv = LoadSpv(fragSpvPath);

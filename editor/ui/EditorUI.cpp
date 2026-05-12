@@ -39,9 +39,7 @@ bool EditorUI::Init(GLFWwindow* window, RHI::VulkanDevice* device,
     ImGui_ImplGlfw_InitForVulkan(window, /*install_callbacks=*/true);
 
     // ── Vulkan backend (dynamic rendering, Vulkan 1.3) ────────────────────────
-    // VK_FORMAT_B8G8R8A8_UNORM is the most common desktop swapchain format.
-    // TODO: query GetSwapchainFormat() from device and convert to VkFormat.
-    static const VkFormat swapFmt = VK_FORMAT_B8G8R8A8_UNORM;
+    const VkFormat swapFmt = ctx.swapchainFormat;
 
     // When VK_NO_PROTOTYPES / IMGUI_IMPL_VULKAN_NO_PROTOTYPES is defined (volk mode),
     // ImGui cannot resolve Vulkan functions on its own. Provide a loader that

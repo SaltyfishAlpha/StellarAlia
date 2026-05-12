@@ -197,9 +197,18 @@ void Application::Run() {
 
         // ── Render ────────────────────────────────────────────────────────────
         // Skip the frame while the window is minimized (GLFW framebuffer size = 0x0).
-        // m_device->GetSwapchainWidth/Height() lags behind because ResizeSwapchain()
-        // is never called with 0x0; we check the window directly instead.
         if (m_window->GetWidth() == 0 || m_window->GetHeight() == 0) continue;
+        // Sync swapchain extent with the window. GLFW's framebuffer-size
+        // callback updates m_window synchronously, but the device's swapchain
+        // is only recreated lazily on the next BeginFrame via m_needResize.
+        // If we read GetSwapchainWidth/Height now without first staging the
+        // resize, RenderFrame would receive the *old* size while BeginFrame
+        // (called inside it) recreates the swapchain to the *new* size — the
+        // renderArea then overflows the new imageView.
+        if (m_window->GetWidth()  != m_device->GetSwapchainWidth() ||
+            m_window->GetHeight() != m_device->GetSwapchainHeight()) {
+            m_device->ResizeSwapchain(m_window->GetWidth(), m_window->GetHeight());
+        }
         const auto w = m_device->GetSwapchainWidth();
         const auto h = m_device->GetSwapchainHeight();
         if (w == 0 || h == 0) continue;

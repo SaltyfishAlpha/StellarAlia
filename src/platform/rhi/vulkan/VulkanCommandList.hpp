@@ -18,6 +18,12 @@ public:
     void Bind(VkCommandBuffer cmd, VulkanDevice* device) {
         m_cmd    = cmd;
         m_device = device;
+        // Reset pipeline tracking — without this, m_boundPipeline leaks across
+        // command buffers (notably from ImmediateCompute at init time into the
+        // first frame's main cmd buffer), causing SetDescriptorSet to record
+        // vkCmdBindDescriptorSets against a stale layout.
+        m_boundPipeline          = {};
+        m_boundPipelineIsCompute = false;
     }
     VkCommandBuffer GetVkCommandBuffer() const { return m_cmd; }
 

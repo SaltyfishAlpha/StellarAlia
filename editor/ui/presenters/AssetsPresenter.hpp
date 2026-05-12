@@ -42,6 +42,10 @@ public:
     void RequestImportFile(const std::filesystem::path& srcPath,
                            const std::filesystem::path& destDir);
 
+    // Compile all scripts in the editor scene registry.
+    // Safe to call while not playing; no-op if ScriptSystem is unavailable.
+    void RequestRecompileScripts();
+
     // ── Results (Panel reads at top of OnDraw) ──────────────────────────────────
     // Returns true once after any import modifies the assets directory.
     bool ConsumeFilePaneDirty();

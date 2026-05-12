@@ -21,8 +21,7 @@ public class BouncingRotator : ScriptBase
     }
 
     public override void OnUpdate(float dt)
-    {        
-	Debug.Log("UPDATE");
+    {
         float t = Time.TotalTime;
 
         var pos = Self.GetPosition();

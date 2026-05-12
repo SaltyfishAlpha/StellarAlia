@@ -88,7 +88,7 @@ bool SceneRenderer::Init(const Desc& desc) {
 
     // ── Build FeatureInitContext (shared by Init and all feature OnInits) ────────
     const FeatureInitContext ctx{desc.device, desc.matMgr, desc.resMgr,
-                                 frameLayout, desc.shaderDir};
+                                 frameLayout, desc.shaderDir, desc.shaderDir};
 
     // ── Shadow map (fixed size from config, never resized) ───────────────────
     {
@@ -486,7 +486,7 @@ void SceneRenderer::ApplyWorldSettings(WorldSettings& ws, bool updateIBL)
     if (!m_tonemapFeature) return;
 
     const FeatureInitContext ctx{m_device, m_matMgr, m_resMgr,
-                                  m_frameUniforms.GetLayout(), m_shaderDir};
+                                  m_frameUniforms.GetLayout(), m_shaderDir, m_shaderDir};
 
     if (pp.tonemapMode == PostProcessSettings::TonemapMode::Builtin) {
         if (auto* tf = dynamic_cast<TonemapFeature*>(m_tonemapFeature)) {
@@ -1363,11 +1363,15 @@ void SceneRenderer::ShadowFeature::AddPasses(SceneRenderer& renderer,
             cmd.BeginRenderPass(rpDesc);
             cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(kSize), float(kSize)});
             cmd.SetScissor(RHI::RHIScissor{0, 0, kSize, kSize});
-            cmd.SetDescriptorSet(0, frameSet);
 
+            // frameSet bind is deferred until after the first SetPipeline so
+            // vkCmdBindDescriptorSets uses this pass's pipeline layout, not
+            // whatever was bound previously (stale layouts cause set-0 / push-
+            // constant compatibility errors).
             RHI::RHIPipelineHandle currentPipeline{};
             RHI::RHIBufferHandle   currentVB{};
             RHI::RHIBufferHandle   currentIB{};
+            bool frameSetBound = false;
             for (const auto& item : drawItems) {
                 if (!item.pipeline.IsValid()) continue;
                 const RHI::RHIPipelineHandle effectivePipeline =
@@ -1381,6 +1385,10 @@ void SceneRenderer::ShadowFeature::AddPasses(SceneRenderer& renderer,
                 if (effectivePipeline.index != currentPipeline.index) {
                     cmd.SetPipeline(effectivePipeline);
                     currentPipeline = effectivePipeline;
+                    if (!frameSetBound) {
+                        cmd.SetDescriptorSet(0, frameSet);
+                        frameSetBound = true;
+                    }
                 }
                 if (item.isSkinned && item.skinDescSet.IsValid())
                     cmd.SetDescriptorSet(2, item.skinDescSet);
@@ -1567,12 +1575,13 @@ void SceneRenderer::GBufferFeature::AddPasses(SceneRenderer& renderer,
             cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
             cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
 
-            // set=0 (frame uniforms) never changes within a pass — bind once.
-            cmd.SetDescriptorSet(0, frameSet);
-
+            // set=0 (frame uniforms) never changes within a pass — bind once,
+            // but only after the first SetPipeline so vkCmdBindDescriptorSets
+            // references this pass's pipeline layout.
             RHI::RHIPipelineHandle currentPipeline{};
             RHI::RHIBufferHandle   currentVB{};
             RHI::RHIBufferHandle   currentIB{};
+            bool frameSetBound = false;
 
             for (const DrawItem* itemPtr : drawItems) {
                 const auto& item = *itemPtr;
@@ -1588,6 +1597,10 @@ void SceneRenderer::GBufferFeature::AddPasses(SceneRenderer& renderer,
                 if (effectivePipeline.index != currentPipeline.index) {
                     cmd.SetPipeline(effectivePipeline);
                     currentPipeline = effectivePipeline;
+                    if (!frameSetBound) {
+                        cmd.SetDescriptorSet(0, frameSet);
+                        frameSetBound = true;
+                    }
                 }
                 item.material->Bind(&cmd);  // set=1 per-material descriptors, always needed
                 if (item.isSkinned && item.skinDescSet.IsValid())
@@ -1723,13 +1736,16 @@ void SceneRenderer::ApplyProjectShaderTypes(const std::string& cookedShaderDir) 
             m_deferredLightingFeature->ReloadShaders(m_device, fragSpv, fragRefl);
     }
 
-    // Register new project material types.
+    // Register new project material types. Project shaders may reference vert/frag
+    // SPV (e.g. deferred_geometry.vert) that lives in the engine dir, so we pass
+    // m_shaderDir as the fallback.
     FeatureInitContext ctx;
-    ctx.device      = m_device;
-    ctx.matMgr      = m_matMgr;
-    ctx.resMgr      = m_resMgr;
-    ctx.frameLayout = m_frameUniforms.GetLayout();
-    ctx.shaderDir   = cookedShaderDir;
+    ctx.device          = m_device;
+    ctx.matMgr          = m_matMgr;
+    ctx.resMgr          = m_resMgr;
+    ctx.frameLayout     = m_frameUniforms.GetLayout();
+    ctx.shaderDir       = cookedShaderDir;
+    ctx.engineShaderDir = m_shaderDir;
     m_matMgr->RegisterTypesFromShaderDir(cookedShaderDir, ctx, /*isProjectType=*/true);
 
     SA_LOG_INFO("SceneRenderer: project shader types applied from '{}'", cookedShaderDir);
@@ -2976,6 +2992,11 @@ void SceneRenderer::DebugOverlayFeature::AddPasses(
             const RHI::RHIDescSetHandle descSet  = m_descSet;
             ctx.rg->AddPass("DebugOverlay",
                 [rgSwap, rgDepth](RGPassBuilder& b) {
+                    // Read+Write on rgSwap is load-bearing: RenderGraph builds
+                    // dependency edges only on Read-after-Write, so without the
+                    // Read this pass has no edge to Tonemap (which writes rgSwap)
+                    // and the topo sort schedules it before Tonemap — Tonemap
+                    // then overwrites the debug lines.
                     b.Read(rgSwap); b.Write(rgSwap); b.WriteDepth(rgDepth);
                 },
                 [pipeline, frameSet, descSet, viewProj, vertCount, rgSwap, rgDepth, w, h]
@@ -3017,6 +3038,8 @@ void SceneRenderer::DebugOverlayFeature::AddPasses(
             // No depth attachment: depthTest=false, depthWrite=false in the pipeline.
             ctx.rg->AddPass("DebugOverlayXray",
                 [rgSwap](RGPassBuilder& b) {
+                    // Read+Write on rgSwap — needed for the topo sort to place
+                    // this pass after Tonemap (see DebugOverlay above).
                     b.Read(rgSwap); b.Write(rgSwap);
                 },
                 [xrayPipeline, frameSet, xrayDescSet, viewProj, xrayVertCount, rgSwap, w, h]
@@ -3136,15 +3159,19 @@ void SceneRenderer::SelectionMaskFeature::AddPasses(
             cmd.BeginRenderPass(rpDesc);
             cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
             cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
-            cmd.SetDescriptorSet(0, frameSet);
 
             RHI::RHIPipelineHandle currentPipeline{};
+            bool frameSetBound = false;
             for (const auto& dc : dcs) {
                 const RHI::RHIPipelineHandle effectivePipeline =
                     (dc.isSkinned && skinnedPipeline.IsValid()) ? skinnedPipeline : pipeline;
                 if (effectivePipeline.index != currentPipeline.index) {
                     cmd.SetPipeline(effectivePipeline);
                     currentPipeline = effectivePipeline;
+                    if (!frameSetBound) {
+                        cmd.SetDescriptorSet(0, frameSet);
+                        frameSetBound = true;
+                    }
                 }
                 if (dc.isSkinned && dc.skinDescSet.IsValid())
                     cmd.SetDescriptorSet(2, dc.skinDescSet);
@@ -3279,6 +3306,9 @@ void SceneRenderer::SelectionOutlineFeature::AddPasses(
             [rgDilateH, rgMask, rgSwap](RGPassBuilder& b) {
                 b.Read(rgDilateH);
                 b.Read(rgMask);
+                // Read+Write on rgSwap so the topo sort orders this after
+                // Tonemap (which writes rgSwap). Without the Read, the RG
+                // has no Write→Write edge and may run this before Tonemap.
                 b.Read(rgSwap);
                 b.Write(rgSwap);
             },
@@ -3341,6 +3371,10 @@ void SceneRenderer::InfiniteGridFeature::AddPasses(
 
     ctx.rg->AddPass("InfiniteGrid",
         [rgSwap, rgDepth](RGPassBuilder& b) {
+            // Read+Write on rgSwap so the topo sort orders this after Tonemap
+            // (the RG only builds Read-after-Write edges; pure Write→Write does
+            // not constrain order, so without the Read this pass may run
+            // before Tonemap and get overwritten).
             b.Read(rgSwap);
             b.Write(rgSwap);
             b.WriteDepth(rgDepth);
