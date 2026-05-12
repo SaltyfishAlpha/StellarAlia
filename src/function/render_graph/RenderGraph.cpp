@@ -671,9 +671,24 @@ void RenderGraph::Execute(RHI::IRHIDevice& device, RHI::IRHICommandList& cmd) {
             m_lastStats.entries.push_back(e);
         }
     }
-    m_lastStats.physicalSlotCount = static_cast<uint32_t>(m_slots.size());
-    for (const auto& slot : m_slots)
-        m_lastStats.transientBytesPhysical += CalcTextureBytes(slot.desc);
+    // Count only physical texture slots actually used by a logical texture this frame.
+    // m_slots persists across frames (peak-pool semantics), so reporting m_slots.size()
+    // directly would surface stale slots from previous frames as "physical" — e.g.
+    // toggling DoF off leaves DoF-shaped slots in the pool but they no longer back any
+    // logical texture this frame.
+    std::vector<bool> usedTexSlots(m_slots.size(), false);
+    for (uint32_t i = 0; i < texCount; i++) {
+        const auto& t = m_textures[i];
+        if (!t.isImported && t.slotIndex >= 0 &&
+            t.slotIndex < static_cast<int>(m_slots.size()))
+            usedTexSlots[static_cast<uint32_t>(t.slotIndex)] = true;
+    }
+    for (uint32_t i = 0; i < static_cast<uint32_t>(m_slots.size()); ++i) {
+        if (usedTexSlots[i]) {
+            m_lastStats.physicalSlotCount++;
+            m_lastStats.transientBytesPhysical += CalcTextureBytes(m_slots[i].desc);
+        }
+    }
 
     m_lastStats.bufferEntries.reserve(bufCount);
     for (uint32_t i = 0; i < bufCount; i++) {
