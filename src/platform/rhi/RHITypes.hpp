@@ -141,6 +141,7 @@ enum class RHIDescriptorType : uint32_t {
     Sampler,
     UniformBuffer,
     StorageBuffer,
+    StorageBufferDynamic,
     StorageImage,
 };
 

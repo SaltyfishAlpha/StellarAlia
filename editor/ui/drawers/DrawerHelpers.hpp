@@ -2,10 +2,18 @@
 
 #include "resource/AssetRegistry.hpp"
 #include "core/asset/AssetID.hpp"
+#include "EditorContext.hpp"
+#include "command/CommandManager.hpp"
+#include "command/commands/FieldCommands.hpp"
+#include "ui/AssetDragPayload.hpp"
 
 #include <imgui.h>
 #include <algorithm>
+#include <cstring>
+#include <functional>
+#include <memory>
 #include <string>
+#include <utility>
 
 namespace StellarAlia::Editor {
 
@@ -52,6 +60,24 @@ inline bool DrawAssetIDField(const char* label, AssetID& id,
     const float btnWidth = std::max(10.f, ImGui::GetContentRegionAvail().x - clearW);
     if (ImGui::Button(btnLabel, ImVec2(btnWidth, 0)))
         ImGui::OpenPopup("##asset_pick");
+
+    // Drop target on the picker button — accept SAASSET payload from AssetsPanel.
+    // Direct write; callers' existing `if (changed)` path handles dirty / undo
+    // (matches how the picker itself reports changes).
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("SAASSET")) {
+            if (pl->DataSize >= static_cast<int>(sizeof(AssetDragPayload))) {
+                const auto& p = *static_cast<const AssetDragPayload*>(pl->Data);
+                const bool typeOK = (filterType == nullptr || filterType[0] == '\0' ||
+                                     std::strncmp(p.type, filterType, sizeof(p.type)) == 0);
+                if (p.id.IsValid() && typeOK && id != p.id) {
+                    id      = p.id;
+                    changed = true;
+                }
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
 
     if (id.IsValid()) {
         ImGui::SameLine();
@@ -109,6 +135,112 @@ inline bool RemoveButton(const char* id) {
 // Returns ImGuiTreeNodeFlags with AllowOverlap always set.
 inline ImGuiTreeNodeFlags HeaderFlags(ImGuiTreeNodeFlags extra = 0) {
     return ImGuiTreeNodeFlags_AllowOverlap | extra;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AcceptAssetIDDrop — wrap an ImGui drop target that accepts SAASSET payloads
+// (from AssetsPanel), filters by AssetEntry::type, writes the dropped AssetID
+// into outId, and pushes a SetFieldCommand<AssetID> so the drop is undoable.
+//
+// Call this immediately after an ImGui item that should accept the drop:
+//     DrawAssetIDField(...);
+//     AcceptAssetIDDrop(field, "Mesh", ctx, "Drop Mesh");
+//
+// filterType == nullptr or "" matches any asset type.
+// Returns true if the field was changed.
+// ─────────────────────────────────────────────────────────────────────────────
+inline bool AcceptAssetIDDrop(AssetID& outId,
+                              const char* filterType,
+                              EditorContext& ctx,
+                              const char* commandDesc = "Set Asset",
+                              std::function<void()> onApplied = {})
+{
+    if (!ImGui::BeginDragDropTarget()) return false;
+    bool changed = false;
+    if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("SAASSET")) {
+        if (pl->DataSize >= static_cast<int>(sizeof(AssetDragPayload))) {
+            const auto& p = *static_cast<const AssetDragPayload*>(pl->Data);
+            const bool typeOK = (filterType == nullptr || filterType[0] == '\0' ||
+                                 std::strncmp(p.type, filterType, sizeof(p.type)) == 0);
+            if (p.id.IsValid() && typeOK && outId != p.id) {
+                AssetID oldId = outId;
+                if (ctx.cmdMgr) {
+                    ctx.cmdMgr->Execute(
+                        std::make_unique<SetFieldCommand<AssetID>>(
+                            &outId, oldId, p.id,
+                            commandDesc ? commandDesc : "Set Asset",
+                            std::move(onApplied)),
+                        ctx);
+                } else {
+                    outId = p.id;
+                    if (onApplied) onApplied();
+                }
+                changed = true;
+            }
+        }
+    }
+    ImGui::EndDragDropTarget();
+    return changed;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TrackedFieldEdit — wrap any single ImGui control so its edit becomes a single
+// undoable SetFieldCommand<T>.
+//
+// Usage:
+//   TrackedFieldEdit(&tr->position, ctx, "Edit Position",
+//       [](glm::vec3* p){ return ImGui::DragFloat3("Position", glm::value_ptr(*p), 0.1f); },
+//       [&]{ scene.MarkDirty(entity); });   // optional onApplied (Undo replay)
+//
+// draw(T*) must call exactly one ImGui control on *target — TrackedFieldEdit
+// inspects IsItemActivated/IsItemDeactivatedAfterEdit on the LAST item to
+// snapshot pre-edit value and to commit one command per drag (continuous
+// drags collapse into a single undo record).
+//
+// onApplied is forwarded into the SetFieldCommand so Undo/Redo fires the
+// caller's side-effect hook (e.g. dirty-flag propagation).
+// ─────────────────────────────────────────────────────────────────────────────
+template<typename T, typename DrawFn>
+bool TrackedFieldEdit(T* target,
+                      EditorContext& ctx,
+                      std::string    description,
+                      DrawFn         draw,
+                      std::function<void()> onApplied = {})
+{
+    // Per-instantiation single-slot record. ImGui guarantees only one item is
+    // "active" globally per frame, so one slot per T is sufficient.
+    thread_local T*  s_activeTarget = nullptr;
+    thread_local T   s_oldValue{};
+
+    // Snapshot before draw — IsItemActivated fires on the same frame the user
+    // first interacts, by which point draw() may have already mutated *target.
+    T preDraw = *target;
+    const bool changed = draw(target);
+
+    if (ImGui::IsItemActivated()) {
+        s_activeTarget = target;
+        s_oldValue     = std::move(preDraw);
+    }
+
+    if (ImGui::IsItemDeactivatedAfterEdit() && s_activeTarget == target) {
+        T newValue = *target;
+        s_activeTarget = nullptr;
+        if (ctx.cmdMgr && s_oldValue != newValue) {
+            ctx.cmdMgr->Execute(
+                std::make_unique<SetFieldCommand<T>>(
+                    target,
+                    std::move(s_oldValue),
+                    std::move(newValue),
+                    std::move(description),
+                    std::move(onApplied)),
+                ctx);
+        }
+    } else if (ImGui::IsItemDeactivated() && s_activeTarget == target) {
+        // User abandoned without editing (escape / click-away). Drop snapshot.
+        s_activeTarget = nullptr;
+    }
+
+    return changed;
 }
 
 } // namespace StellarAlia::Editor

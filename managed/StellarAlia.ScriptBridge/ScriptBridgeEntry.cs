@@ -88,8 +88,103 @@ public static unsafe class ScriptBridgeEntry
 
     [UnmanagedCallersOnly]
     public static void Unload() {
-        try { s_loader?.Unload(); }
+        try { s_loader?.Unload(); FieldReflector.ClearCache(); }
         catch { /* must not throw */ }
+    }
+
+    // ── Script field reflection (#74) ─────────────────────────────────────────
+    //
+    // Two-step blob protocol: caller first passes capacity=0 to receive the
+    // required size as a negative value (-needed), then resizes and calls again
+    // with that buffer to receive the actual bytes. Avoids predicting size and
+    // double-marshalling.
+
+    /// Returns the schema-blob size for `className`. On the second call writes
+    /// the blob into `outBuf` and returns the byte count.
+    /// className: null-terminated UTF-8.
+    /// outBuf:    caller-owned buffer of `capacity` bytes; ignored when capacity=0.
+    /// Returns:
+    ///   > 0 — schema blob size written
+    ///   < 0 — -size needed (capacity too small)
+    ///   = 0 — class not found / no loaded ALC / error (logged)
+    [UnmanagedCallersOnly]
+    public static int GetClassSchemaBlob(IntPtr classNameUtf8, IntPtr outBuf, int capacity) {
+        try {
+            if (s_loader is null) return 0;
+            string? className = Marshal.PtrToStringUTF8(classNameUtf8);
+            if (string.IsNullOrEmpty(className)) return 0;
+
+            Type? type = s_loader.FindUserScriptType(className);
+            if (type is null) return 0;
+
+            byte[] blob = FieldReflector.BuildSchemaBlob(type);
+            if (blob.Length > capacity) return -blob.Length;
+            Marshal.Copy(blob, 0, outBuf, blob.Length);
+            return blob.Length;
+        } catch (Exception ex) {
+            StellarAlia.Log.Error($"[Bridge] GetClassSchemaBlob: {ex.Message}");
+            return 0;
+        }
+    }
+
+    /// Apply a field-value blob to the C# instance bound to `entityId`.
+    /// Returns the count of fields successfully written, or 0 on error.
+    [UnmanagedCallersOnly]
+    public static int ApplyFieldValues(ulong entityId, IntPtr blobPtr, int blobLen) {
+        try {
+            if (s_loader is null || blobLen <= 0) return 0;
+            object? instance = s_loader.GetInstance(entityId);
+            if (instance is null) return 0;
+
+            var span = new ReadOnlySpan<byte>((void*)blobPtr, blobLen);
+            return FieldReflector.ApplyFieldValues(instance, span);
+        } catch (Exception ex) {
+            StellarAlia.Log.Error($"[Bridge] ApplyFieldValues entity={entityId}: {ex.Message}");
+            return 0;
+        }
+    }
+
+    /// Capture default field values from a fresh `Activator.CreateInstance(type)`
+    /// of `className` — i.e. the C# field initializers. Used at schema-fetch
+    /// time so the Inspector can seed sc.fields with meaningful values before
+    /// the user edits anything. Same two-step capacity protocol.
+    [UnmanagedCallersOnly]
+    public static int GetClassDefaultsBlob(IntPtr classNameUtf8, IntPtr outBuf, int capacity) {
+        try {
+            if (s_loader is null) return 0;
+            string? className = Marshal.PtrToStringUTF8(classNameUtf8);
+            if (string.IsNullOrEmpty(className)) return 0;
+            Type? type = s_loader.FindUserScriptType(className);
+            if (type is null) return 0;
+            object? probe = Activator.CreateInstance(type);
+            if (probe is null) return 0;
+            byte[] blob = FieldReflector.CaptureFieldValues(probe);
+            if (blob.Length > capacity) return -blob.Length;
+            Marshal.Copy(blob, 0, outBuf, blob.Length);
+            return blob.Length;
+        } catch (Exception ex) {
+            StellarAlia.Log.Error($"[Bridge] GetClassDefaultsBlob: {ex.Message}");
+            return 0;
+        }
+    }
+
+    /// Capture current field values from the C# instance bound to `entityId`.
+    /// Same two-step capacity protocol as GetClassSchemaBlob.
+    [UnmanagedCallersOnly]
+    public static int CaptureFieldValues(ulong entityId, IntPtr outBuf, int capacity) {
+        try {
+            if (s_loader is null) return 0;
+            object? instance = s_loader.GetInstance(entityId);
+            if (instance is null) return 0;
+
+            byte[] blob = FieldReflector.CaptureFieldValues(instance);
+            if (blob.Length > capacity) return -blob.Length;
+            Marshal.Copy(blob, 0, outBuf, blob.Length);
+            return blob.Length;
+        } catch (Exception ex) {
+            StellarAlia.Log.Error($"[Bridge] CaptureFieldValues entity={entityId}: {ex.Message}");
+            return 0;
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

@@ -3,9 +3,9 @@
 #include "frame_uniforms.glsl"
 
 // set=1 inputs
-layout(set = 1, binding = 0) uniform sampler2D t_Current;   // RGBA16F, current jittered HDR
-layout(set = 1, binding = 1) uniform sampler2D t_History;   // RGBA16F, previous TAA result
-layout(set = 1, binding = 2) uniform sampler2D t_Depth;     // D32F, for world-pos reprojection
+layout(set = 2, binding = 0) uniform sampler2D t_Current;   // RGBA16F, current jittered HDR
+layout(set = 2, binding = 1) uniform sampler2D t_History;   // RGBA16F, previous TAA result
+layout(set = 2, binding = 2) uniform sampler2D t_Depth;     // D32F, for world-pos reprojection
 
 layout(location = 0) in  vec2 v_TexCoord;
 layout(location = 0) out vec4 out_Color;

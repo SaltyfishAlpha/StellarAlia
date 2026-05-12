@@ -25,9 +25,13 @@ bool MeshRendererDrawer::TryDraw(entt::registry& reg, entt::entity entity,
     ImGui::PushID("MeshRenderer");
     bool changed = false;
 
-    ImGui::Checkbox("Cast Shadow",    &mr->castShadow);
+    TrackedFieldEdit(&mr->castShadow, ctx, "Toggle Cast Shadow",
+        [](bool* p){ return ImGui::Checkbox("Cast Shadow", p); },
+        [&scene]{ scene.MarkMaterialDirty(); });
     ImGui::SameLine();
-    ImGui::Checkbox("Receive Shadow", &mr->receiveShadow);
+    TrackedFieldEdit(&mr->receiveShadow, ctx, "Toggle Receive Shadow",
+        [](bool* p){ return ImGui::Checkbox("Receive Shadow", p); },
+        [&scene]{ scene.MarkMaterialDirty(); });
 
     char slotLabel[64];
     if (mr->materialSlots.empty())

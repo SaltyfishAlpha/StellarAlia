@@ -126,6 +126,12 @@ public:
         const ShaderReflection& merged,
         uint32_t                set) = 0;
 
+    // Build a single-binding descriptor set layout containing a fixed-size
+    // sampler2D array (UPDATE_AFTER_BIND + PARTIALLY_BOUND). Used by the
+    // bindless texture heap.
+    [[nodiscard]] virtual RHIDescLayoutHandle CreateBindlessTextureLayout(
+        uint32_t capacity) = 0;
+
     [[nodiscard]] virtual RHIPipelineHandle CreatePipeline(
         const RHIPipelineDesc& desc) = 0;
 
@@ -144,6 +150,13 @@ public:
                                         uint32_t         binding,
                                         RHITextureHandle texture) = 0;
 
+    // Writes texture to a specific array element of a descriptor binding.
+    // Used by the bindless texture heap (set=3 binding=0, fixed-size array).
+    virtual void WriteDescriptorTextureArray(RHIDescSetHandle ds,
+                                             uint32_t         binding,
+                                             uint32_t         arrayElement,
+                                             RHITextureHandle texture) = 0;
+
     // Writes a texture as a storage image (VK_DESCRIPTOR_TYPE_STORAGE_IMAGE /
     // VK_IMAGE_LAYOUT_GENERAL). Used for compute UAV bindings.
     virtual void WriteDescriptorStorageImage(RHIDescSetHandle ds,
@@ -160,8 +173,12 @@ public:
     virtual void WriteDescriptorBuffer(RHIDescSetHandle ds,
                                        uint32_t         binding,
                                        RHIBufferHandle  buffer,
-                                       uint64_t         offset = 0,
-                                       uint64_t         range  = ~0ull) = 0;
+                                       uint64_t         offset  = 0,
+                                       uint64_t         range   = ~0ull,
+                                       // Issue #72: set true when the destination binding is
+                                       // STORAGE_BUFFER_DYNAMIC / UNIFORM_BUFFER_DYNAMIC, so
+                                       // vkUpdateDescriptorSets emits the matching descriptor type.
+                                       bool             dynamic = false) = 0;
 
     // ── Data Upload ───────────────────────────────────────────────────────────
 
@@ -263,6 +280,12 @@ public:
     // Returns the current in-flight frame slot index [0..MAX_FRAMES-1].
     // Valid after BeginFrame() returns a non-null command list.
     [[nodiscard]] virtual uint32_t GetCurrentFrameIndex() const = 0;
+
+    // ── Device Limits ─────────────────────────────────────────────────────────
+
+    // Minimum alignment for STORAGE_BUFFER_DYNAMIC offsets.
+    // Used by per-frame SSBO ring allocators (MaterialParamRing etc.).
+    [[nodiscard]] virtual uint32_t GetMinStorageBufferOffsetAlignment() const = 0;
 };
 
 } // namespace StellarAlia::RHI

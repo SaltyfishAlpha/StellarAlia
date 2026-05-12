@@ -103,12 +103,13 @@ bool Application::Init(const Desc& desc) {
     // ── ScriptSystem ──────────────────────────────────────────────────────────
     {
         ScriptSystem::Context sctx;
-        sctx.scene      = m_scene.get();
-        sctx.input      = &m_input;
-        sctx.debug      = &m_debugDraw;
-        sctx.physics    = &m_physics;
-        sctx.managedDir = std::string(StellarAliaApp::BIN_DIR) + "/managed";
-        sctx.projectDir = desc.projectDir;
+        sctx.scene         = m_scene.get();
+        sctx.input         = &m_input;
+        sctx.debug         = &m_debugDraw;
+        sctx.physics       = &m_physics;
+        sctx.assetRegistry = &m_assetRegistry;
+        sctx.managedDir    = std::string(StellarAliaApp::BIN_DIR) + "/managed";
+        sctx.projectDir    = desc.projectDir;
         if (!m_scriptSystem.Init(sctx))
             SA_LOG_WARN("Application: ScriptSystem init failed — C# scripting unavailable");
     }

@@ -67,18 +67,39 @@ public:
     [[nodiscard]] const MaterialType* GetType() const { return m_type; }
     [[nodiscard]]       MaterialType* GetType()       { return m_type; }
 
+    // Exposed for the SSBO + bindless render path (Issue #72) where BuildDrawList
+    // needs to issue cmd.SetDescriptorSet(1, descSet, dynamicOffset).
+    [[nodiscard]] RHI::RHIDescSetHandle GetDescSet() const { return m_descSet; }
+
+    // CPU-side blob (post-default + post-SetParam/SetTexture). BuildDrawList copies
+    // this as the baseline before applying per-entity overrides in SSBO path.
+    [[nodiscard]] const std::vector<uint8_t>& GetParamBlob() const { return m_uboBlob; }
+
 private:
     friend class MaterialType;
     friend class MaterialManager;
 
     MaterialType*                  m_type   = nullptr;
     RHI::IRHIDevice*               m_device = nullptr;
+    // Issue #72: back-pointer used by SSBO path to register textures into the
+    // shared BindlessTextureHeap when SetTexture() is called. nullptr in legacy
+    // path or for instances created outside MaterialManager.
+    class MaterialManager*         m_mgr    = nullptr;
 
-    std::vector<uint8_t>           m_uboBlob;        // CPU-side parameter mirror
+    // Issue #72: in SSBO path (usesMaterialParamsSSBO), m_paramBlob contains the
+    // packed MaterialParams blob — ParamDef fields + TextureDef _Idx fields ready
+    // for ring upload. In legacy UBO path, it mirrors only the param UBO contents.
+    std::vector<uint8_t>           m_uboBlob;
     bool                           m_paramDirty = true;
-    RHI::RHIBufferHandle           m_ubo;            // GPU-side UBO (cpu-visible)
+    RHI::RHIBufferHandle           m_ubo;            // legacy UBO path only; empty in SSBO path
     RHI::RHIDescSetHandle          m_descSet;        // set=1
-    std::vector<RHI::RHITextureHandle> m_textures;   // indexed by TextureDef::slotIndex
+    // Legacy path: per-slot RHITextureHandle (written to set=1 binding>=1 sampler).
+    // SSBO path: unused — texture bindings live in m_texAssetIndices below.
+    std::vector<RHI::RHITextureHandle> m_textures;
+    // Issue #72 SSBO path: per-slot bindless heap index, parallel to MaterialType::textures.
+    // Default-initialised to BindlessTextureHeap::kDefaultSlot (0) so unbound slots
+    // sample the engine's white 1×1 texture rather than garbage.
+    std::vector<uint32_t>          m_texAssetIndices;
 
     void FlushParams();
 };

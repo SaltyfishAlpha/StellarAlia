@@ -36,7 +36,8 @@ public:
 
     void SetPipeline(RHIPipelineHandle pipeline)             override;
     void SetComputePipeline(RHIPipelineHandle pipeline)      override;
-    void SetDescriptorSet(uint32_t set, RHIDescSetHandle ds) override;
+    void SetDescriptorSet(uint32_t set, RHIDescSetHandle ds,
+                          std::span<const uint32_t> dynamicOffsets = {}) override;
     void SetPushConstants(const void* data, uint32_t size,
                           RHIShaderStage stages)             override;
 

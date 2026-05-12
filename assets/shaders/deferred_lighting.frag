@@ -15,12 +15,12 @@
 //              RT2.a   = EncodeShadingFlags(modelID [, extraFlags])
 //   binding=3  depth sampler (for world-pos reconstruction)
 //   binding=4  shadow map (D32, directional light)
-layout(set = 1, binding = 0) uniform sampler2D t_GAlbedoOcclusion;
-layout(set = 1, binding = 1) uniform sampler2D t_GNormalMaterial;
-layout(set = 1, binding = 2) uniform sampler2D t_GData;
-layout(set = 1, binding = 3) uniform sampler2D t_GDepth;
-layout(set = 1, binding = 4) uniform sampler2D t_ShadowMap;
-layout(set = 1, binding = 5) uniform sampler2D t_AO;  // GTAO result (1.0 = no occlusion)
+layout(set = 2, binding = 0) uniform sampler2D t_GAlbedoOcclusion;
+layout(set = 2, binding = 1) uniform sampler2D t_GNormalMaterial;
+layout(set = 2, binding = 2) uniform sampler2D t_GData;
+layout(set = 2, binding = 3) uniform sampler2D t_GDepth;
+layout(set = 2, binding = 4) uniform sampler2D t_ShadowMap;
+layout(set = 2, binding = 5) uniform sampler2D t_AO;  // GTAO result (1.0 = no occlusion)
 
 // ── I/O ───────────────────────────────────────────────────────────────────────
 layout(location = 0) in  vec2 v_TexCoord;

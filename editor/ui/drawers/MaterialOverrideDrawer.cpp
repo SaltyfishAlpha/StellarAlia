@@ -107,24 +107,40 @@ bool MaterialOverrideDrawer::TryDraw(entt::registry& reg, entt::entity entity,
             ImGui::SameLine();
             const float widgetW = std::max(30.f, ImGui::GetContentRegionAvail().x - 28.f);
             ImGui::SetNextItemWidth(widgetW);
+            const std::string undoDesc = "Edit " + paramName;
+            auto markDirty = [&scene]{ scene.MarkMaterialDirty(); };
             if (auto* f = std::get_if<float>(&val)) {
                 const float lo  = def ? def->minValue : 0.f;
                 const float hi  = def ? def->maxValue : 1.f;
                 const float spd = (hi - lo) * 0.005f;
-                changed |= ImGui::DragFloat("##v", f, spd, lo, hi);
+                changed |= TrackedFieldEdit(f, ctx, undoDesc,
+                    [spd, lo, hi](float* p){ return ImGui::DragFloat("##v", p, spd, lo, hi); },
+                    markDirty);
             } else if (auto* v2 = std::get_if<glm::vec2>(&val)) {
-                changed |= ImGui::DragFloat2("##v", glm::value_ptr(*v2), 0.01f);
+                changed |= TrackedFieldEdit(v2, ctx, undoDesc,
+                    [](glm::vec2* p){ return ImGui::DragFloat2("##v", glm::value_ptr(*p), 0.01f); },
+                    markDirty);
             } else if (auto* v3 = std::get_if<glm::vec3>(&val)) {
                 if (uit == T::Color3 || uit == T::Inferred)
-                    changed |= ImGui::ColorEdit3("##v", glm::value_ptr(*v3));
+                    changed |= TrackedFieldEdit(v3, ctx, undoDesc,
+                        [](glm::vec3* p){ return ImGui::ColorEdit3("##v", glm::value_ptr(*p)); },
+                        markDirty);
                 else
-                    changed |= ImGui::DragFloat3("##v", glm::value_ptr(*v3), 0.01f);
+                    changed |= TrackedFieldEdit(v3, ctx, undoDesc,
+                        [](glm::vec3* p){ return ImGui::DragFloat3("##v", glm::value_ptr(*p), 0.01f); },
+                        markDirty);
             } else if (auto* v4 = std::get_if<glm::vec4>(&val)) {
                 if (uit == T::Color4)
-                    changed |= ImGui::ColorEdit4("##v", glm::value_ptr(*v4),
-                                                 ImGuiColorEditFlags_Float);
+                    changed |= TrackedFieldEdit(v4, ctx, undoDesc,
+                        [](glm::vec4* p){
+                            return ImGui::ColorEdit4("##v", glm::value_ptr(*p),
+                                                     ImGuiColorEditFlags_Float);
+                        },
+                        markDirty);
                 else
-                    changed |= ImGui::DragFloat4("##v", glm::value_ptr(*v4), 0.01f);
+                    changed |= TrackedFieldEdit(v4, ctx, undoDesc,
+                        [](glm::vec4* p){ return ImGui::DragFloat4("##v", glm::value_ptr(*p), 0.01f); },
+                        markDirty);
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("-##rmS")) toRemove = paramName;

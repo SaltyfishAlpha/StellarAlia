@@ -3,7 +3,7 @@
 // Separable 9-tap Gaussian blur.
 // Set direction = (1,0) for horizontal pass, (0,1) for vertical pass.
 
-layout(set = 1, binding = 0) uniform sampler2D t_Input;
+layout(set = 2, binding = 0) uniform sampler2D t_Input;
 
 layout(push_constant) uniform PushConstants {
     float dirX;

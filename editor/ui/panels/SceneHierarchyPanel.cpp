@@ -2,6 +2,7 @@
 #include "EditorSelection.hpp"
 #include "command/CommandManager.hpp"
 #include "command/commands/EntityCommands.hpp"
+#include "ui/AssetDragPayload.hpp"
 
 #include "function/scene/Scene.hpp"
 #include "function/scene/Components.hpp"
@@ -248,9 +249,10 @@ void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
                 m_presenter.RequestReparent(std::move(list), entity, zone);
             }
             if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAASSET")) {
-                m_presenter.RequestAssetDrop({
-                    fs::path(static_cast<const char*>(p->Data)), entity, {}, true
-                });
+                if (p->DataSize >= static_cast<int>(sizeof(AssetDragPayload))) {
+                    const auto& pl = *static_cast<const AssetDragPayload*>(p->Data);
+                    m_presenter.RequestAssetDrop({ fs::path(pl.path), entity, {}, true });
+                }
             }
             ImGui::EndDragDropTarget();
         }
@@ -400,9 +402,10 @@ void SceneHierarchyPanel::OnDraw() {
                                             SceneHierarchyPresenter::DnDMode::AsChild);
             }
             if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAASSET")) {
-                m_presenter.RequestAssetDrop({
-                    fs::path(static_cast<const char*>(p->Data)), entt::null, {}, true
-                });
+                if (p->DataSize >= static_cast<int>(sizeof(AssetDragPayload))) {
+                    const auto& pl = *static_cast<const AssetDragPayload*>(p->Data);
+                    m_presenter.RequestAssetDrop({ fs::path(pl.path), entt::null, {}, true });
+                }
             }
             ImGui::EndDragDropTarget();
         }

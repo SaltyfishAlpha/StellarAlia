@@ -4,7 +4,7 @@
 // Output is additively blended onto the render target by the pipeline,
 // accumulating the finer-mip contribution on top of the coarser mip content.
 
-layout(set = 1, binding = 0) uniform sampler2D t_Input;
+layout(set = 2, binding = 0) uniform sampler2D t_Input;
 
 layout(push_constant) uniform PushConstants {
     float radius;   // filter spread in source texels (default 1.0)

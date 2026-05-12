@@ -72,6 +72,25 @@ internal sealed class ScriptLoader
         _instances.Remove(entityId);
     }
 
+    // Lookup helpers used by ScriptBridgeEntry for field reflection (#74).
+    internal object? GetInstance(ulong entityId) =>
+        _instances.TryGetValue(entityId, out var inst) ? inst : null;
+
+    // Resolve className → Type within the loaded user-script ALC.
+    // Accepts both bare class name (e.g. "PlayerController") and full FQN
+    // (e.g. "MyGame.PlayerController") to match how ScriptComponent.className
+    // is populated (file stem fallback vs explicit override).
+    internal Type? FindUserScriptType(string className) {
+        if (_alc is null) return null;
+        foreach (var asm in _alc.Assemblies) {
+            foreach (var t in asm.GetTypes()) {
+                if (!t.IsSubclassOf(typeof(ScriptBase))) continue;
+                if (t.Name == className || t.FullName == className) return t;
+            }
+        }
+        return null;
+    }
+
     internal void Unload() {
         _instances.Clear();
         _alc?.Unload();

@@ -31,7 +31,10 @@ public:
         RHI::ShaderReflection     vertRefl;
         std::span<const uint8_t>  fragSpv;
         RHI::ShaderReflection     fragRefl;
-        RHI::RHIDescLayoutHandle  frameLayout;  // set=0 from FrameUniformsBuffer
+        RHI::RHIDescLayoutHandle  frameLayout;     // set=0 from FrameUniformsBuffer
+        // Issue #72: BindlessTextureHeap layout (set=3). Wired into the pipeline
+        // layout only when the merged reflection references set=3 bindings.
+        RHI::RHIDescLayoutHandle  bindlessLayout;
     };
 
     // Returns false if shader module creation fails.
@@ -63,16 +66,24 @@ public:
         bool                   noVertexInput = false);
 
     [[nodiscard]] RHI::RHIDescLayoutHandle  GetMaterialLayout()     const { return m_materialLayout; }
-    [[nodiscard]] RHI::RHIDescLayoutHandle  GetSet2Layout()         const { return m_set2Layout; }
+    [[nodiscard]] RHI::RHIDescLayoutHandle  GetSet3Layout()         const { return m_set3Layout; }
+    [[nodiscard]] RHI::RHIDescLayoutHandle  GetBindlessLayout()     const { return m_bindlessLayout; }
+    [[nodiscard]] bool                       UsesBindless()         const { return m_bindlessLayout.IsValid(); }
     [[nodiscard]] const RHI::ShaderReflection& GetMergedReflection() const { return m_merged; }
     [[nodiscard]] bool IsLoaded() const { return m_vertShader.IsValid(); }
 
 private:
+    // Issue #72 Step 6.5 set assignment:
+    //   slot 0 = m_bindlessLayout  (BindlessTextureHeap, shared across all shaders)
+    //   slot 1 = m_frameLayout     (FrameUniforms)
+    //   slot 2 = m_materialLayout  (per-shader, reflected from set=2 bindings)
+    //   slot 3 = m_set3Layout      (per-shader, reflected from set=3 — typically skin)
     RHI::RHIShaderHandle     m_vertShader;
     RHI::RHIShaderHandle     m_fragShader;
-    RHI::RHIDescLayoutHandle m_frameLayout;
-    RHI::RHIDescLayoutHandle m_materialLayout;
-    RHI::RHIDescLayoutHandle m_set2Layout;
+    RHI::RHIDescLayoutHandle m_bindlessLayout;   // slot 0; valid iff shader samples set=0 bindless heap
+    RHI::RHIDescLayoutHandle m_frameLayout;       // slot 1
+    RHI::RHIDescLayoutHandle m_materialLayout;    // slot 2
+    RHI::RHIDescLayoutHandle m_set3Layout;        // slot 3
     RHI::ShaderReflection    m_merged;
 
     std::unordered_map<AttachmentKey, RHI::RHIPipelineHandle, AttachmentKeyHash> m_pipelineCache;

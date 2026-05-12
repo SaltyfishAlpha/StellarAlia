@@ -2,6 +2,7 @@
 #include "engine/Application.hpp"
 #include "ui/EditorIconCache.hpp"
 #include "ui/EditorIcons.hpp"
+#include "ui/AssetDragPayload.hpp"
 #include "resource/AssetRegistry.hpp"
 #include "core/logs/Log.hpp"
 #include "core/asset/AssetID.hpp"
@@ -1088,8 +1089,16 @@ void AssetsPanel::DrawFilePane() {
     // Shared interaction logic (selection, drag, double-click, context menu).
     auto handleItem = [&](const fs::path& p, const std::string& pathStr,
                           const std::string& name, bool isDir) {
-        // ── Selection ────────────────────────────────────────────────────────
-        if (ImGui::IsItemClicked()) {
+        // ── Selection (deferred to mouse-up) ─────────────────────────────────
+        // Trigger on release-over-item, not press. Pressing on an item to start
+        // a drag must NOT change EditorSelection — otherwise the Inspector flips
+        // to "asset" view and any drop target there (e.g. ScriptComponent fields)
+        // disappears before the drag ever lands. ImGui dispatches the eventual
+        // mouse-up to the drop target on a successful drag, leaving IsItemHovered
+        // here false → this body is correctly skipped.
+        const bool clickConfirmed =
+            ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Left);
+        if (clickConfirmed) {
             const bool ctrl  = ImGui::GetIO().KeyCtrl;
             const bool shift = ImGui::GetIO().KeyShift;
             if (ctrl) {
@@ -1124,7 +1133,20 @@ void AssetsPanel::DrawFilePane() {
         // ── Drag ─────────────────────────────────────────────────────────────
         if (ImGui::BeginDragDropSource()) {
             m_pendingDeselectOtherPath.clear();
-            ImGui::SetDragDropPayload("SAASSET", pathStr.c_str(), pathStr.size() + 1);
+
+            AssetDragPayload payload{};
+            // Absolute disk path (first field — back-compat with pre-#73 receivers
+            // that cast payload->Data to const char*; folders included).
+            std::strncpy(payload.path, pathStr.c_str(), sizeof(payload.path) - 1);
+            // AssetID + type only meaningful for files registered in the AssetRegistry.
+            if (!isDir && m_registry) {
+                if (const auto* entry = m_registry->FindBySourcePath(p)) {
+                    payload.id = entry->id;
+                    std::strncpy(payload.type, entry->type.c_str(), sizeof(payload.type) - 1);
+                }
+            }
+            ImGui::SetDragDropPayload("SAASSET", &payload, sizeof(payload));
+
             if (m_selectedPaths.count(pathStr) && m_selectedPaths.size() > 1)
                 ImGui::Text("%zu items", m_selectedPaths.size());
             else

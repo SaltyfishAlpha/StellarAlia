@@ -1,5 +1,7 @@
 #pragma once
 
+#include <span>
+
 #include "platform/rhi/RHITypes.hpp"
 
 namespace StellarAlia::RHI {
@@ -32,7 +34,8 @@ public:
     virtual void SetViewport(const RHIViewport& viewport)                  = 0;
     virtual void SetScissor(const RHIScissor& scissor)                     = 0;
     virtual void SetPipeline(RHIPipelineHandle pipeline)                   = 0;
-    virtual void SetDescriptorSet(uint32_t set, RHIDescSetHandle ds)       = 0;
+    virtual void SetDescriptorSet(uint32_t set, RHIDescSetHandle ds,
+                                  std::span<const uint32_t> dynamicOffsets = {}) = 0;
     virtual void SetPushConstants(const void*   data,
                                   uint32_t      size,
                                   RHIShaderStage stages)                   = 0;

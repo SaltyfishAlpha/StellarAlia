@@ -2,7 +2,7 @@
 #extension GL_GOOGLE_include_directive : enable
 #include "frame_uniforms.glsl"
 
-layout(set = 1, binding = 0) uniform sampler2D t_Depth;
+layout(set = 2, binding = 0) uniform sampler2D t_Depth;
 
 layout(location = 0) in  vec2 v_TexCoord;
 layout(location = 0) out float out_CoC;

@@ -1,15 +1,21 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// set=0 — Per-Frame Descriptors
+// set=1 — Per-Frame Descriptors (Issue #72 aligned with UE5 / Unity HDRP)
 //
-// Bound ONCE per frame by the render loop before any draw calls.
+// Bound ONCE per pass after the first SetPipeline.
 // ALL engine shaders share this exact layout — never change binding indices.
 // C++ mirror: src/function/FrameUniforms.hpp
+//
+// Set assignment convention (Issue #72):
+//   set=0  BindlessTextureHeap   (bind once per cmd buffer)
+//   set=1  FrameUniforms          (this file)
+//   set=2  MaterialParams SSBO_DYN
+//   set=3  Skin / per-object
 // ─────────────────────────────────────────────────────────────────────────────
 #ifndef SA_FRAME_UNIFORMS_GLSL
 #define SA_FRAME_UNIFORMS_GLSL
 
 // binding=0  Camera / time / screen
-layout(set = 0, binding = 0) uniform FrameData {
+layout(set = 1, binding = 0) uniform FrameData {
     mat4  view;
     mat4  proj;
     mat4  viewProj;
@@ -48,28 +54,28 @@ struct LightEntry {
     vec3  tangentV;    float _pad1;       // 80..96  area: up axis; others: zero
     // stride = ceil(96/16)*16 = 96 — no trailing padding
 };
-layout(set = 0, binding = 1) uniform LightData {
+layout(set = 1, binding = 1) uniform LightData {
     int        lightCount;
     float      _pad0; float _pad1; float _pad2;
     LightEntry lights[MAX_LIGHTS];
 } u_Lights;
 
 // binding=2  BRDF LUT (NdotV × roughness → (scale, bias) for Schlick split-sum)
-layout(set = 0, binding = 2) uniform sampler2D t_BrdfLut;
+layout(set = 1, binding = 2) uniform sampler2D t_BrdfLut;
 
 // binding=3  Prefiltered specular env — cubemap RGBA32F, mip chain.
 //            mip 0 = roughness 0.0 (mirror), mip 4 = roughness 1.0 (fully diffuse).
-layout(set = 0, binding = 3) uniform samplerCube t_PrefilteredEnv;
+layout(set = 1, binding = 3) uniform samplerCube t_PrefilteredEnv;
 
 // binding=4  Skybox cubemap (full resolution, no prefiltering) — used by skybox pass.
-layout(set = 0, binding = 4) uniform samplerCube t_SkyboxMap;
+layout(set = 1, binding = 4) uniform samplerCube t_SkyboxMap;
 
 // binding=5  LTC area-light matrix LUT  (64×64 RGBA32F)
 //            uv = (NdotV, roughness) → inverse M matrix (packed as mat3 in 4 texels via atlas, or vec4 row-major)
-layout(set = 0, binding = 5) uniform sampler2D t_LtcMat;
+layout(set = 1, binding = 5) uniform sampler2D t_LtcMat;
 
 // binding=6  LTC area-light amplitude LUT (64×64 RGBA32F)
 //            uv = (NdotV, roughness) → (GGX norm, Fresnel, sphere horizon clip, unused)
-layout(set = 0, binding = 6) uniform sampler2D t_LtcAmp;
+layout(set = 1, binding = 6) uniform sampler2D t_LtcAmp;
 
 #endif // SA_FRAME_UNIFORMS_GLSL

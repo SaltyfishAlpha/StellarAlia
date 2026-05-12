@@ -4,8 +4,8 @@
 #include "common.glsl"  // OctDecode, PI
 
 // set=1 inputs
-layout(set = 1, binding = 0) uniform sampler2D t_GDepth;
-layout(set = 1, binding = 1) uniform sampler2D t_GNormalMaterial;
+layout(set = 2, binding = 0) uniform sampler2D t_GDepth;
+layout(set = 2, binding = 1) uniform sampler2D t_GNormalMaterial;
 
 layout(location = 0) in  vec2 v_TexCoord;
 layout(location = 0) out float out_AO;

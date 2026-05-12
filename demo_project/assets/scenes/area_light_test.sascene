@@ -15,6 +15,7 @@
       },
       "id": 0,
       "materialOverride": {
+        "materialAsset": "d3f4abb0-0000-4000-0000-000000000001",
         "scalars": {
           "baseColorFactor": [
             0.0,
@@ -77,6 +78,7 @@
       },
       "id": 1,
       "materialOverride": {
+        "materialAsset": "d3f4abb0-0000-4000-0000-000000000001",
         "scalars": {
           "baseColorFactor": [
             0.0,
@@ -274,6 +276,7 @@
     {
       "id": 6,
       "materialOverride": {
+        "materialAsset": "d3f4abb0-0000-4000-0000-000000000001",
         "scalars": {
           "baseColorFactor": [
             0.10392635315656662,
@@ -293,8 +296,8 @@
       },
       "parent": -1,
       "script": {
-        "class": "",
-        "path": "assets/scripts/BouncingRotator.cs"
+        "asset_id": "6712dd19-287c-4858-a472-d7ac4f8c2c8b",
+        "class": "BouncingRotator"
       },
       "staticMesh": {
         "mesh": "c0be0000-0000-4000-0000-000000000001"

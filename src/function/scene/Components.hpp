@@ -12,6 +12,7 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include "core/asset/AssetID.hpp"
+#include "function/script/ScriptFieldSchema.hpp"
 #include "platform/rhi/RHITypes.hpp"
 
 namespace StellarAlia {
@@ -202,8 +203,22 @@ struct ColliderComponent {
 // ── Scripting ─────────────────────────────────────────────────────────────────
 
 struct ScriptComponent {
-    std::string scriptPath;   // relative to project root, e.g. "scripts/PlayerController.cs"
-    std::string className;    // C# class name — derived from filename if empty
+    AssetID     scriptId;     // .cs asset UUID; resolves to path via AssetRegistry::FindByID
+    std::string className;    // C# class name — derived from filename stem if empty
+    // Per-field value cache; Inspector writes into this in Edit mode and
+    // ScriptSystem injects it into the C# instance at Play start (and on each
+    // edit during Play, see ScriptSystem::InjectFieldValues).
+    std::unordered_map<std::string, ScriptFieldValue> fields;
+};
+
+// ── Stable scene-local identity (for EntityRef script fields) ─────────────────
+
+// Scene-local 64-bit ID assigned by Scene::CreateEntity. Survives across
+// save/load — used by script field `EntityRef` (#75) so cross-entity references
+// in scripts persist when entt::entity values change between sessions.
+// 0 is reserved for "unassigned" (legacy entities loaded before #75 ship).
+struct EntityIdComponent {
+    uint64_t sceneLocalId = 0;
 };
 
 // ── Marker tags ───────────────────────────────────────────────────────────────

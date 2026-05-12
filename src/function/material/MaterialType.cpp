@@ -40,32 +40,44 @@ MaterialType::CreateInstance(RHI::IRHIDevice*      device,
                         std::min<size_t>(p.size, sizeof(p.defaultValue)));
     }
 
-    // GPU-side UBO (cpu-visible for per-frame updates)
-    if (uboSize > 0) {
-        RHI::RHIBufferDesc bd{};
-        bd.size       = uboSize;
-        bd.usage      = RHI::RHIBufferUsage::Uniform;
-        bd.cpuVisible = true;
-        bd.debugName  = "MaterialParamsUBO";
-        inst->m_ubo = device->CreateBuffer(bd);
-    }
-
-    // Allocate set=1 descriptor set
+    // Allocate set=1 descriptor set.
     inst->m_descSet = device->AllocateDescriptorSet(shader.GetMaterialLayout());
 
-    // Write UBO at binding=0 (if any)
-    if (uboSize > 0 && inst->m_ubo.IsValid())
-        device->WriteDescriptorBuffer(inst->m_descSet, 0,
-                                      inst->m_ubo, 0, uboSize);
-
-    // Fill texture slots with the default texture
-    inst->m_textures.resize(textures.size(), defaultTexture);
-    for (const auto& td : textures) {
-        if (defaultTexture.IsValid())
-            device->WriteDescriptorTexture(inst->m_descSet, td.binding, defaultTexture);
+    if (usesMaterialParamsSSBO) {
+        // Issue #72 path: no per-instance UBO, no sampler writes. Texture slots
+        // are bindless indices pack'd into m_uboBlob (initialised to 0 = default
+        // white slot) so an unbound material samples white instead of garbage.
+        // MaterialManager wires binding=0 → MaterialParamRing once the asset
+        // loads (so all instances share one descriptor pointing at the ring).
+        inst->m_texAssetIndices.assign(textures.size(), 0u);
+        for (const auto& td : textures) {
+            if (td.uboBlobOffset + sizeof(uint32_t) <= uboSize) {
+                const uint32_t idx = 0u;
+                std::memcpy(inst->m_uboBlob.data() + td.uboBlobOffset, &idx, sizeof(idx));
+            }
+        }
+    } else {
+        // Legacy UBO path: own UBO + per-binding sampler writes.
+        if (uboSize > 0) {
+            RHI::RHIBufferDesc bd{};
+            bd.size       = uboSize;
+            bd.usage      = RHI::RHIBufferUsage::Uniform;
+            bd.cpuVisible = true;
+            bd.debugName  = "MaterialParamsUBO";
+            inst->m_ubo = device->CreateBuffer(bd);
+            if (inst->m_ubo.IsValid())
+                device->WriteDescriptorBuffer(inst->m_descSet, 0,
+                                              inst->m_ubo, 0, uboSize);
+        }
+        inst->m_textures.resize(textures.size(), defaultTexture);
+        for (const auto& td : textures) {
+            if (defaultTexture.IsValid())
+                device->WriteDescriptorTexture(inst->m_descSet, td.binding, defaultTexture);
+        }
     }
 
-    SA_LOG_DEBUG("MaterialType '{}': created instance", name);
+    SA_LOG_DEBUG("MaterialType '{}': created instance ({})", name,
+                 usesMaterialParamsSSBO ? "ssbo+bindless" : "legacy");
     return inst;
 }
 

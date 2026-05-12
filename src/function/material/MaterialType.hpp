@@ -34,9 +34,12 @@ struct ParamDef {
 // ─────────────────────────────────────────────────────────────────────────────
 struct TextureDef {
     std::string name;
-    uint32_t    binding;    // set=1 binding index
-    uint32_t    slotIndex;  // index into MaterialInstance::m_textures
-    std::string displayName; // from @Texture("Display Name") annotation; empty → use name
+    uint32_t    binding;       // legacy UBO path: set=1 sampler binding index. Unused in SSBO path.
+    uint32_t    slotIndex;     // index into MaterialInstance::m_textures / m_texAssetIndices
+    // Issue #72 (SSBO path): byte offset of this texture's bindless index (uint)
+    // inside the MaterialParams SSBO blob. ~0u in legacy UBO path.
+    uint32_t    uboBlobOffset = 0xFFFFFFFFu;
+    std::string displayName;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -62,6 +65,13 @@ public:
     // True for types registered from a project's cook cache (custom .saglsl models).
     // Cleared by MaterialManager::ClearProjectTypes() on project switch.
     bool isProjectType = false;
+
+    // Issue #72: when true, set=1 binding=0 is a STORAGE_BUFFER (named "MaterialParams")
+    // and textures are referenced as bindless indices inside the SSBO blob. Such types
+    // share a single descriptor per shader (binding 0 → MaterialParamRing) and bind
+    // set=3 to MaterialManager's BindlessTextureHeap. False = legacy UBO path with
+    // per-instance descriptor sets.
+    bool usesMaterialParamsSSBO = false;
 
     // Default render state
     RHI::RHICullMode  defaultCullMode  = RHI::RHICullMode::Back;

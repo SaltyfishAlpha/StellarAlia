@@ -3,6 +3,7 @@
 #include "function/scene/Components.hpp"
 #include "function/scene/Scene.hpp"
 #include "ui/IconsFontAwesome6.h"
+#include "ui/drawers/DrawerHelpers.hpp"
 
 #include <imgui.h>
 #include <glm/gtc/type_ptr.hpp>
@@ -19,7 +20,9 @@ bool TransformDrawer::TryDraw(entt::registry& reg, entt::entity entity,
         return true;
 
     bool changed = false;
-    changed |= ImGui::DragFloat3("Position", glm::value_ptr(tr->position), 0.1f);
+    changed |= TrackedFieldEdit(&tr->position, ctx, "Edit Position",
+        [](glm::vec3* p){ return ImGui::DragFloat3("Position", glm::value_ptr(*p), 0.1f); },
+        [&scene, entity]{ scene.MarkDirty(entity); scene.MarkMaterialDirty(); });
 
     // Re-seed cached Euler only when selection changes — avoids quat→euler
     // round-trip each frame which clamps Y to [-90,+90] via asin.
@@ -28,10 +31,20 @@ bool TransformDrawer::TryDraw(entt::registry& reg, entt::entity entity,
         m_cachedEuler       = glm::degrees(glm::eulerAngles(tr->rotation));
         m_cachedEulerEntity = sel;
     }
-    if (ImGui::DragFloat3("Rotation (deg)", glm::value_ptr(m_cachedEuler), 0.5f)) {
-        tr->rotation = glm::quat(glm::radians(m_cachedEuler));
-        changed = true;
-    }
+    changed |= TrackedFieldEdit(&tr->rotation, ctx, "Edit Rotation",
+        [this](glm::quat* q){
+            if (ImGui::DragFloat3("Rotation (deg)", glm::value_ptr(m_cachedEuler), 0.5f)) {
+                *q = glm::quat(glm::radians(m_cachedEuler));
+                return true;
+            }
+            return false;
+        },
+        // Undo restores tr->rotation directly; invalidate cachedEuler so the next
+        // draw re-seeds it from the restored quat instead of writing stale degrees back.
+        [this, &scene, entity]{
+            scene.MarkDirty(entity); scene.MarkMaterialDirty();
+            m_cachedEulerEntity = ~0u;
+        });
 
     {
         const float btnSz = ImGui::GetFrameHeight();
@@ -65,18 +78,21 @@ bool TransformDrawer::TryDraw(entt::registry& reg, entt::entity entity,
         ImGui::SetNextItemWidth(ImGui::CalcItemWidth()
                                 - btnSz - ImGui::GetStyle().ItemInnerSpacing.x);
 
-        const glm::vec3 prev = tr->scale;
-        if (ImGui::DragFloat3("Scale", glm::value_ptr(tr->scale), 0.01f, 0.001f, 1000.f)) {
-            if (m_scaleLocked) {
-                const glm::vec3 d = tr->scale - prev;
-                int axis = (std::abs(d[1]) > std::abs(d[0])) ? 1 : 0;
-                if (std::abs(d[2]) > std::abs(d[axis])) axis = 2;
-                const float ratio = std::abs(prev[axis]) > 1e-6f
-                                  ? tr->scale[axis] / prev[axis] : 1.f;
-                tr->scale = prev * ratio;
-            }
-            changed = true;
-        }
+        changed |= TrackedFieldEdit(&tr->scale, ctx, "Edit Scale",
+            [this](glm::vec3* s){
+                const glm::vec3 before = *s;
+                bool c = ImGui::DragFloat3("Scale", glm::value_ptr(*s), 0.01f, 0.001f, 1000.f);
+                if (c && m_scaleLocked) {
+                    const glm::vec3 d = *s - before;
+                    int axis = (std::abs(d[1]) > std::abs(d[0])) ? 1 : 0;
+                    if (std::abs(d[2]) > std::abs(d[axis])) axis = 2;
+                    const float ratio = std::abs(before[axis]) > 1e-6f
+                                      ? (*s)[axis] / before[axis] : 1.f;
+                    *s = before * ratio;
+                }
+                return c;
+            },
+            [&scene, entity]{ scene.MarkDirty(entity); scene.MarkMaterialDirty(); });
     }
     if (changed) {
         scene.MarkDirty(entity);

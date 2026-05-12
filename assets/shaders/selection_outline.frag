@@ -2,8 +2,8 @@
 
 // Two-pass separable dilation: this pass does vertical max-dilation on the
 // horizontally-dilated intermediate and composites the outline onto the swapchain.
-layout(set = 1, binding = 0) uniform sampler2D t_dilateH; // horizontal-dilated mask
-layout(set = 1, binding = 1) uniform sampler2D t_mask;    // original mask (center test)
+layout(set = 2, binding = 0) uniform sampler2D t_dilateH; // horizontal-dilated mask
+layout(set = 2, binding = 1) uniform sampler2D t_mask;    // original mask (center test)
 
 layout(push_constant) uniform PC {
     vec4  texelSize;    // .xy = (1/width, 1/height)

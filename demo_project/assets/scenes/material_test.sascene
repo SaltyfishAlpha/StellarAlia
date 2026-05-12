@@ -1,87 +1,225 @@
 {
-  "name": "MaterialTestScene",
-  "version": 1,
-  "world": {
-    "skyboxHdr":      "7a735f5c-b3c4-4361-b342-699c816fa64d",
-    "sh9":            "79735f5c-b3c4-4362-b342-699c816fa64e",
-    "prefilteredEnv": "78735f5c-b3c4-4363-b142-699c816fa64f",
-    "brdfLut":        "c5b06992-5a8f-4dc9-9d11-406e12b969d4",
-    "skyboxCubemap":  "7e735f5c-b3c4-4365-b342-699c816fa649"
-  },
   "entities": [
     {
       "id": 0,
-      "parent": -1,
-      "tag": "PbrCube",
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001",
-        "materials": ["d3f4abb0-0000-4000-0000-000000000001"],
+      "materialOverride": {
+        "materialAsset": "d3f4abb0-0000-4000-0000-000000000001",
+        "scalars": {
+          "baseColorFactor": [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ],
+          "metallicFactor": 0.8999999761581421,
+          "roughnessFactor": 0.10000000149011612
+        },
+        "textures": {}
+      },
+      "meshRenderer": {
         "castShadow": true,
+        "materials": [
+          "d3f4abb0-0000-4000-0000-000000000001"
+        ],
         "receiveShadow": true
       },
-      "pbrSurface": {
-        "baseColor": [0.0, 0.0, 0.0, 1.0],
-        "roughness": 0.1,
-        "metallic": 0.9
+      "parent": -1,
+      "staticMesh": {
+        "mesh": "c0be0000-0000-4000-0000-000000000001"
       },
+      "tag": "PbrCube",
       "transform": {
-        "position": [-1.5, 0.0, 0.0],
-        "rotation": [1.0, 0.0, 0.0, 0.0],
-        "scale": [1.0, 1.0, 1.0]
+        "position": [
+          -1.5,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
       }
     },
     {
       "id": 1,
-      "parent": -1,
-      "tag": "SimpleAlbedoCube",
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001",
-        "materials": ["e1a0be00-0000-4000-0000-000000000001"],
-        "castShadow": true,
-        "receiveShadow": true
-      },
-      "materialParams": {
+      "materialOverride": {
+        "materialAsset": "2b32fe56-31ae-4af7-8304-461fa721c53b",
         "scalars": {
-          "baseColorFactor": [1.0, 0.5, 0.0, 1.0]
+          "baseColorFactor": [
+            1.0,
+            0.5,
+            0.0,
+            1.0
+          ]
         },
         "textures": {}
       },
+      "meshRenderer": {
+        "castShadow": true,
+        "materials": [
+          "e1a0be00-0000-4000-0000-000000000001"
+        ],
+        "receiveShadow": true
+      },
+      "parent": -1,
+      "staticMesh": {
+        "mesh": "c0be0000-0000-4000-0000-000000000001"
+      },
+      "tag": "SimpleAlbedoCube",
       "transform": {
-        "position": [1.5, 0.0, 0.0],
-        "rotation": [1.0, 0.0, 0.0, 0.0],
-        "scale": [1.0, 1.0, 1.0]
+        "position": [
+          1.5,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
       }
     },
     {
+      "camera": {
+        "far": 500.0,
+        "fovY": 1.0471999645233154,
+        "near": 0.10000000149011612,
+        "priority": 1
+      },
       "id": 2,
       "parent": -1,
       "tag": "MainCamera",
-      "activeCamera": true,
-      "camera": {
-        "fovY": 1.0471999645233154,
-        "near": 0.10000000149011612,
-        "far": 500.0
-      },
       "transform": {
-        "position": [0.0, 0.5, 5.0],
-        "rotation": [1.0, 0.0, 0.0, 0.0],
-        "scale": [1.0, 1.0, 1.0]
+        "position": [
+          0.0,
+          0.5,
+          5.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
       }
     },
     {
+      "directionalLight": {
+        "castShadow": false,
+        "color": [
+          1.0,
+          0.949999988079071,
+          0.8500000238418579
+        ],
+        "intensity": 0.20000000298023224
+      },
       "id": 3,
       "parent": -1,
       "tag": "Sun",
-      "directionalLight": {
-        "color": [1.0, 0.95, 0.85],
-        "intensity": 0.2,
-        "castShadow": false
-      },
       "transform": {
-        "position": [0.0, 0.0, 0.0],
-        "rotation": [0.9240000247955322, -0.382999986410141, 0.0, 0.0],
-        "scale": [1.0, 1.0, 1.0]
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.9240000247955322,
+          -0.382999986410141,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
       }
     }
-  ]
+  ],
+  "name": "MaterialTestScene",
+  "version": 1,
+  "world": {
+    "backgroundColor": [
+      0.07999999821186066,
+      0.07999999821186066,
+      0.07999999821186066
+    ],
+    "backgroundMode": "Skybox",
+    "brdfLut": "c5b06992-5a8f-4dc9-9d11-406e12b969d4",
+    "postProcess": {
+      "aeAdaptSpeed": 2.0,
+      "aeEvMax": 4.0,
+      "aeEvMin": -4.0,
+      "aeHighPercent": 0.949999988079071,
+      "aeLowPercent": 0.44999998807907104,
+      "aperture": 1.399999976158142,
+      "autoExposureEnabled": false,
+      "bloomEnabled": true,
+      "bloomMipLevels": 3,
+      "bloomRadius": 1.0,
+      "bloomStrength": 0.4000000059604645,
+      "bloomThreshold": 1.0,
+      "colorGrading": {
+        "contrast": 1.0,
+        "enabled": false,
+        "gain": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "lift": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "midtone": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "saturation": 1.0
+      },
+      "dofEnabled": false,
+      "dofSamples": 16,
+      "exposure": 1.0,
+      "focalLength": 50.0,
+      "focusDistance": 5.0,
+      "lutStrength": 1.0,
+      "maxCocPx": 20.0,
+      "ssaoBias": 0.02500000037252903,
+      "ssaoBlurSharpness": 10.0,
+      "ssaoDirections": 4,
+      "ssaoEnabled": false,
+      "ssaoRadius": 32.0,
+      "ssaoSteps": 3,
+      "ssaoStrength": 1.0,
+      "taaAntiGhosting": true,
+      "taaBlendMotion": 0.5,
+      "taaBlendStatic": 0.10000000149011612,
+      "taaEnabled": false,
+      "tonemapMode": "Builtin"
+    },
+    "prefilteredEnv": "78735f5c-b3c4-4363-b142-699c816fa64f",
+    "sh9": "79735f5c-b3c4-4362-b342-699c816fa64e",
+    "skyboxCubemap": "7e735f5c-b3c4-4365-b342-699c816fa649",
+    "skyboxHdr": "7a735f5c-b3c4-4361-b342-699c816fa64d"
+  }
 }

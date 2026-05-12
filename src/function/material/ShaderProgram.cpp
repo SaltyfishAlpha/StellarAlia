@@ -18,15 +18,34 @@ bool ShaderProgram::Load(RHI::IRHIDevice* device, const Desc& desc) {
         return false;
     }
 
-    m_materialLayout = device->CreateDescriptorSetLayout(m_merged, 1);
+    // Issue #72 Step 6.5: set layout aligned with UE5 / Unity HDRP.
+    //   set=0 → bindless heap (passed in via desc.bindlessLayout)
+    //   set=1 → frame uniforms (passed in)
+    //   set=2 → material (reflected)
+    //   set=3 → skin / per-object (reflected)
+    m_materialLayout = device->CreateDescriptorSetLayout(m_merged, 2);
 
-    bool hasSet2 = std::any_of(m_merged.bindings.begin(), m_merged.bindings.end(),
-                               [](const RHI::ShaderBindingDesc& b){ return b.set == 2; });
-    if (hasSet2)
-        m_set2Layout = device->CreateDescriptorSetLayout(m_merged, 2);
+    bool hasSet3 = std::any_of(m_merged.bindings.begin(), m_merged.bindings.end(),
+                               [](const RHI::ShaderBindingDesc& b){ return b.set == 3; });
+    if (hasSet3)
+        m_set3Layout = device->CreateDescriptorSetLayout(m_merged, 3);
 
-    SA_LOG_INFO("ShaderProgram: loaded ({} merged bindings, pc={}B)",
-                m_merged.bindings.size(), m_merged.pushConstantSize);
+    // Issue #72 Step 6.5: ALWAYS wire bindless layout into slot 0 (even when the
+    // shader doesn't sample from set=0). The bindless heap layout is engine-wide
+    // — making every pipeline share it keeps set=0 layout-compatible across
+    // pipeline changes, which in turn preserves the bindings for sets 1..3
+    // (frame, material, skin) when transitioning between e.g. PBR (uses bindless)
+    // and SimpleAlbedo (doesn't). Shaders that don't access set=0 incur no
+    // runtime cost — Vulkan only requires the set to be bound if a shader
+    // statically uses it.
+    if (desc.bindlessLayout.IsValid())
+        m_bindlessLayout = desc.bindlessLayout;
+
+    bool usesBindless = std::any_of(m_merged.bindings.begin(), m_merged.bindings.end(),
+                                    [](const RHI::ShaderBindingDesc& b){ return b.set == 0; });
+    SA_LOG_INFO("ShaderProgram: loaded ({} merged bindings, pc={}B, bindless-slot={}, samples-bindless={})",
+                m_merged.bindings.size(), m_merged.pushConstantSize,
+                m_bindlessLayout.IsValid(), usesBindless);
     return true;
 }
 
@@ -39,9 +58,10 @@ void ShaderProgram::Unload(RHI::IRHIDevice* device) {
     device->DestroyShader(m_fragShader);
     m_vertShader     = {};
     m_fragShader     = {};
-    m_materialLayout = {};
-    m_set2Layout     = {};
+    m_bindlessLayout = {};
     m_frameLayout    = {};
+    m_materialLayout = {};
+    m_set3Layout     = {};
 }
 
 bool ShaderProgram::ReloadFragShader(RHI::IRHIDevice* device,
@@ -82,17 +102,21 @@ RHI::RHIPipelineHandle ShaderProgram::GetOrCreatePipeline(
     pipeDesc.vertShader  = m_vertShader;
     pipeDesc.fragShader  = m_fragShader;
 
-    // Fixed slot assignment: index == set index, always.
-    // VulkanDevice::CreatePipeline substitutes m_emptyDescLayout for invalid handles,
-    // so materialLayout is always at set=1, never accidentally promoted to set=0 when
-    // frameLayout is absent.
-    pipeDesc.descriptorLayouts[0] = m_frameLayout;
-    pipeDesc.descriptorLayouts[1] = m_materialLayout;
-    pipeDesc.descriptorLayouts[2] = m_set2Layout;
+    // Issue #72 Step 6.5: slot index == set index.
+    //   0 = bindless heap (UE5/Unity HDRP convention — most stable resource)
+    //   1 = frame uniforms
+    //   2 = material (per-shader)
+    //   3 = skin / per-object (per-shader)
+    // VulkanDevice::CreatePipeline substitutes m_emptyDescLayout for invalid handles.
+    pipeDesc.descriptorLayouts[0] = m_bindlessLayout;
+    pipeDesc.descriptorLayouts[1] = m_frameLayout;
+    pipeDesc.descriptorLayouts[2] = m_materialLayout;
+    pipeDesc.descriptorLayouts[3] = m_set3Layout;
     pipeDesc.descriptorLayoutCount =
-        m_set2Layout.IsValid()     ? 3u :
-        m_materialLayout.IsValid() ? 2u :
-        m_frameLayout.IsValid()    ? 1u : 0u;
+        m_set3Layout.IsValid()     ? 4u :
+        m_materialLayout.IsValid() ? 3u :
+        m_frameLayout.IsValid()    ? 2u :
+        m_bindlessLayout.IsValid() ? 1u : 0u;
 
     pipeDesc.pushConstantSize   = m_merged.pushConstantSize;
     pipeDesc.pushConstantStages = m_merged.pushConstantStages;

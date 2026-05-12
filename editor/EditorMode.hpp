@@ -1,6 +1,9 @@
 #pragma once
 
 #include "engine/AppMode.hpp"
+#include "engine/SaProject.hpp"
+
+#include <optional>
 #include "camera/EditorCamera.hpp"
 #include "ui/EditorUI.hpp"
 #include "resource/EntityTemplateRegistry.hpp"
@@ -121,6 +124,12 @@ private:
     static bool RayHitHorizontalPlane(const Core::Ray& ray, float planeY, glm::vec3& outHit);
     void LoadScene(const std::filesystem::path& path);
     void LoadProject(const std::filesystem::path& saprojectPath);
+    // Shared by OnAttach (initial load) and LoadProject (project switch). Touches
+    // only the filesystem-level wiring: script watcher, asset registry, user-
+    // script compile, AssetsPanel root, and startup-scene load. Callers handle
+    // their own ordering of clear/cook/apply steps around this. Returns the
+    // parsed .saproject when one was found (nullopt = no .saproject in dir).
+    [[nodiscard]] std::optional<SaProject> LoadProjectFiles(const std::filesystem::path& projectDir);
     void NewScene();
     void SaveScene();
     void CookProjectShaders();

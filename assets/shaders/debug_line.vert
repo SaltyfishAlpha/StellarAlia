@@ -7,7 +7,7 @@ struct DebugVertex {
     uint  color;         // packed RGBA8 (4 bytes) — total 16 bytes, std430-compatible
 };
 
-layout(std430, set=1, binding=0) readonly buffer VB {
+layout(std430, set = 2, binding = 0) readonly buffer VB {
     DebugVertex verts[];
 };
 

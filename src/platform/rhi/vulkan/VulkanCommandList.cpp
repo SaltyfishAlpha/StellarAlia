@@ -85,14 +85,17 @@ void VulkanCommandList::SetComputePipeline(RHIPipelineHandle pipeline) {
     vkCmdBindPipeline(m_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vkPipeline);
 }
 
-void VulkanCommandList::SetDescriptorSet(uint32_t set, RHIDescSetHandle ds) {
+void VulkanCommandList::SetDescriptorSet(uint32_t set, RHIDescSetHandle ds,
+                                          std::span<const uint32_t> dynamicOffsets) {
     VkPipelineLayout layout = m_device->GetVkPipelineLayout(m_boundPipeline);
     VkDescriptorSet  vkDs   = m_device->GetVkDescriptorSet(ds);
     if (layout == VK_NULL_HANDLE || vkDs == VK_NULL_HANDLE) return;
     const VkPipelineBindPoint bp = m_boundPipelineIsCompute
                                        ? VK_PIPELINE_BIND_POINT_COMPUTE
                                        : VK_PIPELINE_BIND_POINT_GRAPHICS;
-    vkCmdBindDescriptorSets(m_cmd, bp, layout, set, 1, &vkDs, 0, nullptr);
+    vkCmdBindDescriptorSets(m_cmd, bp, layout, set, 1, &vkDs,
+                            static_cast<uint32_t>(dynamicOffsets.size()),
+                            dynamicOffsets.empty() ? nullptr : dynamicOffsets.data());
 }
 
 void VulkanCommandList::SetPushConstants(const void* data, uint32_t size,

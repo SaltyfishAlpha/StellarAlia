@@ -20,6 +20,7 @@
 #include "function/material/MaterialInstance.hpp"
 #include "function/material/ComputeProgram.hpp"
 #include "function/material/MaterialManager.hpp"
+#include "function/material/MaterialParamRing.hpp"
 #include "function/material/ShaderProgram.hpp"
 #include "function/render_graph/RenderGraph.hpp"
 #include "function/renderer/RenderFeature.hpp"
@@ -205,9 +206,12 @@ private:
         uint32_t                          indexCount;
         int32_t                           vertexOffset;
         MaterialInstance*                 material;
-        std::unique_ptr<MaterialInstance> ownedMaterial;
+        std::unique_ptr<MaterialInstance> ownedMaterial;        // unused once SSBO ring path fully in (kept for legacy fallback)
         RHI::RHIPipelineHandle            pipeline;
         uint32_t                          pushConstantSize;
+        // Issue #72: dynamic offset into MaterialParamRing for the per-draw blob.
+        // Only meaningful when item.material->GetType()->usesMaterialParamsSSBO.
+        uint32_t                          materialUboOffset = 0;
         // Entity-local AABB (subLocalTransform applied). Used by BVH culling.
         // skipCull = true for skinned meshes (animated AABB not computed).
         glm::vec3                         localAABBMin { 1e30f};
@@ -562,6 +566,7 @@ private:
     int                        m_pendingBloomMipCount = -1; // deferred mip count change
 
     FrameUniformsBuffer        m_frameUniforms;   // owned — created in Init
+    MaterialParamRing          m_materialRing;    // per-frame SSBO bump allocator
     glm::vec4                  m_shCoeffs[9] = {};  // stored by SetIBL
     uint32_t                   m_frameCount  = 0;   // incremented per RenderFrame
 

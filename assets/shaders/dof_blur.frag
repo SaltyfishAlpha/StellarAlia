@@ -2,8 +2,8 @@
 #extension GL_GOOGLE_include_directive : enable
 #include "frame_uniforms.glsl"
 
-layout(set = 1, binding = 0) uniform sampler2D t_Src;
-layout(set = 1, binding = 1) uniform sampler2D t_CoC;
+layout(set = 2, binding = 0) uniform sampler2D t_Src;
+layout(set = 2, binding = 1) uniform sampler2D t_CoC;
 
 layout(location = 0) in  vec2 v_TexCoord;
 layout(location = 0) out vec4 out_Color;

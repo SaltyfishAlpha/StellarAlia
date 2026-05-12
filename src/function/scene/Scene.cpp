@@ -27,6 +27,7 @@ entt::entity Scene::CreateEntity(std::string_view name) {
     m_registry.emplace<TagComponent>(e, std::string(name));
     m_registry.emplace<TransformComponent>(e);
     m_registry.emplace<WorldTransformComponent>(e);
+    m_registry.emplace<EntityIdComponent>(e, m_nextLocalId++);
     m_rootOrder.push_back(e);
     m_hierarchyDirty = true;
     return e;
@@ -40,6 +41,24 @@ void Scene::Clear() {
     m_hierarchyDirty  = true;
     m_materialDirty      = false;
     m_skinnedMeshDirty   = false;
+    m_nextLocalId        = 1;
+}
+
+entt::entity Scene::FindBySceneLocalId(uint64_t id) const {
+    if (id == 0) return entt::null;
+    // Linear scan — scenes rarely exceed a few hundred entities and lookups are
+    // editor-side (Inspector picker / EntityRef resolve), not per-frame hot.
+    auto view = m_registry.view<EntityIdComponent>();
+    for (auto e : view) {
+        if (view.get<EntityIdComponent>(e).sceneLocalId == id) return e;
+    }
+    return entt::null;
+}
+
+void Scene::AssignSceneLocalId(entt::entity e, uint64_t id) {
+    if (!m_registry.valid(e) || id == 0) return;
+    m_registry.emplace_or_replace<EntityIdComponent>(e, id);
+    if (id >= m_nextLocalId) m_nextLocalId = id + 1;
 }
 
 void Scene::DestroyEntity(entt::entity entity) {

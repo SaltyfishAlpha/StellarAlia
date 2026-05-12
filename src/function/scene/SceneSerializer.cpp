@@ -179,6 +179,8 @@ nlohmann::json SceneSerializer::SerializeToJson(const Scene& scene) {
         json ej;
         ej["id"]  = entityIndex[e];
         ej["tag"] = tag.name;
+        if (const auto* eid = reg.try_get<EntityIdComponent>(e))
+            ej["scene_local_id"] = eid->sceneLocalId;
 
         // Parent reference (serialization index, -1 = root)
         if (const auto* h = reg.try_get<HierarchyComponent>(e)) {
@@ -263,7 +265,54 @@ nlohmann::json SceneSerializer::SerializeToJson(const Scene& scene) {
 
         // Script
         if (const auto* sc = reg.try_get<ScriptComponent>(e)) {
-            ej["script"] = {{"path", sc->scriptPath}, {"class", sc->className}};
+            json scriptJson = {
+                {"asset_id", sc->scriptId.ToString()},
+                {"class",    sc->className},
+            };
+            if (!sc->fields.empty()) {
+                json fieldsArr = json::array();
+                for (const auto& [name, value] : sc->fields) {
+                    json entry;
+                    entry["name"] = name;
+                    std::visit([&entry](auto&& v) {
+                        using T = std::decay_t<decltype(v)>;
+                        if constexpr (std::is_same_v<T, bool>) {
+                            entry["kind"]  = "Bool";
+                            entry["value"] = v;
+                        } else if constexpr (std::is_same_v<T, int32_t>) {
+                            // Int32 covers Enum too — JSON readers disambiguate
+                            // via the kind string written here only as "Int32";
+                            // Enum's identity comes from the live schema, not JSON.
+                            entry["kind"]  = "Int32";
+                            entry["value"] = v;
+                        } else if constexpr (std::is_same_v<T, float>) {
+                            entry["kind"]  = "Float";
+                            entry["value"] = v;
+                        } else if constexpr (std::is_same_v<T, std::string>) {
+                            entry["kind"]  = "String";
+                            entry["value"] = v;
+                        } else if constexpr (std::is_same_v<T, glm::vec2>) {
+                            entry["kind"]  = "Vec2";
+                            entry["value"] = { v.x, v.y };
+                        } else if constexpr (std::is_same_v<T, glm::vec3>) {
+                            entry["kind"]  = "Vec3";
+                            entry["value"] = { v.x, v.y, v.z };
+                        } else if constexpr (std::is_same_v<T, glm::vec4>) {
+                            entry["kind"]  = "Vec4";
+                            entry["value"] = { v.x, v.y, v.z, v.w };
+                        } else if constexpr (std::is_same_v<T, AssetID>) {
+                            entry["kind"]  = "AssetRef";
+                            entry["value"] = v.ToString();
+                        } else if constexpr (std::is_same_v<T, uint64_t>) {
+                            entry["kind"]  = "EntityRef";
+                            entry["value"] = v;
+                        }
+                    }, value);
+                    fieldsArr.push_back(std::move(entry));
+                }
+                scriptJson["fields"] = std::move(fieldsArr);
+            }
+            ej["script"] = std::move(scriptJson);
         }
 
         // Lights
@@ -453,6 +502,11 @@ bool SceneSerializer::DeserializeFromJson(Scene& scene, const nlohmann::json& ro
         entt::entity e = scene.CreateEntity(name);
         indexToEntity[i] = e;
 
+        // Restore sceneLocalId from disk so script-field EntityRef references
+        // resolve. Missing key (pre-#75 scene) → keep auto-assigned ID.
+        if (ej.contains("scene_local_id"))
+            scene.AssignSceneLocalId(e, ej["scene_local_id"].get<uint64_t>());
+
         // Transform
         if (ej.contains("transform")) {
             const auto& tj = ej["transform"];
@@ -569,8 +623,66 @@ bool SceneSerializer::DeserializeFromJson(Scene& scene, const nlohmann::json& ro
         if (ej.contains("script")) {
             const auto& sj = ej["script"];
             ScriptComponent sc;
-            sc.scriptPath = sj.value("path",  std::string{});
-            sc.className  = sj.value("class", std::string{});
+            sc.className = sj.value("class", std::string{});
+            if (sj.contains("asset_id")) {
+                sc.scriptId = AssetID::FromString(sj.value("asset_id", std::string{}));
+            } else if (sj.contains("path")) {
+                // Pre-#73 legacy: serializer no longer has AssetRegistry access here.
+                // Recover class name from the path stem; user must re-drop the .cs to
+                // restore the scriptId (.cs.sameta UUID).
+                const std::string p = sj.value("path", std::string{});
+                if (sc.className.empty() && !p.empty())
+                    sc.className = std::filesystem::path(p).stem().string();
+            }
+            // Per-entity field values (#75). Kind comes from JSON, not the live
+            // schema — schema may not be available at load time (ALC not yet
+            // compiled). RecompileEditing's migration step will reconcile.
+            if (sj.contains("fields") && sj["fields"].is_array()) {
+                for (const auto& f : sj["fields"]) {
+                    if (!f.contains("name") || !f.contains("kind") || !f.contains("value")) continue;
+                    const std::string name = f["name"].get<std::string>();
+                    const std::string kindStr = f["kind"].get<std::string>();
+                    const auto kind = ScriptFieldKindFromString(kindStr);
+                    const auto& v = f["value"];
+                    ScriptFieldValue val;
+                    bool ok = true;
+                    switch (kind) {
+                        case ScriptFieldKind::Bool:      val = v.get<bool>(); break;
+                        case ScriptFieldKind::Int32:
+                        case ScriptFieldKind::Enum:      val = v.get<int32_t>(); break;
+                        case ScriptFieldKind::Float:     val = v.get<float>(); break;
+                        case ScriptFieldKind::String:    val = v.get<std::string>(); break;
+                        case ScriptFieldKind::Vec2:
+                            if (v.is_array() && v.size() >= 2)
+                                val = glm::vec2{v[0].get<float>(), v[1].get<float>()};
+                            else ok = false;
+                            break;
+                        case ScriptFieldKind::Vec3:
+                            if (v.is_array() && v.size() >= 3)
+                                val = glm::vec3{v[0].get<float>(), v[1].get<float>(), v[2].get<float>()};
+                            else ok = false;
+                            break;
+                        case ScriptFieldKind::Vec4:
+                            if (v.is_array() && v.size() >= 4)
+                                val = glm::vec4{v[0].get<float>(), v[1].get<float>(),
+                                                 v[2].get<float>(), v[3].get<float>()};
+                            else ok = false;
+                            break;
+                        case ScriptFieldKind::Color:
+                            if (v.is_array() && v.size() == 3)
+                                val = glm::vec3{v[0].get<float>(), v[1].get<float>(), v[2].get<float>()};
+                            else if (v.is_array() && v.size() == 4)
+                                val = glm::vec4{v[0].get<float>(), v[1].get<float>(),
+                                                 v[2].get<float>(), v[3].get<float>()};
+                            else ok = false;
+                            break;
+                        case ScriptFieldKind::AssetRef:  val = AssetID::FromString(v.get<std::string>()); break;
+                        case ScriptFieldKind::EntityRef: val = v.get<uint64_t>(); break;
+                        default: ok = false; break;
+                    }
+                    if (ok) sc.fields.emplace(std::move(name), std::move(val));
+                }
+            }
             reg.emplace<ScriptComponent>(e, sc);
         }
 

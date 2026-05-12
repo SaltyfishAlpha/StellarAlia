@@ -1,7 +1,7 @@
 #version 450
 
-layout(set = 1, binding = 0) uniform sampler2D t_HDR;
-layout(set = 1, binding = 1) uniform sampler3D t_CGLUT;  // 32³ color grading LUT
+layout(set = 2, binding = 0) uniform sampler2D t_HDR;
+layout(set = 2, binding = 1) uniform sampler3D t_CGLUT;  // 32³ color grading LUT
 
 layout(push_constant) uniform PushConstants {
     float exposure;

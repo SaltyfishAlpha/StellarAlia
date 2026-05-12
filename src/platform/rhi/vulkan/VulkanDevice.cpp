@@ -87,7 +87,10 @@ std::unique_ptr<VulkanDevice> VulkanDevice::Create(const RHIDeviceDesc& desc) {
 // Destructor
 // ─────────────────────────────────────────────────────────────────────────────
 VulkanDevice::~VulkanDevice() {
-    if (m_device) vkDeviceWaitIdle(m_device);
+    // Issue #72 Step 7.5: drain deferred-destroy queues while the pool and
+    // allocator are still alive. Use the C++ WaitIdle() (which also flushes)
+    // rather than the raw vkDeviceWaitIdle.
+    if (m_device) WaitIdle();
 
     // Destroy all user resources before pools/allocator
     for (auto& e : m_pipelines) {
@@ -318,6 +321,10 @@ void VulkanDevice::InitDevice() {
     features12.descriptorBindingSampledImageUpdateAfterBind   = VK_TRUE;
     features12.descriptorBindingStorageBufferUpdateAfterBind  = VK_TRUE;
     features12.descriptorBindingStorageImageUpdateAfterBind   = VK_TRUE;
+    // Bindless: large sampled-image array indexed by SSBO-loaded uint at runtime.
+    features12.runtimeDescriptorArray                         = VK_TRUE;
+    features12.descriptorBindingPartiallyBound                = VK_TRUE;
+    features12.shaderSampledImageArrayNonUniformIndexing      = VK_TRUE;
 
     VkPhysicalDeviceVulkan13Features features13{};
     features13.sType              = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
@@ -343,6 +350,12 @@ void VulkanDevice::InitDevice() {
         throw std::runtime_error("vkCreateDevice failed");
 
     vkGetDeviceQueue(m_device, m_graphicsFamily, 0, &m_graphicsQueue);
+
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(m_physDevice, &props);
+    m_minStorageBufferOffsetAlignment = props.limits.minStorageBufferOffsetAlignment;
+    SA_LOG_INFO("VulkanDevice: minStorageBufferOffsetAlignment = {} B",
+                static_cast<uint64_t>(m_minStorageBufferOffsetAlignment));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -540,6 +553,12 @@ void VulkanDevice::CreateFrameData() {
 }
 
 void VulkanDevice::DestroyFrameData() {
+    // Issue #72 Step 7.5: drain anything still queued for deferred destruction
+    // before tearing down per-frame primitives. Caller (VulkanDevice dtor) must
+    // have already called vkDeviceWaitIdle, so all slots are safe to flush.
+    for (uint32_t i = 0; i < MAX_FRAMES; ++i)
+        FlushPendingFree(i);
+
     for (uint32_t i = 0; i < MAX_FRAMES; i++) {
         FrameData& f = m_frames[i];
         if (f.fence)    vkDestroyFence(m_device, f.fence, nullptr);
@@ -547,6 +566,27 @@ void VulkanDevice::DestroyFrameData() {
         if (f.pool)       vkDestroyCommandPool(m_device, f.pool, nullptr);
         f = {};
     }
+}
+
+void VulkanDevice::FlushPendingFree(uint32_t slot) {
+    if (slot >= MAX_FRAMES) return;
+    PendingFree& pf = m_pendingFree[slot];
+    if (!pf.descSets.empty()) {
+        vkFreeDescriptorSets(m_device, m_descPool,
+                             static_cast<uint32_t>(pf.descSets.size()),
+                             pf.descSets.data());
+        pf.descSets.clear();
+    }
+    for (auto& [buf, alloc] : pf.buffers)
+        vmaDestroyBuffer(m_allocator, buf, alloc);
+    pf.buffers.clear();
+    for (auto& img : pf.images) {
+        for (auto v : img.mipViews)
+            if (v) vkDestroyImageView(m_device, v, nullptr);
+        if (img.view)  vkDestroyImageView(m_device, img.view, nullptr);
+        if (img.alloc) vmaDestroyImage(m_allocator, img.image, img.alloc);
+    }
+    pf.images.clear();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -562,6 +602,11 @@ IRHICommandList* VulkanDevice::BeginFrame() {
 
     // Wait for this frame slot to become available
     vkWaitForFences(m_device, 1, &f.fence, VK_TRUE, UINT64_MAX);
+
+    // Issue #72 Step 7.5: GPU has finished with this slot's previous submit,
+    // so any Vulkan objects we queued for deferred destruction back then are
+    // safe to free now.
+    FlushPendingFree(m_frameIdx);
 
     // Acquire swapchain image
     VkResult result = vkAcquireNextImageKHR(
@@ -655,7 +700,13 @@ void VulkanDevice::Present() {
 }
 
 void VulkanDevice::WaitIdle() {
-    if (m_device) vkDeviceWaitIdle(m_device);
+    if (!m_device) return;
+    vkDeviceWaitIdle(m_device);
+    // Issue #72 Step 7.5: WaitIdle means all GPU work is done — flush every
+    // slot's deferred-destroy queue so callers (resize / scene switch) don't
+    // accumulate ghost resources held alive across the wait.
+    for (uint32_t i = 0; i < MAX_FRAMES; ++i)
+        FlushPendingFree(i);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -719,11 +770,15 @@ VkImageView VulkanDevice::GetVkImageView(RHITextureHandle handle) const {
 void VulkanDevice::InitDescriptorPool() {
     // Large pre-allocated pool — sufficient for early stages.
     // Upgrade to dynamic pool chains in a later optimisation pass.
+    // COMBINED_IMAGE_SAMPLER must cover BindlessTextureHeap (4096 slots) + the
+    // per-material legacy bindings; STORAGE_BUFFER_DYNAMIC reserves room for
+    // the MaterialParamRing descriptor + future per-frame SSBO rings.
     VkDescriptorPoolSize sizes[] = {
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 512},
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,          256},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          256},
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,           128},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,  4608},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,           256},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           256},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,    64},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            128},
     };
 
     VkDescriptorPoolCreateInfo ci{};
@@ -920,8 +975,13 @@ void VulkanDevice::DestroyBuffer(RHIBufferHandle handle) {
     if (!handle.IsValid() || handle.index >= m_buffers.size()) return;
     auto& entry = m_buffers[handle.index];
     if (!entry.valid) return;
-    vmaDestroyBuffer(m_allocator, entry.buffer, entry.alloc);
-    entry.valid = false;
+    // Issue #72 Step 7.5: defer the actual vmaDestroyBuffer until we cycle
+    // back to this frame slot (its fence will be waited then, guaranteeing the
+    // GPU has finished using this buffer).
+    m_pendingFree[m_frameIdx].buffers.emplace_back(entry.buffer, entry.alloc);
+    entry.buffer = VK_NULL_HANDLE;
+    entry.alloc  = VK_NULL_HANDLE;
+    entry.valid  = false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1176,11 +1236,17 @@ void VulkanDevice::DestroyTexture(RHITextureHandle handle) {
     if (!handle.IsValid() || handle.index >= m_textures.size()) return;
     auto& entry = m_textures[handle.index];
     if (!entry.valid || entry.swapchain) return;
-    for (auto v : entry.mipViews)
-        if (v) vkDestroyImageView(m_device, v, nullptr);
+    // Issue #72 Step 7.5: defer until fence for current slot fires.
+    PendingImage pi;
+    pi.image    = entry.image;
+    pi.alloc    = entry.alloc;
+    pi.view     = entry.view;
+    pi.mipViews = std::move(entry.mipViews);
+    m_pendingFree[m_frameIdx].images.push_back(std::move(pi));
+    entry.image = VK_NULL_HANDLE;
+    entry.alloc = VK_NULL_HANDLE;
+    entry.view  = VK_NULL_HANDLE;
     entry.mipViews.clear();
-    if (entry.view)  vkDestroyImageView(m_device, entry.view, nullptr);
-    if (entry.alloc) vmaDestroyImage(m_allocator, entry.image, entry.alloc);
     entry.valid = false;
 }
 
@@ -1224,12 +1290,13 @@ void VulkanDevice::DestroyShader(RHIShaderHandle handle) {
 static VkDescriptorType ToVkDescriptorType(RHIDescriptorType type) {
     switch (type) {
         case RHIDescriptorType::Texture2D:
-        case RHIDescriptorType::TextureCube:  return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        case RHIDescriptorType::Sampler:      return VK_DESCRIPTOR_TYPE_SAMPLER;
-        case RHIDescriptorType::UniformBuffer:return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        case RHIDescriptorType::StorageBuffer:return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        case RHIDescriptorType::StorageImage: return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        default:                              return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        case RHIDescriptorType::TextureCube:        return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        case RHIDescriptorType::Sampler:            return VK_DESCRIPTOR_TYPE_SAMPLER;
+        case RHIDescriptorType::UniformBuffer:      return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        case RHIDescriptorType::StorageBuffer:      return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        case RHIDescriptorType::StorageBufferDynamic: return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+        case RHIDescriptorType::StorageImage:       return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        default:                                    return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     }
 }
 
@@ -1248,14 +1315,33 @@ RHIDescLayoutHandle VulkanDevice::CreateDescriptorSetLayout(const ShaderReflecti
         if (b.set != set) continue;
         VkDescriptorSetLayoutBinding vkb{};
         vkb.binding            = b.binding;
-        vkb.descriptorType     = ToVkDescriptorType(b.type);
+        // Issue #72: SPIR-V reflection emits `StorageBuffer` for the MaterialParams
+        // SSBO; promote it to STORAGE_BUFFER_DYNAMIC so per-draw dynamic offsets
+        // can index into the MaterialParamRing. Convention is anchored on
+        // (set=2, binding=0, name=="MaterialParams") (Step 6.5 set layout).
+        VkDescriptorType vkType = ToVkDescriptorType(b.type);
+        if (vkType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER &&
+            b.set == 2 && b.binding == 0 && b.name == "MaterialParams") {
+            vkType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+        }
+        vkb.descriptorType     = vkType;
         vkb.descriptorCount    = b.arraySize;
         vkb.stageFlags         = ToVkShaderStages(b.stages);
         bindings.push_back(vkb);
     }
 
+    // Issue #72: DYNAMIC descriptors (UBO_DYNAMIC / SSBO_DYNAMIC) cannot coexist
+    // with UPDATE_AFTER_BIND in the same layout (VUID-03001 / VUID-03011).
+    // If any binding is dynamic, drop UAB for the whole layout — they update
+    // implicitly via dynamic offsets at bind time, so UAB semantics aren't needed.
+    const bool hasDynamic = std::any_of(bindings.begin(), bindings.end(),
+        [](const VkDescriptorSetLayoutBinding& vkb) {
+            return vkb.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
+                   vkb.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+        });
+
     std::vector<VkDescriptorBindingFlags> bindingFlags(bindings.size(),
-        VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+        hasDynamic ? 0u : VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
 
     VkDescriptorSetLayoutBindingFlagsCreateInfo flagsCI{};
     flagsCI.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
@@ -1265,7 +1351,7 @@ RHIDescLayoutHandle VulkanDevice::CreateDescriptorSetLayout(const ShaderReflecti
     VkDescriptorSetLayoutCreateInfo ci{};
     ci.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     ci.pNext        = &flagsCI;
-    ci.flags        = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+    ci.flags        = hasDynamic ? 0u : VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
     ci.bindingCount = static_cast<uint32_t>(bindings.size());
     ci.pBindings    = bindings.data();
 
@@ -1275,6 +1361,40 @@ RHIDescLayoutHandle VulkanDevice::CreateDescriptorSetLayout(const ShaderReflecti
         return {};
     }
 
+    RHIDescLayoutHandle h{static_cast<uint32_t>(m_descLayouts.size())};
+    m_descLayouts.push_back({layout, true});
+    return h;
+}
+
+RHIDescLayoutHandle VulkanDevice::CreateBindlessTextureLayout(uint32_t capacity) {
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding         = 0;
+    binding.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    binding.descriptorCount = capacity;
+    binding.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT;
+
+    // PARTIALLY_BOUND lets the heap leave slots unwritten — shaders only ever
+    // index slots the engine has registered.
+    const VkDescriptorBindingFlags bindingFlag =
+        VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
+        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+    VkDescriptorSetLayoutBindingFlagsCreateInfo flagsCI{};
+    flagsCI.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+    flagsCI.bindingCount  = 1;
+    flagsCI.pBindingFlags = &bindingFlag;
+
+    VkDescriptorSetLayoutCreateInfo ci{};
+    ci.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    ci.pNext        = &flagsCI;
+    ci.flags        = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+    ci.bindingCount = 1;
+    ci.pBindings    = &binding;
+
+    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+    if (vkCreateDescriptorSetLayout(m_device, &ci, nullptr, &layout) != VK_SUCCESS) {
+        SA_LOG_ERROR("VulkanDevice::CreateBindlessTextureLayout — failed (capacity={})", capacity);
+        return {};
+    }
     RHIDescLayoutHandle h{static_cast<uint32_t>(m_descLayouts.size())};
     m_descLayouts.push_back({layout, true});
     return h;
@@ -1305,7 +1425,10 @@ void VulkanDevice::FreeDescriptorSet(RHIDescSetHandle handle) {
     if (!handle.IsValid() || handle.index >= m_descSets.size()) return;
     DescSetEntry& entry = m_descSets[handle.index];
     if (!entry.valid || entry.set == VK_NULL_HANDLE) return;
-    vkFreeDescriptorSets(m_device, m_descPool, 1, &entry.set);
+    // Issue #72 Step 7.5: defer the actual vkFreeDescriptorSets until we cycle
+    // back to this slot. Solves "destroyed without UPDATE_AFTER_BIND" validation
+    // when materials are released during scene transitions.
+    m_pendingFree[m_frameIdx].descSets.push_back(entry.set);
     entry.set   = VK_NULL_HANDLE;
     entry.valid = false;
 }
@@ -1329,6 +1452,30 @@ void VulkanDevice::WriteDescriptorTexture(RHIDescSetHandle dsHandle,
     write.descriptorCount = 1;
     write.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     write.pImageInfo      = &imgInfo;
+    vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+}
+
+void VulkanDevice::WriteDescriptorTextureArray(RHIDescSetHandle dsHandle,
+                                                uint32_t binding,
+                                                uint32_t arrayElement,
+                                                RHITextureHandle textureHandle) {
+    if (!dsHandle.IsValid()      || dsHandle.index      >= m_descSets.size()) return;
+    if (!textureHandle.IsValid() || textureHandle.index >= m_textures.size()) return;
+    if (!m_textures[textureHandle.index].valid)                               return;
+
+    VkDescriptorImageInfo imgInfo{};
+    imgInfo.sampler     = m_samplerLinearRepeat;
+    imgInfo.imageView   = m_textures[textureHandle.index].view;
+    imgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkWriteDescriptorSet write{};
+    write.sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet           = m_descSets[dsHandle.index].set;
+    write.dstBinding       = binding;
+    write.dstArrayElement  = arrayElement;
+    write.descriptorCount  = 1;
+    write.descriptorType   = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo       = &imgInfo;
     vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
 }
 
@@ -1429,7 +1576,8 @@ void VulkanDevice::WriteDescriptorStorageImageMip(RHIDescSetHandle dsHandle,
 void VulkanDevice::WriteDescriptorBuffer(RHIDescSetHandle dsHandle,
                                           uint32_t binding,
                                           RHIBufferHandle bufferHandle,
-                                          uint64_t offset, uint64_t range) {
+                                          uint64_t offset, uint64_t range,
+                                          bool dynamic) {
     if (!dsHandle.IsValid()     || dsHandle.index     >= m_descSets.size())  return;
     if (!bufferHandle.IsValid() || bufferHandle.index >= m_buffers.size())   return;
 
@@ -1442,13 +1590,18 @@ void VulkanDevice::WriteDescriptorBuffer(RHIDescSetHandle dsHandle,
     bufInfo.offset = offset;
     bufInfo.range  = (range == ~0ull) ? VK_WHOLE_SIZE : range;
 
+    VkDescriptorType descType;
+    if (dynamic)        descType = isStorage ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC
+                                             : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    else                descType = isStorage ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+                                             : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+
     VkWriteDescriptorSet write{};
     write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     write.dstSet          = m_descSets[dsHandle.index].set;
     write.dstBinding      = binding;
     write.descriptorCount = 1;
-    write.descriptorType  = isStorage ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
-                                      : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    write.descriptorType  = descType;
     write.pBufferInfo     = &bufInfo;
     vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
 }

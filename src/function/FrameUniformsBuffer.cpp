@@ -16,7 +16,7 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
     RHI::ShaderReflection refl;
     {
         RHI::ShaderBindingDesc bd;
-        bd.set     = 0; bd.binding = 0;
+        bd.set     = 1; bd.binding = 0;
         bd.type    = RHI::RHIDescriptorType::UniformBuffer;
         bd.stages  = RHI::RHIShaderStage::All;
         bd.name    = "FrameData";
@@ -24,7 +24,7 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
     }
     {
         RHI::ShaderBindingDesc bd;
-        bd.set     = 0; bd.binding = 1;
+        bd.set     = 1; bd.binding = 1;
         bd.type    = RHI::RHIDescriptorType::UniformBuffer;
         bd.stages  = RHI::RHIShaderStage::All;
         bd.name    = "LightData";
@@ -32,7 +32,7 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
     }
     {
         RHI::ShaderBindingDesc bd;
-        bd.set     = 0; bd.binding = 2;
+        bd.set     = 1; bd.binding = 2;
         bd.type    = RHI::RHIDescriptorType::Texture2D;
         bd.stages  = RHI::RHIShaderStage::Fragment;
         bd.name    = "t_BrdfLut";
@@ -40,7 +40,7 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
     }
     {
         RHI::ShaderBindingDesc bd;
-        bd.set     = 0; bd.binding = 3;
+        bd.set     = 1; bd.binding = 3;
         bd.type    = RHI::RHIDescriptorType::TextureCube;
         bd.stages  = RHI::RHIShaderStage::Fragment;
         bd.name    = "t_PrefilteredEnv";
@@ -48,7 +48,7 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
     }
     {
         RHI::ShaderBindingDesc bd;
-        bd.set     = 0; bd.binding = 4;
+        bd.set     = 1; bd.binding = 4;
         bd.type    = RHI::RHIDescriptorType::TextureCube;
         bd.stages  = RHI::RHIShaderStage::Fragment;
         bd.name    = "t_SkyboxMap";
@@ -56,7 +56,7 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
     }
     {
         RHI::ShaderBindingDesc bd;
-        bd.set     = 0; bd.binding = 5;
+        bd.set     = 1; bd.binding = 5;
         bd.type    = RHI::RHIDescriptorType::Texture2D;
         bd.stages  = RHI::RHIShaderStage::Fragment;
         bd.name    = "t_LtcMat";
@@ -64,14 +64,16 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
     }
     {
         RHI::ShaderBindingDesc bd;
-        bd.set     = 0; bd.binding = 6;
+        bd.set     = 1; bd.binding = 6;
         bd.type    = RHI::RHIDescriptorType::Texture2D;
         bd.stages  = RHI::RHIShaderStage::Fragment;
         bd.name    = "t_LtcAmp";
         refl.bindings.push_back(bd);
     }
 
-    m_layout = device->CreateDescriptorSetLayout(refl, 0);
+    // Issue #72 Step 6.5: FrameUniforms is set=1 in the new layout (set=0 reserved
+    // for BindlessTextureHeap so it can stay bound for the whole command buffer).
+    m_layout = device->CreateDescriptorSetLayout(refl, 1);
 
     // Placeholder 1×1 BLACK texture for binding=2 (BRDF LUT, sampler2D).
     // Black → brdfSS=(0,0) → iblSpecular=0 when no IBL is loaded.

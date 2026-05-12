@@ -3,8 +3,8 @@
 // postfx_exposure_adapt.comp
 // 256-thread exposure adaptation: reads log-luminance histogram, computes weighted
 // average EV in [lowPct, highPct] range, and smoothly adapts the exposure value.
-// set=1, binding=0 = histogram SSBO (256 × uint, read-only)
-// set=1, binding=1 = exposure SSBO (1 × float, persistent across frames)
+// set = 1, binding=0 = histogram SSBO (256 × uint, read-only)
+// set = 1, binding=1 = exposure SSBO (1 × float, persistent across frames)
 
 layout(local_size_x = 256) in;
 

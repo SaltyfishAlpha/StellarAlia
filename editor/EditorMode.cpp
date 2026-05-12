@@ -19,6 +19,7 @@
 #include "ui/panels/WorldSettingsPanel.hpp"
 #include "ui/panels/AssetsPanel.hpp"
 #include "ui/panels/ConsolePanel.hpp"
+#include "ui/AssetDragPayload.hpp"
 #include "ui/panels/ShortcutsPanel.hpp"
 #include "resource/EntityTemplateRegistry.hpp"
 
@@ -84,52 +85,17 @@ void EditorMode::OnAttach(Application& app) {
     input.PushMap("Viewport");
     m_viewportActive = true;
 
-    // ── Load project and startup scene ───────────────────────────────────────
-    Scene& scene = app.GetScene();
-    const std::string& projectDir = app.GetDesc().projectDir;
-    fs::path projFile;
-    if (!projectDir.empty()) {
-        std::error_code ec;
-        for (const auto& entry : fs::directory_iterator(projectDir, ec)) {
-            if (entry.path().extension() == ".saproject") {
-                projFile = entry.path();
-                break;
-            }
-        }
-        if (!projFile.empty()) {
-            SaProject proj;
-            if (LoadSaProject(projFile, proj) && !proj.startupScene.empty()) {
-                const fs::path scenePath = fs::path(projectDir) / proj.startupScene;
-                if (SceneSerializer::LoadFromFile(scene, scenePath))
-                    SA_LOG_INFO("EditorMode: loaded '{}'", scenePath.string());
-                else
-                    SA_LOG_WARN("EditorMode: could not load startup scene '{}'",
-                                scenePath.string());
-            }
-        } else {
-            SA_LOG_INFO("EditorMode: no .saproject found in '{}' — empty scene", projectDir);
-        }
-    }
-
-    // ── Script file watcher ──────────────────────────────────────────────────
-    if (!projectDir.empty())
-        m_scriptWatcher.Watch(fs::path(projectDir) / "assets");
-
-    // ── Scan asset registry ──────────────────────────────────────────────────
+    // ── Bind asset-registry pointer + scan engine-side templates once ───────
     m_assetRegistry = &app.GetAssetRegistry();
-    {
-        const fs::path engineAssets = app.GetDesc().engineAssetsDir;
-        const fs::path projectAssets =
-            projectDir.empty() ? fs::path{} : fs::path(projectDir) / "assets";
-        m_assetRegistry->Scan(projectAssets, engineAssets);
-        SA_LOG_INFO("EditorMode: asset registry scanned ({} assets)",
-                    m_assetRegistry->Count());
+    m_templateRegistry.Scan(app.GetDesc().engineAssetsDir);
+    SA_LOG_INFO("EditorMode: template registry scanned ({} templates)",
+                m_templateRegistry.Entries().size());
 
-        // Scan entity templates from engine assets dir.
-        m_templateRegistry.Scan(engineAssets);
-        SA_LOG_INFO("EditorMode: template registry scanned ({} templates)",
-                    m_templateRegistry.Entries().size());
-    }
+    // ── Load project files (asset scan + script compile + startup scene) ────
+    // Shared with LoadProject() — see LoadProjectFiles() for the full pipeline.
+    const std::string& projectDir = app.GetDesc().projectDir;
+    Scene& scene = app.GetScene();
+    const std::optional<SaProject> initialProj = LoadProjectFiles(projectDir);
 
     // ── Apply world settings (background mode, tonemap, IBL) ─────────────────
     app.GetRenderer().ApplyWorldSettings(scene.GetWorldSettings());
@@ -215,7 +181,7 @@ void EditorMode::OnAttach(Application& app) {
 
     m_projectBrowserPanel = std::make_unique<ProjectBrowserPanel>(m_ctx, *m_projectBrowserPresenter);
 
-    if (projectDir.empty() || projFile.empty())
+    if (projectDir.empty() || !initialProj.has_value())
         m_showProjectBrowser = true;
 
     SA_LOG_INFO("EditorMode: attached");
@@ -805,6 +771,56 @@ void EditorMode::LoadScene(const fs::path& path) {
     m_app->RebuildDrawList();
 }
 
+std::optional<SaProject> EditorMode::LoadProjectFiles(const fs::path& projectDir) {
+    if (projectDir.empty()) return std::nullopt;
+    Scene& scene = m_app->GetScene();
+
+    // Watch script dir + reset FileWatcher's "pending" flag for the new root.
+    m_scriptWatcher.Watch(projectDir / "assets");
+    m_pendingRecompile = false;
+
+    // Scan asset registry (project + engine assets shared root).
+    m_assetRegistry->Scan(projectDir / "assets", m_app->GetDesc().engineAssetsDir);
+    SA_LOG_INFO("EditorMode: asset registry scanned ({} assets)",
+                m_assetRegistry->Count());
+
+    // Compile every .cs the registry knows about so the Inspector can resolve
+    // ScriptClassSchema for any user script without first entering Play. Subsequent
+    // .cs edits go through the FileWatcher path (m_pendingRecompile).
+    m_app->GetScriptSystem().RecompileEditing(scene.Registry());
+
+    // AssetsPanel may be null during initial OnAttach (panel registration runs
+    // later in the same OnAttach call) — guard so the same helper covers both
+    // initial-load and project-switch.
+    if (m_assetsPanel)
+        m_assetsPanel->UpdateProjectDir(projectDir / "assets");
+
+    // Locate .saproject and load its startup scene.
+    fs::path saprojectPath;
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(projectDir, ec)) {
+        if (entry.path().extension() == ".saproject") { saprojectPath = entry.path(); break; }
+    }
+    if (saprojectPath.empty()) {
+        SA_LOG_INFO("EditorMode: no .saproject found in '{}' — empty scene",
+                    projectDir.string());
+        return std::nullopt;
+    }
+
+    SaProject proj;
+    if (LoadSaProject(saprojectPath, proj) && !proj.startupScene.empty()) {
+        const fs::path scenePath = projectDir / proj.startupScene;
+        if (SceneSerializer::LoadFromFile(scene, scenePath)) {
+            m_currentScenePath = scenePath;
+            SA_LOG_INFO("EditorMode: loaded startup scene '{}'", scenePath.string());
+        } else {
+            SA_LOG_WARN("EditorMode: could not load startup scene '{}'",
+                        scenePath.string());
+        }
+    }
+    return proj;
+}
+
 void EditorMode::LoadProject(const fs::path& saprojectPath) {
     if (m_app->GetPlayState() != EnginePlayState::Editing) {
         SA_LOG_WARN("EditorMode::LoadProject — cannot switch project while not in Editing state");
@@ -858,42 +874,21 @@ void EditorMode::LoadProject(const fs::path& saprojectPath) {
         }
     }
 
-    // Update Application paths
+    // ── Switch-only cleanup: drop old project state before re-scanning ──────
     m_app->UpdateProjectPaths(projectDir, cookCacheDir);
     m_ctx.projectDir = projectDir;
-
-    // Restart script watcher for the new project
-    m_scriptWatcher.Watch(projectDir / "assets");
-    m_pendingRecompile = false;
 
     m_app->GetResourceManager().ClearProjectAssets();
     m_app->GetMaterialManager().ClearProjectInstances();
     m_app->GetRenderer().ResetProjectIBL();
 
-    // ── GPU hot-swap: replace project shader types (GPU is idle by now) ───────
+    // GPU hot-swap: replace project shader types (GPU is idle by now)
     m_app->GetRenderer().ApplyProjectShaderTypes(cookedShaderDir);
 
     m_diagnostics.ClearSource(DiagSource::Runtime);
 
-    // Rescan asset registry
-    m_assetRegistry->Scan(projectDir / "assets", m_app->GetDesc().engineAssetsDir);
-    SA_LOG_INFO("EditorMode: asset registry rescanned ({} assets)", m_assetRegistry->Count());
-
-    // Update AssetsPanel root
-    if (m_assetsPanel)
-        m_assetsPanel->UpdateProjectDir(projectDir / "assets");
-
-    // Load startup scene
-    SaProject proj;
-    if (LoadSaProject(saprojectPath, proj) && !proj.startupScene.empty()) {
-        const fs::path scenePath = projectDir / proj.startupScene;
-        if (SceneSerializer::LoadFromFile(scene, scenePath)) {
-            m_currentScenePath = scenePath;
-            SA_LOG_INFO("EditorMode: loaded startup scene '{}'", scenePath.string());
-        } else {
-            SA_LOG_WARN("EditorMode: could not load startup scene '{}'", scenePath.string());
-        }
-    }
+    // ── Common project load pipeline (asset scan + script compile + scene) ──
+    SaProject proj = LoadProjectFiles(projectDir).value_or(SaProject{});
 
     m_app->GetRenderer().ApplyWorldSettings(scene.GetWorldSettings());
     m_app->PrepareAnimatedEntities();
@@ -1249,10 +1244,15 @@ void EditorMode::HandleViewportInteraction() {
 #endif
 
     // ── Asset drop from AssetsPanel ───────────────────────────────────────────
-    if (ImGui::BeginDragDropTarget()) {
+    // Use BeginDragDropTargetCustom so the entire transparent overlay window acts
+    // as the drop zone — vanilla BeginDragDropTarget needs a submitted item, but
+    // this window has none.
+    ImGuiWindow* vpWin = ImGui::GetCurrentWindow();
+    if (ImGui::BeginDragDropTargetCustom(vpWin->Rect(), vpWin->ID)) {
         if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAASSET")) {
-            if (m_hierarchyPanel) {
-                fs::path assetPath(static_cast<const char*>(p->Data));
+            if (m_hierarchyPanel && p->DataSize >= static_cast<int>(sizeof(AssetDragPayload))) {
+                const auto& pl = *static_cast<const AssetDragPayload*>(p->Data);
+                fs::path assetPath(pl.path);
                 std::string ext = assetPath.extension().string();
                 std::transform(ext.begin(), ext.end(), ext.begin(),
                                [](unsigned char c){ return static_cast<char>(::tolower(c)); });

@@ -85,14 +85,17 @@
 │    RGPhysicalSlot / RGPhysicalBufferSlot — persistent handles   │
 │                                                                  │
 │  FrameUniformsBuffer (owned by SceneRenderer)                   │
-│    set=0: per-frame camera + light + IBL data                   │
+│    set=1: per-frame camera + light + IBL data                   │
 │    Manages double-buffered GPU UBOs + descriptor sets           │
+│  MaterialParamRing (owned by SceneRenderer, Issue #72)          │
+│    2 MiB per-frame SSBO ring, bump-allocated, set=2 dynamic     │
 ├─────────────────────────────────────────────────────────────────┤
 │  Resource Layer                                                  │
 │                                                                  │
 │  MaterialManager → MaterialType → MaterialInstance              │
 │    Init(device, ResourceManager*)                               │
 │    RegisterTypeFromShaders(MaterialTypeDesc, FeatureInitContext) │
+│    BindlessTextureHeap: 4096-slot set=0 sampler array           │
 │  ShaderProgram: vert+frag SPIRV + reflection + pipeline cache   │
 │  ComputeProgram: compute SPIRV + per-set descriptor layouts     │
 │  ResourceManager: LoadMesh / LoadTexture / GetBuiltin()         │
@@ -205,6 +208,15 @@ A project is a directory rooted at a `.saproject` JSON file:
 If `projectDir` is empty (default startup), `ProjectBrowserPanel` is shown instead.
 `AssetsPanel` displays `projectDir/assets/` filtered to hide `.sameta` sidecars.
 
+**Asset drag-drop wire format (`AssetDragPayload`, defined in `editor/ui/AssetDragPayload.hpp`):**
+the `"SAASSET"` payload sent by `AssetsPanel` is a POD struct `{ char path[260]; char type[32]; AssetID id; }`.
+`path` is laid out first so that pre-#73 receivers reading `static_cast<const char*>(payload->Data)`
+still see a valid null-terminated absolute path (back-compat); new receivers cast to
+`const AssetDragPayload*` and use `id` directly via `DrawerHelpers::AcceptAssetIDDrop`.
+Selection-change in the file pane fires on `IsItemHovered() && IsMouseReleased(Left)` (not
+`IsItemClicked()`) — so pressing on a `.cs` to start a drag does NOT flip `EditorSelection`
+to Asset before the drag lands on a drop target.
+
 **CMake option `SA_DEBUG_PROJECT`:** When ON, skips the project browser and loads
 `SA_PROJECT_DIR` (defaults to `demo_project/`) directly at startup for fast iteration.
 
@@ -316,6 +328,11 @@ struct AssetEntry {
 
 Used by the editor for the asset-picker popup (`EntriesByType("Mesh")`) and by
 `ResourceManager` for path-based asset resolution.
+
+`ImportScanner::AssetTypeFromExtension` recognises `.png/.jpg/.jpeg/.bmp/.tga/.hdr` → `Texture`,
+`.gltf/.glb` → `Mesh`, `.samat` → `Material`, `.saglsl` → `Shader`, `.sascene` → `Scene`,
+`.cs` → `Script`. `.cs` is a runtime-consumed asset (no cook output); its `.cs.sameta`
+default-fills `class_name = stem` for `ScriptComponent.className` fallback.
 
 ### Cooked Texture — `.satex`
 
@@ -440,7 +457,8 @@ storage. `Scene` wraps an `entt::registry` and exposes `View<C...>()`.
 | `AreaLightComponent` | color, intensity, size (W×H), twoSided, emissiveScale; LTC-evaluated PBR |
 | `RigidBodyComponent` | Physics body: `Type` (Static/Kinematic/Dynamic), mass, friction, restitution, `bodyId` |
 | `ColliderComponent` | Collision shape: `Shape` (Box/Sphere/Capsule), extents, offset, rotation |
-| `ScriptComponent` | C# script binding: `scriptPath` (relative to project root), `className` (derived from filename if empty) |
+| `ScriptComponent` | C# script binding: `scriptId : AssetID` (resolves to the `.cs` source via `AssetRegistry::FindByID`), `className` (derived from filename stem if empty), `fields : unordered_map<string, ScriptFieldValue>` (per-entity Inspector-edited values) |
+| `EntityIdComponent` | Scene-local 64-bit stable ID assigned by `Scene::CreateEntity` (#75). Survives save/load; used by script `EntityRef` fields so cross-entity references persist across sessions. `Scene::FindBySceneLocalId(id)` resolves back to `entt::entity`; `Scene::AssignSceneLocalId(e, id)` restores IDs at scene load. |
 | `StaticGeometryTag` | Hint: entity never moves (future culling / lightmap / BVH) |
 
 IBL and skybox are **not** ECS components — they are global scene settings in `WorldSettings`.
@@ -471,7 +489,14 @@ Entity
 ### MaterialOverrideComponent
 
 Replaces the old `PBRSurfaceComponent` + `MaterialParamComponent` pair.
-When present, the render system clones the base `MaterialInstance` and applies overrides.
+When present, the render system applies overrides on top of the base `MaterialInstance`:
+- **SSBO-path materials** (e.g. PBR): BuildDrawList packs the override blob into the
+  per-frame `MaterialParamRing` and binds set=2 with a dynamic offset — no descriptor
+  set allocation per entity.
+- **Legacy UBO-path materials** (e.g. project `.saglsl` `SimpleAlbedo`): falls back to
+  `CloneInstance` which allocates a per-entity descriptor set; the desc set goes through
+  the RHI deferred-destroy queue on entity removal.
+
 Entities without this component share the cached instance (no clone, no allocation).
 
 ```cpp
@@ -660,7 +685,7 @@ animSystem.Init(device, sceneRenderer->GetSkinDescLayout());
 // Per scene load (per animated entity):
 animSystem.PrepareEntity(entity, registry, resMgr, device);
 // → allocates skinMatricesBuffer (boneCount×64 B, CPU-visible)
-// → allocates skinDescSet (set=2: binding0=skinMats, binding1=gpuMesh.skinDataBuffer)
+// → allocates skinDescSet (set=3: binding0=skinMats, binding1=gpuMesh.skinDataBuffer)
 // → sets SkinnedMeshComponent::ready = true
 
 // Every frame (Playing state):
@@ -682,7 +707,7 @@ animSystem.Shutdown(device);
 PrepareEntity (once):
   GPUMesh::skinDataBuffer  ← per-asset (joints+weights SSBO, uploaded by ResourceManager)
   skinMatricesBuffer       ← per-entity (mat4[boneCount], CPU-visible)
-  skinDescSet (set=2)      ← binding0 = skinMatricesBuffer, binding1 = skinDataBuffer
+  skinDescSet (set=3)      ← binding0 = skinMatricesBuffer, binding1 = skinDataBuffer
 
 Update (per frame):
   FK → workSkinMats[]  →  UploadBufferData(skinMatricesBuffer, ~3 KB)
@@ -763,11 +788,14 @@ directly from `ColliderComponent` ECS data (no Jolt debug callback needed). Togg
 
 ### Hosting Model
 
-`ScriptSystem::Init` loads `hostfxr` at runtime, initialises a .NET host context pointing at `StellarAlia.ScriptBridge.runtimeconfig.json`, and retrieves six function-pointer delegates via `get_function_pointer`:
+`ScriptSystem::Init` loads `hostfxr` at runtime, initialises a .NET host context pointing at `StellarAlia.ScriptBridge.runtimeconfig.json`, and retrieves ten function-pointer delegates via `get_function_pointer`:
 
 ```
-Initialize | Compile | Instantiate | InvokeLifecycle | RemoveInstance | Unload
+Lifecycle:           Initialize | Compile | Instantiate | InvokeLifecycle | RemoveInstance | Unload
+Field reflection:    GetClassSchemaBlob | GetClassDefaultsBlob | ApplyFieldValues | CaptureFieldValues
 ```
+
+The field-reflection group is loaded the same way as the lifecycle entries but lives outside `ScriptApiFunctionTable` — they are managed→native pull endpoints (Inspector → ALC) rather than native→managed lifecycle drivers.
 
 `Initialize` receives a `ScriptApiFunctionTable*` — a plain struct of C function pointers (version 2) covering transforms, entity lifecycle, rigidbody physics, point light control, physics raycast, animator, input, debug draw, logging, and time. The first field is `uint32_t version` so both sides can detect layout mismatches at startup. `ScriptApiContext` carries `PhysicsSystem*` so rigidbody and raycast functions can access Jolt through the physics system's public API. The managed `NativeApi` class stores this table and calls through it; this avoids making `StellarAlia.Runtime` a native shared library.
 
@@ -790,8 +818,10 @@ OnPlayStart(Scene& gameScene)
   └─ SA_Script_SetContext({&gameScene, …})  ← redirect g_ctx.scene to game copy
      └─ Compile(sourcePaths[])  ← Roslyn in-memory → byte[] assembly
         └─ Load(bytes)          ← CollectibleALC.LoadFromStream
+           └─ m_schemaCache.Clear()  ← previous-ALC schemas now stale
            └─ for each ScriptComponent entity:
                 Instantiate(entityId, className)
+                InjectFieldValues(entityId, sc)   ← #74: push sc.fields into instance
                 InvokeLifecycle(entityId, OnAttach, 0)
                 InvokeLifecycle(entityId, OnStart,  0)
 
@@ -832,7 +862,119 @@ MSBuild automatically discovers `Directory.Build.props` by searching parent dire
 
 ### ECS Integration
 
-`ScriptComponent` carries `scriptPath` (relative to project root) and `className` (defaults to the file name stem). `ScriptSystem` subscribes to `entt::registry::on_destroy<ScriptComponent>` to call `RemoveInstance` when an entity is destroyed during play.
+`ScriptComponent` carries `scriptId : AssetID` (the `.cs.sameta` UUID), `className` (defaults to the file name stem), and `fields : unordered_map<string, ScriptFieldValue>` (#74 — Inspector-edited field values per entity, injected into the C# instance at Play start). `ScriptSystem::Context` holds a `Resource::AssetRegistry*`; `OnPlayStart` / `Instantiate` use `AssetRegistry::FindByID(sc.scriptId)->sourcePath` to resolve the absolute `.cs` path before passing it to Roslyn. `ScriptSystem` subscribes to `entt::registry::on_destroy<ScriptComponent>` to call `RemoveInstance` when an entity is destroyed during play.
+
+`SceneSerializer` writes `script: { asset_id, class }`; loaders that encounter pre-#73 `script.path` extract the stem into `className` and leave `scriptId` invalid (user re-drops the `.cs` to repair). `sc.fields` is not yet persisted (deferred to #75).
+
+`RecompileEditing` (Edit-mode compile, triggered by FileWatcher + `EditorMode::OnAttach` / `LoadProject` warm-up) compiles **every `.cs` in `AssetRegistry::EntriesByType("Script")`** — not just the ones referenced by ScriptComponent — so the Inspector can resolve `ScriptClassSchema` for any user script the moment the user drags it onto a freshly-added component. Unlike pre-#74, RecompileEditing does NOT call `Unload()` afterwards; the ALC stays live in Edit mode so reflection queries hit a populated context. `ScriptLoader.Load()` already swaps `_alc` on each Compile, so the previous CollectibleALC is GC-eligible after the next compile — no leak.
+
+### Script Field Reflection (#74 / #75)
+
+The Inspector displays — and edits — the public fields of every user `ScriptBase` subclass via a managed-side `System.Reflection` scan exposed to native through two binary blob protocols (schema blob + field-value blob), both defined in `src/function/script/ScriptFieldBlob.{hpp,cpp}` and mirrored byte-for-byte in `managed/StellarAlia.ScriptBridge/FieldBlobIO.cs`.
+
+**Data model (`src/function/script/ScriptFieldSchema.hpp`)**:
+
+```cpp
+enum class ScriptFieldKind : uint8_t {
+    Bool=0, Int32=1, Float=2, String=3, Vec2=4, Vec3=5, Vec4=6,
+    AssetRef=16, EntityRef=17, Color=18, Enum=19,
+    Unsupported=255,
+};
+struct ScriptFieldDescriptor {
+    string name, label, typeHint;
+    ScriptFieldKind kind; uint16_t byteSize;
+    // #75 attribute trailer (schema v2):
+    string tooltip, header;
+    bool   hidden;
+    bool   hasRange; float rangeMin, rangeMax;
+};
+struct ScriptClassSchema {
+    string className;
+    vector<ScriptFieldDescriptor> fields;
+    // #75 — C# field initializers (Activator.CreateInstance) used to seed
+    // Inspector defaults when a field is first displayed or new-after-recompile.
+    unordered_map<string, ScriptFieldValue> defaults;
+};
+using ScriptFieldValue = variant<bool, int32_t, float, string,
+                                  vec2, vec3, vec4, AssetID, uint64_t>;
+```
+
+**Wire format** (little-endian, no padding):
+
+```
+Schema blob (GetClassSchemaBlob → DecodeSchema):
+  u16 schemaVersion; str className; u32 fieldCount;
+  field_v1 (sv=1, #74): { str name; u8 kind; str typeHint; u16 byteSize }
+  field_v2 (sv=2, #75): field_v1 + { str tooltip; str header;
+                                      u8 flags (bit0=hidden, bit1=hasRange);
+                                      [f32 rangeMin; f32 rangeMax] if hasRange }
+  Forward-compat: reader switches on schemaVersion; older binaries reading v2
+  blobs ignore the trailer because all v1 fields are length-prefixed.
+
+Field-value blob (ApplyFieldValues / CaptureFieldValues / InjectSingleField /
+                  Defaults blob / .sascene `script.fields` mirror):
+  u32 recordCount;
+  record: { str name; u8 kind; u16 payloadLen; byte payload[payloadLen] }
+  payload by kind: Bool=1B, Int32/Float/Enum=4B, Vec2/3/4=8/12/16B,
+                   String=u16-prefixed utf8, AssetRef=16B uuid (hi LE+lo LE),
+                   EntityRef=8B u64, Color=16B (RGBA float, Vec4-compatible)
+```
+
+**Managed exports** (loaded once at `ScriptSystem::Init`):
+
+| Export | Protocol | Purpose |
+|---|---|---|
+| `GetClassSchemaBlob(classNameUtf8, outBuf, capacity)` | two-step | Build & emit schema blob v2 for a `ScriptBase` type |
+| `GetClassDefaultsBlob(classNameUtf8, outBuf, capacity)` | two-step | `Activator.CreateInstance(type)` + `CaptureFieldValues` — captures the C# `= initializer` values so the Inspector seeds with meaningful defaults |
+| `ApplyFieldValues(entityId, blob, blobLen)` | one-shot | Reflection `FieldInfo.SetValue` per record onto the live instance; mismatched kind/payload → record skipped |
+| `CaptureFieldValues(entityId, outBuf, capacity)` | two-step | Inverse of Apply — read instance fields into a value blob (reserved for future PIE→Edit sync) |
+
+**Recognised C# field types** (`FieldReflector.ResolveKind`):
+
+| C# type | Kind | typeHint |
+|---|---|---|
+| `bool` / `int` / `float` / `string` | Bool / Int32 / Float / String | "" |
+| `Vector2` / `Vector3` / `Vector4` (System.Numerics) | Vec2/3/4 | "" |
+| `StellarAlia.Color` | Color | "" — wire is 4×f32, Inspector renders `ColorEdit4` |
+| `StellarAlia.AssetRef` (16-byte UUID) | AssetRef | from `[AssetType("Mesh")]` attribute, "" if absent |
+| `StellarAlia.Entity` | EntityRef | "" |
+| `enum E : int` | Enum | enum FQN |
+
+**Inspector attributes** (`managed/StellarAlia.Runtime/ScriptAttributes.cs`):
+
+- `[Range(min, max)]` — `SliderInt`/`SliderFloat` replaces Drag
+- `[Tooltip("…")]` — `ImGui::SetTooltip` on hover
+- `[Header("…")]` — `ImGui::SeparatorText` emitted before the field
+- `[HideInInspector]` — field stays in schema (still serialized + InjectFieldValues) but `ScriptDrawer` skips rendering
+- `[SerializeField]` — reserved for future opt-in private-field scanning; currently only `public` instance fields are inspected
+- `[AssetType("Mesh")]` — fills `ScriptFieldDescriptor.typeHint` for AssetRef picker filtering
+
+**EntityRef translation** (`ScriptSystem::InjectFieldValues` / `InjectSingleField`):
+
+`sc.fields["target"]` stores the persistent `EntityIdComponent.sceneLocalId`, but the C# `Entity` struct holds the live `entt::entity` bits. Native translates before encoding the value blob: `scene.FindBySceneLocalId(sceneLocalId) → entt bits`. A missing/freed target encodes as 0 → `Entity.IsValid` returns false on the managed side. The reverse path is reserved for `CaptureFieldValues` (PIE→Edit sync, not yet wired).
+
+**Persistence** (`SceneSerializer`):
+
+`script.fields[]` is a JSON array of `{ name, kind: "<KindName>", value }` records. Color writes as a 4-element JSON array; AssetRef as a UUID string; EntityRef as a u64 (sceneLocalId). Round-trip is lossless for all #75-supported kinds. Pre-#75 scenes with `script` but no `fields` key load with empty `sc.fields` → defaults seed on next Inspector display.
+
+**`scene_local_id` mirror**: each entity JSON gains a `scene_local_id` (u64) field. `Scene::AssignSceneLocalId` restores it on load (and bumps the monotonic counter); pre-#75 scenes auto-assign at load time.
+
+**Recompile migration** (`ScriptSystem::RecompileEditing`):
+
+After `m_fnCompile` + `m_schemaCache.Clear()`, ScriptSystem walks every `ScriptComponent` and reconciles `sc.fields` against the freshly-fetched schema:
+
+- **retained**: name unchanged, variant alternative matches new kind → keep old value
+- **reset**: name unchanged but kind changed (user edited `.cs` field type) → reseed from `schema.defaults`, fall back to kind-zero
+- **dropped**: name no longer in schema → discard, logged as `INFO`
+- **defaulted**: new field in schema → seed from `schema.defaults` (C# initializer) when available, else kind-zero
+
+Counts are logged as a one-line summary per `RecompileEditing` call.
+
+**`ScriptSchemaCache`** is the single owner of decoded schemas. `Clear()` is called on every successful Compile (both `OnPlayStart` and `RecompileEditing`) so stale layouts can't leak across recompiles. Cached entries return raw pointers — stable for the cache's lifetime (`unordered_map` references survive insertion).
+
+**`ScriptApiFunctionTable.version` is NOT bumped by #74/#75** — all reflection exports live outside the table (`LoadAndGet` path), and bumping version would force a managed DLL rebuild whose stale-mismatch failure mode (`AccessViolationException` at runtime) is much harsher than the linkage failure mode of a missing export name. The contract is: lifecycle exports go in the table (versioned), reflection / utility exports are pulled by name (independent).
+
+**Out of #75 scope** (open for follow-up): `List<T>` and nested `[Serializable] struct` field expansion (dot-path schema entries); `Dictionary<K,V>`; UI-extensible custom attributes; `AnimationCurve` editor; MultiObject Edit.
 
 ### Script Log Routing
 
@@ -1025,26 +1167,125 @@ struct RHIMemoryStats {
 
 Used by `PerformancePanel` to display process RAM usage.
 
+### Deferred Resource Destruction (Issue #72)
+
+`VulkanDevice::FreeDescriptorSet`, `DestroyBuffer`, `DestroyTexture` are non-immediate.
+They queue the Vulkan objects into `m_pendingFree[MAX_FRAMES]` (one slot per in-flight
+frame); the RHI handle is invalidated immediately so future lookups return null.
+
+```
+DestroyXxx(handle):
+    handle slot in m_textures / m_buffers / m_descSets → valid = false (immediate)
+    VkObject + VmaAllocation → m_pendingFree[m_frameIdx].push(...)
+
+BeginFrame():
+    vkWaitForFences(fence[m_frameIdx])      ← GPU done with this slot's previous submit
+    FlushPendingFree(m_frameIdx)            ← safe: vkDestroyXxx / vmaDestroy / vkFreeDescriptorSets
+
+WaitIdle():
+    vkDeviceWaitIdle                         ← every fence drained
+    FlushPendingFree(0..MAX_FRAMES-1)        ← flush every slot
+
+~VulkanDevice():
+    WaitIdle()                               ← drain pending before pool/allocator teardown
+```
+
+This eliminates `vkFreeDescriptorSets in-use` / `vkDestroyImage in-use` validation
+errors when materials, draw items, or skin entries are released during scene transitions
+or per-frame state updates. Aligned with UE5's `FRHIResource::DeferredDelete` pattern.
+
+### Additional RHI Surface
+
+| API | Purpose |
+|-----|---------|
+| `IRHIDevice::CreateBindlessTextureLayout(capacity)` | Builds a fixed-size sampler2D-array layout with `UPDATE_AFTER_BIND` + `PARTIALLY_BOUND` flags. Used once by `BindlessTextureHeap`. |
+| `IRHIDevice::WriteDescriptorTextureArray(ds, binding, arrayElement, tex)` | Writes a specific element of a sampler array. Used by `BindlessTextureHeap::Register/Release`. |
+| `IRHIDevice::WriteDescriptorBuffer(..., dynamic)` | New `dynamic=true` overload writes `STORAGE_BUFFER_DYNAMIC` (or `UNIFORM_BUFFER_DYNAMIC`) descriptor type to match the bound layout slot. |
+| `IRHIDevice::GetMinStorageBufferOffsetAlignment()` | Used by `MaterialParamRing` to align bump-allocator offsets. |
+| `IRHICommandList::SetDescriptorSet(set, ds, dynamicOffsets={})` | Optional `std::span<const uint32_t>` parameter forwards to `vkCmdBindDescriptorSets`' dynamic-offset array. |
+
+### Bindless Vulkan Features
+
+`VulkanDevice::InitDevice` enables (Vulkan 1.2 core):
+- `runtimeDescriptorArray`
+- `descriptorBindingPartiallyBound`
+- `shaderSampledImageArrayNonUniformIndexing`
+- `descriptorBinding*UpdateAfterBind` (UBO/Sampled/Storage)
+
+Descriptor pool sizing (`InitDescriptorPool`) reserves 4608 combined-image-sampler
+descriptors (covers the 4096-slot bindless heap + per-MaterialType legacy bindings) and
+64 `STORAGE_BUFFER_DYNAMIC` for the per-frame MaterialParamRing.
+
 ---
 
 ## Resource Layer — Material System
 
-### MaterialInstance Data Flow
+### Set Layout Convention (Issue #72, aligned with UE5 / Unity HDRP)
 
 ```
-material->SetFloat("roughnessFactor", 0.5f)
-    │
-    ▼  lookup MaterialType::params["roughnessFactor"] → { offset, size }
-    ▼  memcpy into uboData[]; dirty = true
+set=0  BindlessTextureHeap   ← bound 1× per cmd buffer (engine-wide stable)
+set=1  FrameUniforms          ← bound 1× per pass
+set=2  MaterialParams SSBO    ← per-draw via dynamic offset into MaterialParamRing
+set=3  Skin / per-object      ← per-skinned-draw (only on skinned pipelines)
+```
 
+Lower set index = more stable. Vulkan layout compatibility cascades from set=0 upward,
+so placing the most stable resource (bindless heap) at set=0 means it survives all
+pipeline switches without invalidation. Skin at the highest set ensures per-entity bone
+changes don't cascade-invalidate frame / material bindings.
+
+### MaterialType paths (SSBO+bindless vs legacy UBO)
+
+The `usesMaterialParamsSSBO` flag on `MaterialType` selects the path, detected from
+SPIR-V reflection at registration time:
+
+| Detection | Path | Per-draw cost | Texture override cost |
+|-----------|------|---------------|-----------------------|
+| set=2 binding=0 is `StorageBuffer` named `MaterialParams` | **SSBO + bindless** | memcpy 80B blob into ring + 1× `vkCmdBindDescriptorSets` with dynamic offset | `heap.Register(tex)` (deduped) writes 1 uint to blob |
+| Otherwise | **Legacy UBO** | `Bind()` rebinds the per-instance desc set | `CloneInstance` + per-entity descriptor set |
+
+The MaterialParams SSBO block has a hard convention: members named `t_*_Idx` (uint = 4 B)
+are bindless texture indices; other members are scalar params. ShaderCookLib reflection
+splits them into `ParamDef[]` and `TextureDef[]` (with `uboBlobOffset`).
+
+### MaterialInstance Data Flow
+
+**SSBO+bindless path** (PBR / built-in mesh materials):
+
+```
+asset load → MaterialManager::LoadMaterial:
+    type->CreateInstance(device, defaultTex):
+        allocate descSet from set=2 layout (binding=0 = STORAGE_BUFFER_DYNAMIC)
+        m_paramBlob = default values (params + t_*_Idx defaults = 0 = white)
+    WireSSBODescriptor:
+        WriteDescriptorBuffer(descSet, 0, MaterialParamRing.buffer, dynamic=true)
+    SetTexture(name, texHandle):
+        heap.Register(tex) → bindlessIdx (deduped)
+        memcpy bindlessIdx → m_paramBlob[TextureDef::uboBlobOffset]
+
+BuildDrawList per entity:
+    blob = base->paramBlob              ← copy of asset baseline
+    for (name, val) in matOverride.scalars: memcpy val → blob[ParamDef::offset]
+    for (name, texID) in matOverride.textures:
+        tex = resMgr->LoadTexture(texID); idx = heap.Register(tex)
+        memcpy idx → blob[TextureDef::uboBlobOffset]
+    item.materialUboOffset = materialRing.Allocate(blob.data(), blob.size())
+
+Render execute:
+    SetDescriptorSet(0, bindlessSet)    once per pass
+    SetDescriptorSet(1, frameSet)       once per pass
+    SetDescriptorSet(2, mat->descSet, {&item.materialUboOffset, 1})   per draw
+    SetDescriptorSet(3, skinDescSet)    per skinned draw
+    DrawIndexed
+```
+
+**Legacy UBO path** (project `.saglsl` shading models, post-fx materials, etc.):
+
+```
+material->SetFloat / SetTexture → memcpy CPU blob, mark dirty
 material->Bind(cmd):
-    │
-    ├─ if dirty → flush()
-    │    upload uboData → GPU UBO buffer
-    │    vkUpdateDescriptorSets (texture descriptors)
-    │    dirty = false
-    │
-    └─ vkCmdBindDescriptorSets(set=1, descriptorSet)
+    if dirty: upload UBO + write texture descriptors
+    SetDescriptorSet(2, m_descSet)
 ```
 
 ### ShaderProgram
@@ -1052,14 +1293,22 @@ material->Bind(cmd):
 Compiled VS+FS pair. Manages:
 - `RHIShaderHandle` vert + frag
 - Merged `ShaderReflection` (stage flags OR-ed)
-- `RHIDescLayoutHandle` for set=1 (material-specific, from reflection)
+- 4 slot layouts:
+  - slot 0 = `m_bindlessLayout` — passed in via `Desc::bindlessLayout`, always wired
+    (engine-wide convention) even when shader doesn't access set=0; this keeps slot 0
+    layout-compatible across all pipelines so set=0 binding survives pipeline switches
+  - slot 1 = `m_frameLayout` — passed in via `Desc::frameLayout`
+  - slot 2 = `m_materialLayout` — derived from reflection set=2 (or empty if shader has no set=2)
+  - slot 3 = `m_set3Layout` — derived from reflection set=3 (skin, only set when shader uses set=3)
 - Pipeline cache: `AttachmentKey → RHIPipelineHandle` (lazy, per RT format combo)
 
-```
-Descriptor set convention (graphics):
-  set=0  per-frame globals (FrameUniformsBuffer)
-  set=1  per-material params (MaterialInstance / ShaderProgram)
-```
+### SSBO_DYN promotion
+
+`VulkanDevice::CreateDescriptorSetLayout` promotes a `StorageBuffer` at set=2 binding=0
+named `MaterialParams` to `STORAGE_BUFFER_DYNAMIC` (SPIR-V reflection cannot express the
+"dynamic" suffix). Dynamic-descriptor layouts cannot coexist with `UPDATE_AFTER_BIND_BIT`
+(spec VUID-03001 / VUID-03011) — the layout creator detects any dynamic binding in the
+set and drops UAB for that layout only.
 
 ### ComputeProgram
 
@@ -1080,6 +1329,14 @@ class ComputeProgram {
 ```
 Init(IRHIDevice*, ResourceManager*)
     // ResourceManager provides BuiltinTexture::White1x1 for unset slots.
+    // Creates BindlessTextureHeap (4096 slots, set=0); slot 0 = default white.
+
+SetMaterialParamRingBuffer(RHIBufferHandle)
+    // Called once by SceneRenderer::Init after MaterialParamRing.Init succeeds.
+    // Every SSBO-path MaterialInstance's set=2 binding=0 will be wired to this buffer.
+
+GetTextureHeap() → BindlessTextureHeap&   // set=0 sampler array (4096 slots, deduped)
+GetMaterialParamRingBuffer() → RHIBufferHandle
 
 RegisterTypeFromShaders(MaterialTypeDesc, FeatureInitContext)
     //   struct MaterialTypeDesc {
@@ -1088,6 +1345,9 @@ RegisterTypeFromShaders(MaterialTypeDesc, FeatureInitContext)
     //       bool depthTest  = true;
     //       bool depthWrite = true;
     //   };
+    // Reflection inspects set=2 binding=0:
+    //   - StorageBuffer named "MaterialParams" → SSBO+bindless path (usesMaterialParamsSSBO=true)
+    //   - otherwise → legacy UBO path
 
 LoadMaterial(AssetID, ResourceManager&) → MaterialInstance*  (cached; VFS paths set centrally)
 CloneInstance(MaterialInstance*) → unique_ptr<MaterialInstance>       (non-cached copy)
@@ -1095,8 +1355,40 @@ ClearProjectInstances()  — evict m_cachedInstances on project switch; preserve
 Shutdown()
 ```
 
-`CloneInstance` is used by the render system to produce per-entity material copies
-that receive `MaterialOverrideComponent` overrides.
+`CloneInstance` is now used only by the legacy UBO path for per-entity overrides on
+non-SSBO MaterialTypes. SSBO+bindless materials never clone — overrides are applied
+to a per-draw blob in `MaterialParamRing`.
+
+### MaterialParamRing
+
+```cpp
+class MaterialParamRing {                          // src/function/material/
+    bool Init(IRHIDevice*, uint64_t bytesPerFrame = 2 MiB);
+    void Reset();                                   // BeginFrame
+    uint32_t Allocate(const void* blob, uint32_t size);  // returns dynamic offset
+};
+```
+
+- 2 MiB cpu-visible SSBO, bump allocator
+- Alignment = `device->GetMinStorageBufferOffsetAlignment()` (typically 16 B on NV/AMD)
+- Fail-loud on capacity exhaustion (returns `kInvalidOffset` + `SA_LOG_ERROR`)
+- Per-frame `Reset()` called from `SceneRenderer::RenderFrame` entry
+
+### BindlessTextureHeap
+
+```cpp
+class BindlessTextureHeap {                        // src/function/material/
+    bool Init(IRHIDevice*, RHITextureHandle defaultTex, uint32_t capacity = 4096);
+    uint32_t Register(RHITextureHandle tex);        // deduped by tex handle index
+    void     Release(uint32_t slot);
+};
+```
+
+- Single set=0 desc set with 4096-slot sampler2D array (`UPDATE_AFTER_BIND` +
+  `PARTIALLY_BOUND` flags via dedicated `CreateBindlessTextureLayout` RHI call)
+- Slot 0 reserved for default white texture (`kInvalid` sampling falls back to white)
+- Dedup: same `RHITextureHandle.index` returns the previously-assigned slot — no waste
+  when many materials share the same texture; safe to call `Register` per BuildDrawList
 
 ---
 
@@ -1226,7 +1518,7 @@ collapsing header (imported + transient counts/MB, physical vs logical savings, 
 
 ## Compute Pipeline & ComputeProgram
 
-### Frame Uniforms (set=0) Bindings
+### Frame Uniforms (set=1) Bindings
 
 ```
 binding=0  FrameData UBO    — camera matrices, time, resolution, SH9 irradiance, TAA jitter/prevViewProj (640 bytes)
@@ -1675,12 +1967,26 @@ Each drawer lives in its own `.hpp`/`.cpp` file under `editor/ui/drawers/`:
 | `MaterialOverrideDrawer` | `MaterialOverrideComponent` |
 | `RigidBodyDrawer` | `RigidBodyComponent` |
 | `ColliderDrawer` | `ColliderComponent` |
-| `ScriptDrawer` | `ScriptComponent` — script path + class name fields |
+| `ScriptDrawer` | `ScriptComponent` — Script asset picker + optional `className` override; **schema-driven** fields via `ScriptSystem::GetSchemaFor` (#74). Editable kinds: Bool / Int32 / Float / Vec2/3/4 / String (#74); Color (ColorEdit3/4), AssetRef (picker + SAASSET drop, type-filtered by `[AssetType]`), EntityRef (picker + SAENTITY drop, fallback "(missing #N)") (#75). Honours `[Range]`/`[Tooltip]`/`[Header]`/`[HideInInspector]`. Edits write `sc.fields`, seeded from C# `= initializer` defaults on first display; in Play mode each change `InjectSingleField`-deltas back to the live instance |
 
-Shared inline helpers (`DrawAssetIDField`, `RemoveButton`, `HeaderFlags`) live in
-`editor/ui/drawers/DrawerHelpers.hpp`. The monolithic `editor/ui/ComponentDrawers.hpp`
-is deleted. Registration order in `BuildContext` equals the display order in the
-Inspector.
+Shared inline helpers (`DrawAssetIDField`, `AcceptAssetIDDrop`, `TrackedFieldEdit<T>`,
+`RemoveButton`, `HeaderFlags`) live in `editor/ui/drawers/DrawerHelpers.hpp`. The
+monolithic `editor/ui/ComponentDrawers.hpp` is deleted. Registration order in
+`BuildContext` equals the display order in the Inspector.
+
+**`TrackedFieldEdit<T, DrawFn>(target, ctx, desc, draw, onApplied={})`** — wraps a single
+ImGui control so its edit becomes a single undoable `SetFieldCommand<T>`. The closure
+mutates `*target` directly; `TrackedFieldEdit` snapshots the pre-edit value on
+`IsItemActivated`, captures the post-edit value on `IsItemDeactivatedAfterEdit`, and
+pushes the command (continuous drags collapse into one record). `onApplied` is forwarded
+into the command and re-fires on Execute/Undo — used by `TransformDrawer` to keep
+`MarkDirty + MarkMaterialDirty` synced when the user undoes a transform edit.
+
+**`AcceptAssetIDDrop(outId, filterType, ctx, desc, onApplied={})`** — drop target for
+the `"SAASSET"` payload from `AssetsPanel`. Filters by `AssetEntry::type`, writes
+`AssetID` into `outId`, and pushes a `SetFieldCommand<AssetID>` (drag-in becomes
+undoable). Used by `ScriptDrawer`; other drawers' `AssetID` fields still go through the
+in-popup picker via `DrawAssetIDField`.
 
 `InspectorPanel` no longer owns a `vector<IComponentDrawer>` — it delegates
 `DrawEntityInspector` to `ctx.drawerRegistry->DrawAll(...)`.
@@ -1801,6 +2107,7 @@ Built-in commands (`editor/command/commands/`):
 | `ReparentEntityCommand` | Restores old parent + sibling order |
 | `TransformCommand` | Stores pre/post `TransformComponent`; writes back on Undo/Redo |
 | `CreateMeshEntityCommand` | Destroys on Undo; re-creates on Redo |
+| `SetFieldCommand<T>` | Generic single-field set (`bool`, `int`, `float`, `glm::vec2/3/4/quat`, `std::string`, `AssetID`); takes `T* target`, `oldValue`, `newValue`, optional `onApplied` callback re-fired on Execute/Undo for downstream dirty propagation; used by `TrackedFieldEdit` / `AcceptAssetIDDrop` to make every Inspector scalar edit and asset drop undoable |
 
 ### Systems Owned by EditorMode
 
@@ -1849,25 +2156,40 @@ Built-in commands (`editor/command/commands/`):
 
 ### Project Management
 
-`EditorMode::LoadProject(saprojectPath)` is the single entry point for a project switch at runtime:
+`EditorMode::LoadProject(saprojectPath)` handles project **switch** at runtime; `EditorMode::OnAttach` handles the **initial** load. Both delegate the filesystem-level pipeline (scan + script compile + scene load) to `LoadProjectFiles(projectDir)`:
+
+```
+LoadProjectFiles(projectDir) → optional<SaProject>:
+  scriptWatcher.Watch(projectDir/"assets"); m_pendingRecompile = false
+  assetRegistry.Scan(projectDir/"assets", engineAssetsDir)
+  scriptSystem.RecompileEditing(reg)  — compile every .cs so Inspector schema is ready
+  if (m_assetsPanel) m_assetsPanel->UpdateProjectDir(...)  — null during initial OnAttach
+  locate .saproject; LoadSaProject; SceneSerializer::LoadFromFile(startupScene)
+  return parsed SaProject (nullopt when no .saproject found)
+```
+
+`LoadProject` wraps `LoadProjectFiles` with switch-only steps:
 
 ```
 1. Guard: return if PlayState != Editing
 2. scene.Clear(); m_currentScenePath = {}
-3. app.UpdateProjectPaths(projectDir, projectDir/"cook_cache")
+3. ShaderCook for project .saglsl (if any) → cook_cache/shaders/
+4. app.UpdateProjectPaths(projectDir, projectDir/"cook_cache")
    → propagates to VFS (SetCookCacheDir) + SceneRenderer (SetCookCacheDir)
-3.5. resMgr.ClearProjectAssets()     — WaitIdle + destroy GPU textures/meshes/CPU caches
-     matMgr.ClearProjectInstances()  — evict cached MaterialInstances; types survive
-     m_diagnostics.ClearSource(Runtime) — clear stale runtime warnings from previous project
-4. m_assetRegistry->Scan(projectDir/"assets", engineAssetsDir)
-5. m_assetsPanel->UpdateProjectDir(projectDir/"assets")
-6. LoadSaProject → load startupScene (warns if missing, continues with empty scene)
+5. resMgr.ClearProjectAssets()     — WaitIdle + destroy GPU textures/meshes/CPU caches
+   matMgr.ClearProjectInstances()  — evict cached MaterialInstances; types survive
+   renderer.ResetProjectIBL()
+   renderer.ApplyProjectShaderTypes(cookedShaderDir)  — GPU hot-swap
+   m_diagnostics.ClearSource(Runtime)
+6. LoadProjectFiles(projectDir)  ← shared with OnAttach
 7. renderer.ApplyWorldSettings(scene.GetWorldSettings())
 8. PrepareAnimatedEntities + RebuildDrawList
 9. m_projectManager.AddRecent + SaveRecents
 10. Cook-cache check: if cook_cache/ empty (ignoring .gitkeep) AND assets/ has .sameta files →
     m_diagnostics.Push(Warning, Runtime, "…run Reimport All…")
 ```
+
+`OnAttach` differs: no clear/cook step (nothing to clear) and the panel-registration phase runs **after** `LoadProjectFiles` returns — that's why `UpdateProjectDir` is gated on `m_assetsPanel != nullptr` inside the helper.
 
 `ProjectBrowserPanel` is not an `IEditorWindow` — it is owned by `EditorMode` as a
 `unique_ptr<ProjectBrowserPanel>` and driven directly from `OnRenderUI` after `NewFrame()`.
@@ -1903,7 +2225,7 @@ clicking on a scaled entity in the viewport always uses the updated AABB.
 `EditorMode::HandleViewportInteraction()` is called from `OnRenderUI` after `DrawImGuizmo`. It:
 1. Creates a transparent full-screen `##viewport_interact` ImGui window (`NoBringToFrontOnFocus | NoFocusOnAppearing | NoDocking`) as a drop target and picking receiver
 2. Calls `ImGuizmo::SetAlternativeWindow(currentWindow)` so ImGuizmo's `IsHoveringWindow()` check accepts this window as valid — without this, the full-screen overlay makes `g.HoveredWindow` non-null and non-gizmo, causing `mbMouseOver=false` and disabling all gizmo handle hit-tests
-3. `BeginDragDropTarget` — accepts `"SAASSET"` `.glb/.gltf` drops; computes world spawn position via `RayHitHorizontalPlane(ray, 0)` (or 10-unit fallback), calls `SceneHierarchyPanel::TriggerAssetDrop(path, spawnPos)`
+3. `BeginDragDropTargetCustom(win->Rect(), win->ID)` — accepts `"SAASSET"` `.glb/.gltf` drops (vanilla `BeginDragDropTarget` is no-op here since the overlay window submits no item); reads the typed `AssetDragPayload`, computes world spawn position via `RayHitHorizontalPlane(ray, 0)` (or 10-unit fallback), calls `SceneHierarchyPanel::TriggerAssetDrop(path, spawnPos)`
 4. Left-click picking: guarded by `!m_gizmoIsUsing && !ImGuizmo::IsOver() && IsWindowHovered()`; fires `SceneRenderer::RaycastScene(ray)` → `SceneHierarchyPanel::SetSelection(e)` or `ClearSelection()`, which in turn write into `EditorSelection`
 
 `ScreenToWorldRay(sx, sy)` unprojects NDC via `inverse(proj * view)` at depth 0 and 1; `cam.proj` already has the Vulkan Y-flip so `ndcY = (sy/sh)*2−1` is used directly.
@@ -1964,14 +2286,28 @@ compatibility errors when callers issue `SetDescriptorSet` before `SetPipeline`.
 Compute pipelines have no render targets. One `VkComputePipeline` per shader,
 created on first call to `GetPipeline()`.
 
-### Descriptor Set Convention
+### Descriptor Set Convention (Issue #72)
 ```
-set=0  per-frame globals     (FrameUniformsBuffer — bound before any pass)
-set=1  per-material params   (MaterialInstance::Bind())
-set=2  per-entity skinning   (GPU skinning passes only: binding0 = SkinMatrices SSBO, binding1 = SkinData SSBO)
+set=0  BindlessTextureHeap   (4096 sampler2D, bound 1× per cmd buffer)
+set=1  FrameUniforms          (per-frame camera/light/IBL, bound 1× per pass)
+set=2  MaterialParams SSBO    (per-draw via dynamic offset into MaterialParamRing,
+                               OR per-instance UBO for legacy MaterialTypes)
+set=3  Skin                   (per-skinned-draw: binding0 = SkinMatrices SSBO,
+                               binding1 = SkinData SSBO)
 ```
-ComputeProgram owns all its sets; set=0 may be a caller-supplied frame layout.
-Set=2 is only bound for `isSkinned` draw items; static mesh pipelines declare no set=2 layout.
+Aligned with UE5 / Unity HDRP — most stable resource at lowest set index. Set=0 layout
+is engine-wide identical (every pipeline carries the bindless heap layout in slot 0
+whether or not its shader samples bindless), keeping set=0/1 bindings alive across all
+pipeline switches.
+
+ComputeProgram is independent: it owns all its sets directly from reflection and does
+not follow the mesh-rendering set convention. Compute shaders typically use set=0 for
+their own bindings without conflict.
+
+Set=2 layout differs per shader (SSBO_DYN for PBR vs UBO for legacy SimpleAlbedo); set=3
+is only present on skinned pipelines. Layout differences at set=N invalidate bindings
+for sets N..max, so non-skinned pipelines never disturb set=3 and the SSBO/UBO material
+divergence only affects set 2..3.
 
 ### HierarchyComponent Is Optional
 Only parented entities carry `HierarchyComponent`. Child ordering within a parent
@@ -2076,14 +2412,15 @@ engine defaults when UUIDs collide.
 `skinDataBuffer` (joints+weights SSBO). These are per-asset, cached by `AssetID`, and shared
 across all entity instances that reference the same mesh. `SkinnedMeshComponent` holds only
 per-entity state: `skinMatricesBuffer` (bone transforms, ~3 KB, updated each frame) and
-`skinDescSet` (set=2 binding the per-entity matrices and per-asset skin data). This eliminates
+`skinDescSet` (set=3 binding the per-entity matrices and per-asset skin data). This eliminates
 N×VRAM waste when multiple entities share the same animated mesh.
 
 ### skin_deform.glsl — Shared GPU Skinning Include
-`assets/shaders/skin_deform.glsl` declares the `SkinVertex` struct, the set=2 SSBO bindings
+`assets/shaders/skin_deform.glsl` declares the `SkinVertex` struct, the set=3 SSBO bindings
 (`SkinMatrices` + `SkinData`), and the `SkinMatrix()` helper function. All three skinned vertex
 shaders (`deferred_geometry_skinned.vert`, `shadow_skinned.vert`, `selection_mask_skinned.vert`)
-include it, avoiding duplicated bone-blend logic across passes.
+include it, avoiding duplicated bone-blend logic across passes. Skin lives at the highest set
+index (Issue #72) so per-entity bone changes don't cascade-invalidate lower-set bindings.
 
 ### ProjectBrowserPanel Is Not an IEditorWindow
 `IEditorWindow` panels are registered with `EditorUI` and appear in the Windows menu;

@@ -43,6 +43,7 @@ public:
 
     RHIDescLayoutHandle CreateDescriptorSetLayout(const ShaderReflection& merged,
                                                   uint32_t set) override;
+    RHIDescLayoutHandle CreateBindlessTextureLayout(uint32_t capacity) override;
     RHIPipelineHandle   CreatePipeline(const RHIPipelineDesc& desc) override;
     RHIPipelineHandle   CreateComputePipeline(const RHIComputePipelineDesc& desc) override;
 
@@ -50,6 +51,9 @@ public:
     void FreeDescriptorSet(RHIDescSetHandle ds) override;
     void WriteDescriptorTexture(RHIDescSetHandle ds, uint32_t binding,
                                 RHITextureHandle texture) override;
+    void WriteDescriptorTextureArray(RHIDescSetHandle ds, uint32_t binding,
+                                     uint32_t arrayElement,
+                                     RHITextureHandle texture) override;
     void WriteDescriptorStorageImage(RHIDescSetHandle ds, uint32_t binding,
                                      RHITextureHandle texture) override;
     void WriteDescriptorStorageImageMip(RHIDescSetHandle ds, uint32_t binding,
@@ -58,7 +62,8 @@ public:
     void WriteDescriptorBuffer(RHIDescSetHandle ds, uint32_t binding,
                                RHIBufferHandle buffer,
                                uint64_t offset = 0,
-                               uint64_t range  = ~0ull) override;
+                               uint64_t range  = ~0ull,
+                               bool     dynamic = false) override;
 
     void UploadBufferData(RHIBufferHandle buffer, const void* data,
                           uint64_t size, uint64_t offset = 0) override;
@@ -92,6 +97,10 @@ public:
     uint32_t         GetSwapchainHeight()           override;
     void             ResizeSwapchain(uint32_t width, uint32_t height) override;
     uint32_t         GetCurrentFrameIndex() const   override { return m_frameIdx; }
+
+    uint32_t         GetMinStorageBufferOffsetAlignment() const override {
+        return static_cast<uint32_t>(m_minStorageBufferOffsetAlignment);
+    }
 
     // ── ImGui integration ─────────────────────────────────────────────────────
     // Raw Vulkan handles required to initialise imgui_impl_vulkan.
@@ -144,6 +153,11 @@ private:
     void DestroyFrameData();
     void RecreateSwapchain();
 
+    // Issue #72 Step 7.5: drain deferred Vulkan resource destructions queued
+    // during the previous use of slot `slot`. Caller must have waited for
+    // m_frames[slot].fence already (BeginFrame does this).
+    void FlushPendingFree(uint32_t slot);
+
     // Allocate a slot in m_textures and return its handle.
     RHITextureHandle AllocTextureSlot(VkImage image, VkImageView view,
                                       VmaAllocation alloc,
@@ -162,6 +176,9 @@ private:
     VkQueue                  m_graphicsQueue   = VK_NULL_HANDLE;
     uint32_t                 m_graphicsFamily  = 0;
     VkDebugUtilsMessengerEXT m_debugMessenger  = VK_NULL_HANDLE;
+
+    // Cached physical-device limits (queried in InitDevice).
+    VkDeviceSize             m_minStorageBufferOffsetAlignment = 16;
 
     // ── Surface + Swapchain ───────────────────────────────────────────────────
     VkSurfaceKHR   m_surface              = VK_NULL_HANDLE;
@@ -259,6 +276,22 @@ private:
     // One renderDone semaphore per swapchain image to avoid semaphore reuse
     // while the presentation engine still holds a reference to it.
     std::vector<VkSemaphore> m_renderDoneSems;
+
+    // Issue #72 Step 7.5: per-frame deferred destruction queues. A resource
+    // queued during slot N's recording is freed when we return to slot N (after
+    // its fence is waited), guaranteeing the GPU has finished using it.
+    struct PendingImage {
+        VkImage                  image    = VK_NULL_HANDLE;
+        VmaAllocation            alloc    = VK_NULL_HANDLE;
+        VkImageView              view     = VK_NULL_HANDLE;
+        std::vector<VkImageView> mipViews;
+    };
+    struct PendingFree {
+        std::vector<VkDescriptorSet>                    descSets;
+        std::vector<std::pair<VkBuffer, VmaAllocation>> buffers;
+        std::vector<PendingImage>                       images;
+    };
+    PendingFree m_pendingFree[MAX_FRAMES];
 
     uint32_t m_frameIdx = 0;   // current in-flight slot [0..MAX_FRAMES-1]
     uint32_t m_imageIdx = 0;   // acquired swapchain image index

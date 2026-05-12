@@ -6,7 +6,7 @@
 #include "pbr.glsl"
 
 // ── set=1 Material parameters ─────────────────────────────────────────────────
-layout(set = 1, binding = 0) uniform MaterialParams {
+layout(set = 2, binding = 0) uniform MaterialParams {
     vec4  baseColorFactor;   // @Color4("Base Color") = 1,1,1,1
     float roughnessFactor;   // @Range(0.0, 1.0, "Roughness") = 0.5
     float metallicFactor;    // @Range(0.0, 1.0, "Metallic") = 0.0
@@ -16,11 +16,11 @@ layout(set = 1, binding = 0) uniform MaterialParams {
     float emissiveIntensity;    // @Range(0.0, 50.0, "Emissive Intensity") = 1.0
 } u_Mat;
 
-layout(set = 1, binding = 1) uniform sampler2D t_BaseColor;         // @Texture("Albedo Map")
-layout(set = 1, binding = 2) uniform sampler2D t_Normal;             // @Texture("Normal Map")
-layout(set = 1, binding = 3) uniform sampler2D t_MetallicRoughness; // @Texture("Metallic Roughness")
-layout(set = 1, binding = 4) uniform sampler2D t_Occlusion;         // @Texture("Occlusion Map")
-layout(set = 1, binding = 5) uniform sampler2D t_Emissive;          // @Texture("Emissive Map")
+layout(set = 2, binding = 1) uniform sampler2D t_BaseColor;         // @Texture("Albedo Map")
+layout(set = 2, binding = 2) uniform sampler2D t_Normal;             // @Texture("Normal Map")
+layout(set = 2, binding = 3) uniform sampler2D t_MetallicRoughness; // @Texture("Metallic Roughness")
+layout(set = 2, binding = 4) uniform sampler2D t_Occlusion;         // @Texture("Occlusion Map")
+layout(set = 2, binding = 5) uniform sampler2D t_Emissive;          // @Texture("Emissive Map")
 
 // ── Inputs from vertex stage ──────────────────────────────────────────────────
 layout(location = 0) in vec3 v_WorldPos;

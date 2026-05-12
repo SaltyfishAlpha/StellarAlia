@@ -24,7 +24,7 @@
 //   inner    d,e,i,j        : 0.125
 //   center   g              : 0.125    (appears in all four outer groups)
 
-layout(set = 1, binding = 0) uniform sampler2D t_Input;
+layout(set = 2, binding = 0) uniform sampler2D t_Input;
 
 layout(location = 0) in  vec2 v_UV;
 layout(location = 0) out vec4 out_Color;

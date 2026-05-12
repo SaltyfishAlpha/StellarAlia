@@ -14,6 +14,8 @@
 54. **[低优先级，待复现] Reimport 后内存缓存未失效导致 mesh 显示异常** — Reimport 更新 cook cache 磁盘数据后，`ResourceManager` 按 UUID 缓存的 GPU mesh handle 未刷新，渲染仍用旧数据；重启后缓存清空才恢复正常。根因：`ReimportDir` 完成后未调用 `ClearProjectAssets()`。修复方向：reimport 完成时触发 `ResourceManager::ClearProjectAssets()`（同 Issue #38 逻辑，触发时机改为 reimport 后）。现象：曾在 BoomBox.glb（带动画）上观察到固定面片破碎，无法稳定复现。
 23. 程序化天空盒，选择一个物体作为光源方向
 22. 调试渲染：面片id着色，lod着色，随机着色，depth着色...
+73. **[低优先级] .saglsl shading model 迁移到 SSBO+bindless 路径** — #72 后内置 PBR 走 SSBO+bindless 零 per-entity desc set 分配，但项目 `.saglsl` shading models（如 SimpleAlbedo / SimpleRoughness）cook 出来的 `*.gbuffer.frag` 仍声明 `set=2 uniform MaterialParams`（UBO 路径）。`MaterialOverrideComponent` 用在这些 type 上时仍走 `CloneInstance` legacy 路径——比改前好（延迟销毁队列兜底），但还是有 per-entity desc set 分配。改法：更新 `ShaderCookLib` / `NewShader.saglsl` 模板把声明改成 `std430 readonly buffer MaterialParams` + `t_*_Idx` uint 索引；reflection 触发 `usesMaterialParamsSSBO=true`，自动复用 ring + bindless 通道。
+74. **[低优先级] 编辑器全局 NOMINMAX** — editor 目标在某些 cpp（含 user WIP 的 drawers）经过 Windows.h 后 `std::numeric_limits<uint32_t>::max()` 被宏污染编译失败。修法：editor PCH 或 CMakeLists 加 `target_compile_definitions(... PRIVATE NOMINMAX)` 全局生效。
 
 ---
 
@@ -1348,13 +1350,18 @@ public static class InputAction {
 | 多 .sainputmap 自动 push 策略 | 只 push 扫描到的第一个 map；后续 issue 可暴露 `InputAction.Push/Pop(name)` 给脚本 |
 | 不做：AssetRef::FromPath() | 需 AssetRegistry 查询，留后续 issue |
 | 不做：StaticMesh_SetAssetUUID | 运行时换 mesh 需重新上传 GPU buffer，复杂度高 |
-| 不做：MaterialOverride 纹理槽 | 涉及 GPU 描述符更新，留后续 issue |
+| ~~不做：MaterialOverride 纹理槽~~ → **已通过 #72 解锁** | 渲染侧：bindless heap 索引在 ring blob 里（PBR SSBO 路径）或 `clone->SetTexture` 写 desc set（legacy 路径）。脚本 API `MaterialOverrideProxy.SetTexture(slot, AssetRef)` 待 #71 实现层补完 |
 
 ### 受益 issues
 
 - **#33**（贝塞尔曲线相机）：`InputAction.ReadVec2("Look")` + MeshProxy 是脚本驱动相机和换材质的基础工具
 - **#69**（脚本库）：AssetRef 类型可回头补充 AnimatorProxy 的 clip 换用功能
 - **#70**（游戏发布）：`.sainputmap` 随项目资产打包，GameMode 无需内置硬编码的 input map 定义
+
+---
+
+## Issue #72 — Material Override 重构：MPB 风格 + SSBO 动态偏移 + Bindless 贴图堆 ✅ DONE
+<!-- set 编排对齐 UE5/Unity HDRP：set=0 BindlessTextureHeap (4096 槽 sampler array)，set=1 FrameUniforms，set=2 MaterialParams SSBO_DYN + per-frame MaterialParamRing (2 MiB)，set=3 Skin。PBR 走 SSBO+bindless 零 per-entity desc set 分配；legacy UBO 路径保留供 .saglsl shading model 沿用。SPIR-V reflection 在 set=2 binding=0 检测 "MaterialParams" 自动启用 SSBO 路径，`t_*_Idx` 字段作 bindless 索引。VulkanDevice 加 deferred-destroy 队列（per-frame slot trash bin）替换即时 vkFree/vmaDestroy，根除 in-flight 资源回收 validation 错误。 -->
 
 ---
 
@@ -1429,3 +1436,120 @@ public static class InputAction {
 ## Cross-dir Vertex Shader Resolution for Project Material Types ✅ DONE
 <!-- FeatureInitContext 新增 engineShaderDir；MaterialManager::RegisterTypeFromShaders 用 resolve() lambda 先 ctx.shaderDir 后 engineShaderDir 查找 SPV/.refl，修正项目 .saglsl 引用 deferred_geometry.vert 时跨目录的路径解析。 -->
 
+---
+
+## Script Inspector 三连规划（#73 / #74 / #75）— 概览
+
+目标：让 C# 脚本的字段像 Unity 那样出现在 Inspector，并支持拖拽资源/实体引用、Undo、热重载字段保活。
+
+按 **P4（C# 字段反射）** 为界切割成三个 issue：
+- **#73 — 前置基础设施**（O1 + P1 + P2）：字段级 Undo 框架、`SAASSET` 拖拽 payload 改用 AssetID、`.cs` 资源化（`.cs.sameta` + `ScriptComponent.scriptId`）。
+- **#74 — 字段反射核心**（P4 完整）：C# 反射扫描脚本字段、生成跨界 schema、`ScriptComponent` 携带字段值容器、Inspector 用 schema 渲染并能编辑标量字段（来回 IPC 通）。
+- **#75 — 字段类型与序列化扩展**（P5 + P6 + O2 + P3 + O3）：.sascene 序列化字段值、热重载按名 patch、AssetRef/EntityRef/Color/Enum 字段类型、`[Range]/[Tooltip]/[Header]/[HideInInspector]`、`List<T>` 与嵌套 struct。
+
+依赖：#74 依赖 #73；#75 依赖 #74。#68 ComponentSchema 与本规划独立但 FieldType / FieldDef 设计可对齐，#75 可考虑统一 schema 表达。
+
+---
+
+## Issue #73 — Script Inspector 前置：字段 Undo + AssetID Payload + Script 资源化 ✅ DONE
+<!-- SetFieldCommand<T> + TrackedFieldEdit (IsItemDeactivatedAfterEdit collapses drag to one undo record) + AcceptAssetIDDrop wired into all scalar fields of Tag/Transform/Camera/Light/Animator/MeshRenderer/RigidBody/Collider/MaterialOverride drawers; AssetDragPayload {path, type, id} sent by AssetsPanel (path-first for back-compat); ScriptComponent.scriptPath → scriptId : AssetID, ScriptSystem::Context.assetRegistry resolves to .cs path via FindByID; ImportScanner generates .cs.sameta with class_name=stem; SceneSerializer writes script.{asset_id,class}; AssetsPanel selection moved from IsItemClicked (mouse-down) to IsItemHovered+IsMouseReleased (mouse-up) so click-to-drag doesn't flip Inspector to Asset view; viewport drop fixed to use BeginDragDropTargetCustom (pre-existing bug). -->
+---
+
+## Issue #74 — Script Field Reflection（脚本字段反射核心）✅ DONE
+<!-- ScriptFieldSchema (Kind/Descriptor/ClassSchema/Value variant) + ScriptFieldBlob (BlobWriter/BlobReader, schema blob v1, field-value blob; LE no-padding, wire-compat with managed FieldBlobIO.cs); managed FieldReflector scans public fields → BuildSchemaBlob/Apply/Capture via Activator+FieldInfo; ScriptBridgeEntry exports GetClassSchemaBlob/ApplyFieldValues/CaptureFieldValues (two-step capacity protocol); ScriptLoader.FindUserScriptType + GetInstance helpers; ScriptSchemaCache (className→schema, Cleared on every Compile); ScriptSystem adds GetSchemaFor/InjectFieldValues/InjectSingleField; OnPlayStart Instantiate→Inject before OnAttach; ScriptComponent.fields (unordered_map<string,ScriptFieldValue>); ScriptDrawer schema-driven render (Bool/Int32/Float/Vec2-4/String editable; AssetRef/EntityRef/Color/Enum/Unsupported as #75 placeholders); Play-mode single-field delta inject on ImGui change. UX fix: RecompileEditing no longer Unloads ALC (schema lookup needs live ALC) and now compiles every .cs in AssetRegistry::EntriesByType("Script") not just referenced ones; OnAttach also warm-up calls RecompileEditing (initial-load path did not previously go through LoadProject). Refactor: shared LoadProjectFiles(projectDir) helper covers watch+scan+recompile+UpdateProjectDir+startup-scene for both OnAttach and LoadProject. Skipped: ScriptApiFunctionTable.version bump (struct unchanged, bump would force dotnet-publish AVE risk; new exports go through LoadAndGet by name). -->
+
+## Issue #75 — Script Field Inspector：序列化、类型扩展与属性 ✅ DONE (partial — List/nested deferred to #80)
+<!-- P5 serialization: SceneSerializer reads/writes script.fields[{name,kind,value}] for Bool/Int32/Float/String/Vec2-4/Color/AssetRef/EntityRef + scene_local_id mirror; ScriptFieldKindToString/FromString in schema header; RecompileEditing migration walks all ScriptComponent entities and reconciles vs new schema (retained/reset/defaulted/dropped one-line summary). P6 types: managed StellarAlia.Color + AssetRef (16B UUID hi+lo) + Entity (sceneLocalId↔entt bits translation in ScriptSystem::InjectFieldValues / InjectSingleField with schema-routed EntityRef); ScriptDrawer Color (ColorEdit3/4), AssetRef (DrawAssetIDField + SetFieldCommand undo, [AssetType("Mesh")] typeHint filter), EntityRef (picker + SAENTITY drop + "(missing #N)" fallback). P3: EntityIdComponent {uint64 sceneLocalId} auto-emplaced by Scene::CreateEntity from monotonic m_nextLocalId (reset on Clear); Scene::FindBySceneLocalId / AssignSceneLocalId public API; SceneSerializer round-trips scene_local_id, pre-#75 scenes auto-assign on load. O2 attributes (schema wire v2): [Range]/[Tooltip]/[Header]/[HideInInspector]/[SerializeField] + [AssetType] in StellarAlia.Runtime; FieldReflector BuildSchemaBlob writes tooltip/header/flags/range tail; DecodeSchema branches on schemaVersion≥2; ScriptDrawer applies SliderInt/SliderFloat for Range, SetTooltip on hover, SeparatorText before field, skips render for hidden. Defaults: new GetClassDefaultsBlob export uses Activator.CreateInstance to capture C# initializers into ScriptClassSchema.defaults; FetchAndCacheSchema pulls them alongside schema; EnsureValue<T> + RecompileEditing migration both seed from defaults before falling back to kind-zero. SetFieldCommand<uint64_t> added for EntityRef undo. Deferred to #80: List<T> field kind set + variant alts + ScriptDrawer TreeNode UI; nested [Serializable] struct dot-path expansion. -->
+
+## Issue #76 — Cook 工具对 Script 类型静默 skip
+
+**优先级：低**（日志噪音清理）
+
+`tools/cook/main.cpp` 的 type 分派对未识别 `entry.meta.type` 走 `[Cook] SKIP (unsupported type: ...)` 分支。自 #73 把 `.cs` 纳入 ImportScanner 后，每次 cook 都会刷一条 "unsupported type: Script" 警告，因为 Script 资源是 runtime-consumed、本来就不走 cook cache。
+
+**改法**：在 type 分派表加显式 Script 静默分支：
+
+```cpp
+} else if (entry.meta.type == "Script") {
+    // Runtime-consumed; no cook output. Silent skip to avoid log noise.
+    continue;   // not counted in skipped/failed/ok
+}
+```
+
+同样模式适用于将来其它 runtime-only 资源类型。
+
+---
+
+## Issue #77 — AssetsPanel `m_pendingDeselectOtherPath` 死代码清理
+
+**优先级：极低**（cleanup）
+
+#73 把 file-pane selection 触发从 `IsItemClicked()`（mouse-down）改为 `IsItemHovered() && IsMouseReleased(Left)`（mouse-up over source），意味着 selection body 只在"释放还在源 item 上"时跑——即一次确认的 click，不可能再演变为 drag。
+
+旧的"多选项 click 时先记录 pending，到 mouse-up 时 flush（如果中间没 drag）"机制（`m_pendingDeselectOtherPath`）现在的语义已经被外层的 click-vs-release 路由完全覆盖：到达 selection body 的时刻就已经判定为 click。
+
+**改法**：删除 `m_pendingDeselectOtherPath` 字段和它的 flush 代码（`AssetsPanel.cpp` 中部 + background-click 清空 + `BeginDragDropSource` clear 等），把"多选项 single-click 收缩到单选"逻辑直接 inline 到 selection body 内。
+
+---
+
+## Issue #78 — EditorMode `OnAttach` 缺 shader cook 步骤
+
+**优先级：低**（仅当 demo / 用户项目包含 `.saglsl` 时暴露）
+
+`EditorMode::LoadProject` 切换项目时会先 `ShaderCook::CookDirectory(assets, cookCache/shaders, ...)` 处理项目 `.saglsl` shading models，再 `ApplyProjectShaderTypes`。但**启动**加载项目走 `OnAttach`（line 78-191），其调用的 `LoadProjectFiles` helper 没包含这步——意味着启动时如果项目目录里有 `.saglsl`，cook cache 不会被填、`SceneRenderer.ApplyProjectShaderTypes` 不会被调，自定义 shading model 在 startup scene 中拿不到。
+
+demo project 目前不用 `.saglsl`，因此没暴露。但为对称，`LoadProjectFiles` 应该把"shader cook + apply"也吸收进去，让 OnAttach / LoadProject 完全等价；或者由 `OnAttach` 在调用 `LoadProjectFiles` 前后显式补做这两步。
+
+**改法**：把 shader cook + `ApplyProjectShaderTypes` 包进 `LoadProjectFiles`，删 `LoadProject` 内的 `cookedShaderDir` 局部状态。注意 OnAttach 早期 GPU/Renderer 是否就绪——若有时序问题，可让 `LoadProjectFiles` 接 bool gpuReady 跳过 GPU 部分。
+
+---
+
+## Issue #79 — `ScriptSystem::CaptureFieldValues` 接口空挂
+
+**优先级：极低**（API 已就位，等 PIE 反向同步 feature 接入）
+
+`ScriptSystem::CaptureFieldValues(uint64_t entityId, ScriptComponent& sc)` 在 #74 实现并暴露，对应 managed 端 `ScriptBridgeEntry.CaptureFieldValues`（两步式 blob 协议）。它把 C# 实例的当前字段值抓回 `sc.fields`，反向于 `InjectFieldValues`。
+
+但 #74 内部**无 caller**。当初保留是为未来"Play→Edit 切换时把游戏运行期修改的值带回编辑器"的 PIE 反向同步功能；目前 PIE 退出时直接销毁 game scene，editor scene 的 ScriptComponent.fields 保留 Inspector 设的值。
+
+**何时启用**：用户希望在 Play 中拖滑块/写脚本改变字段值，回 Edit 时这些变化被持久化（Unity-style "during play, changes are reverted on stop" 的反面行为）—— 这是个 UX 选项，需要明确的产品决定。如果决定支持，挂到 `OnPlayStop` 之前的一次 `CaptureFieldValues` 全实体 sweep 即可。
+
+
+---
+
+## Issue #80 — Script Field 复合类型：List<T> + 嵌套 struct
+
+**优先级：中**（脚本作者常用 list 表达 waypoints / inventory / config arrays）  **依赖**：#75
+
+#75 实施时拆出来的延期范围：`ScriptFieldValue` 加入 `std::vector<T>` 变体 + 嵌套 `[Serializable] struct` 字段的 dot-path schema 展开。范围与 #75 plan F 节一致，但因为扩散面广（每个 kind switch 都要补分支）单独成 issue。
+
+### 范围
+
+1. **List<T> — 标量列表**：
+   - `ScriptFieldKind` 加 `ListBool=32 / ListInt32 / ListFloat / ListString / ListVec3 / ListAssetRef / ListEntityRef`
+   - `ScriptFieldValue` 加 `std::vector<bool>` 等变体（注意 `std::vector<bool>` 的位优化需 `std::vector<uint8_t>` 替代）
+   - blob 编解码：payload = `u32 count + items[]`
+   - `FieldReflector.ResolveKind` 识别 `List<int>` / `List<float>` 等具体泛型
+   - `ScriptDrawer`：TreeNode 展开 + 单元素 DragXxx + `+ Add` / `- Remove last` 按钮 + 单元素 Undo
+   - 软上限 4096 项（plan 边界条件已定）
+
+2. **嵌套 [Serializable] struct — 一层深**：
+   - `FieldReflector` 检测 `[System.Serializable]` 标记的 struct 字段
+   - schema 展开为 dot-path 子条目（`boss.hp` / `boss.spawn`）
+   - C# blob 编解码识别 dot-path → walk 进 struct 字段
+   - ScriptDrawer 自动按 dot-path 前缀分组渲染（TreeNode "boss" 包住所有 `boss.*`）
+   - 二层嵌套 → 第二层字段显示为 `unsupported` 灰字
+
+### 边界（plan #75 已定）
+
+| 场景 | 处理 |
+|---|---|
+| `List<List<T>>` | Unsupported（仅一层）|
+| `Dictionary<K,V>` | 不做 |
+| List<AssetRef> 元素拖拽 | 每 item 单独 `AcceptAssetIDDrop` + Undo |
+| List 超过 4096 项 | 截断 + warn |
+| 嵌套 struct 整体默认值 | 反序列化时 default(T) 构造 |
+
+### 改动量估计
+
+约 250 行 native + 150 行 managed + 100 行 ScriptDrawer UI。

@@ -70,6 +70,15 @@ bool SceneRenderer::Init(const Desc& desc) {
     m_frameUniforms.Init(desc.device);
     const auto frameLayout = m_frameUniforms.GetLayout();
 
+    // Per-frame SSBO ring for material parameters (Issue #72).
+    if (!m_materialRing.Init(desc.device)) {
+        SA_LOG_ERROR("SceneRenderer: MaterialParamRing init failed");
+        return false;
+    }
+    // MaterialManager needs the ring buffer handle before any MaterialType is
+    // registered (RegisterTypeFromShaders → CreateInstance writes the descriptor).
+    desc.matMgr->SetMaterialParamRingBuffer(m_materialRing.GetBuffer());
+
     // IBL bake — initialise so SetIBL can fall back to GPU bake on cache miss.
     if (!m_iblBake.Init(desc.device, desc.shaderDir)) {
         SA_LOG_WARN("SceneRenderer: GpuIblBake init failed — IBL bake unavailable");
@@ -265,6 +274,7 @@ void SceneRenderer::Shutdown() {
         m_device->DestroyTexture(m_solidAmbientCube);
 
     m_frameUniforms.Shutdown();
+    m_materialRing.Shutdown();
     m_ready = false;
 }
 
@@ -695,10 +705,42 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
             entityWorldMin = glm::min(entityWorldMin, item.worldAABBMin);
             entityWorldMax = glm::max(entityWorldMax, item.worldAABBMax);
 
-            if (matOverride && (!matOverride->scalars.empty() || !matOverride->textures.empty())) {
+            item.material = base;
+            if (base->GetType()->usesMaterialParamsSSBO) {
+                // Issue #72: SSBO path — every draw call (override or not) packs
+                // a blob into the per-frame ring and binds set=1 with a dynamic
+                // offset. No MaterialInstance clone, no per-entity descriptor.
+                std::vector<uint8_t> blob = base->GetParamBlob();
+                if (matOverride) {
+                    for (const auto& [name, val] : matOverride->scalars) {
+                        const ParamDef* pd = base->GetType()->FindParam(name);
+                        if (!pd) continue;
+                        std::visit([&](const auto& v) {
+                            const uint32_t sz = static_cast<uint32_t>(sizeof(v));
+                            if (pd->offset + sz <= blob.size())
+                                std::memcpy(blob.data() + pd->offset, &v, sz);
+                        }, val);
+                    }
+                    for (const auto& [name, texID] : matOverride->textures) {
+                        if (!texID.IsValid()) continue;
+                        const TextureDef* td = base->GetType()->FindTexture(name);
+                        if (!td) continue;
+                        const auto tex = m_resMgr->LoadTexture(texID);
+                        if (!tex.IsValid()) continue;
+                        const uint32_t idx = m_matMgr->GetTextureHeap().Register(tex);
+                        if (td->uboBlobOffset + sizeof(idx) <= blob.size())
+                            std::memcpy(blob.data() + td->uboBlobOffset, &idx, sizeof(idx));
+                    }
+                }
+                item.materialUboOffset =
+                    m_materialRing.Allocate(blob.data(),
+                                            static_cast<uint32_t>(blob.size()));
+            } else if (matOverride && (!matOverride->scalars.empty() || !matOverride->textures.empty())) {
+                // Legacy UBO path with overrides — still uses CloneInstance.
+                // Triggers the original validation issue but only for non-PBR
+                // shaders that haven't been converted yet (none in current builtin set).
                 auto clone = m_matMgr->CloneInstance(base);
-                if (!clone) { item.material = base; }
-                else {
+                if (clone) {
                     for (const auto& [name, val] : matOverride->scalars)
                         std::visit([&](const auto& v){ clone->SetParam(name, v); }, val);
                     for (const auto& [name, texID] : matOverride->textures)
@@ -707,8 +749,6 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
                     item.material      = clone.get();
                     item.ownedMaterial = std::move(clone);
                 }
-            } else {
-                item.material = base;
             }
 
             item.pipeline         = item.material->GetType()->GetOrCreatePipeline(m_device, gbKey);
@@ -776,10 +816,37 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
             ArvoAABB(sub.boundsMin, sub.boundsMax, wt.matrix,
                      item.worldAABBMin, item.worldAABBMax);
 
-            if (matOverride && (!matOverride->scalars.empty() || !matOverride->textures.empty())) {
+            item.material = base;
+            if (base->GetType()->usesMaterialParamsSSBO) {
+                // Issue #72: same SSBO+bindless path as static meshes.
+                std::vector<uint8_t> blob = base->GetParamBlob();
+                if (matOverride) {
+                    for (const auto& [name, val] : matOverride->scalars) {
+                        const ParamDef* pd = base->GetType()->FindParam(name);
+                        if (!pd) continue;
+                        std::visit([&](const auto& v) {
+                            const uint32_t sz = static_cast<uint32_t>(sizeof(v));
+                            if (pd->offset + sz <= blob.size())
+                                std::memcpy(blob.data() + pd->offset, &v, sz);
+                        }, val);
+                    }
+                    for (const auto& [name, texID] : matOverride->textures) {
+                        if (!texID.IsValid()) continue;
+                        const TextureDef* td = base->GetType()->FindTexture(name);
+                        if (!td) continue;
+                        const auto tex = m_resMgr->LoadTexture(texID);
+                        if (!tex.IsValid()) continue;
+                        const uint32_t idx = m_matMgr->GetTextureHeap().Register(tex);
+                        if (td->uboBlobOffset + sizeof(idx) <= blob.size())
+                            std::memcpy(blob.data() + td->uboBlobOffset, &idx, sizeof(idx));
+                    }
+                }
+                item.materialUboOffset =
+                    m_materialRing.Allocate(blob.data(),
+                                            static_cast<uint32_t>(blob.size()));
+            } else if (matOverride && (!matOverride->scalars.empty() || !matOverride->textures.empty())) {
                 auto clone = m_matMgr->CloneInstance(base);
-                if (!clone) { item.material = base; }
-                else {
+                if (clone) {
                     for (const auto& [name, val] : matOverride->scalars)
                         std::visit([&](const auto& v){ clone->SetParam(name, v); }, val);
                     for (const auto& [name, texID] : matOverride->textures)
@@ -788,8 +855,6 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
                     item.material      = clone.get();
                     item.ownedMaterial = std::move(clone);
                 }
-            } else {
-                item.material = base;
             }
 
             // pipeline is the material's standard pipeline — used for sorting and as
@@ -1009,6 +1074,10 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
                                  uint32_t w, uint32_t h, UIPassFn uiPass)
 {
     SA_PROFILE_SCOPE_N("RenderFrame");
+    // Per-frame material param ring rolls over here — must happen before any
+    // BuildDrawList / feature pass that calls m_materialRing.Allocate().
+    m_materialRing.Reset();
+
     // ── Resize G-Buffer + depth if viewport changed ────────────────────────────
     if (w != m_depthWidth || h != m_depthHeight) {
         m_device->WaitIdle();
@@ -1386,12 +1455,12 @@ void SceneRenderer::ShadowFeature::AddPasses(SceneRenderer& renderer,
                     cmd.SetPipeline(effectivePipeline);
                     currentPipeline = effectivePipeline;
                     if (!frameSetBound) {
-                        cmd.SetDescriptorSet(0, frameSet);
+                        cmd.SetDescriptorSet(1, frameSet);
                         frameSetBound = true;
                     }
                 }
                 if (item.isSkinned && item.skinDescSet.IsValid())
-                    cmd.SetDescriptorSet(2, item.skinDescSet);
+                    cmd.SetDescriptorSet(3, item.skinDescSet);  // Step 6.5: skin at set=3
                 if (item.vertexBuffer.index != currentVB.index) {
                     cmd.SetVertexBuffer(0, item.vertexBuffer);
                     currentVB = item.vertexBuffer;
@@ -1478,7 +1547,7 @@ void SceneRenderer::SkyboxFeature::AddPasses(SceneRenderer& /*renderer*/,
             cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
             cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
             cmd.SetPipeline(pipeline);
-            cmd.SetDescriptorSet(0, descSet);
+            cmd.SetDescriptorSet(1, descSet);  // Skybox: descSet is frameSet alias (Step 6.5)
             cmd.Draw(3, 1, 0, 0);
             cmd.EndRenderPass();
         });
@@ -1509,7 +1578,7 @@ void SceneRenderer::GBufferFeature::OnInit(const FeatureInitContext& ctx)
     // GPU skinning: load the skinned geometry variant (skinned vert + same frag).
     if (ctx.matMgr->LoadShaderProgram(m_skinnedProgram,
                                        "deferred_geometry_skinned", "deferred_geometry", ctx))
-        m_skinDescLayout = m_skinnedProgram.GetSet2Layout();
+        m_skinDescLayout = m_skinnedProgram.GetSet3Layout();  // Step 6.5: skin at set=3
     else
         SA_LOG_WARN("GBufferFeature: skinned shader not found — GPU skinning unavailable");
 
@@ -1552,7 +1621,8 @@ void SceneRenderer::GBufferFeature::AddPasses(SceneRenderer& renderer,
             b.WriteDepth(rgDepth);
         },
         [&drawItems = renderer.m_visibleDrawItems, regPtr, frameSet, skinnedPipeline, w, h,
-         rgRT0, rgRT1, rgRT2, rgDepth]
+         rgRT0, rgRT1, rgRT2, rgDepth,
+         bindlessSet = renderer.m_matMgr->GetTextureHeap().GetDescSet()]
         (RHI::IRHICommandList& cmd, const RGResources& res)
         {
             SA_PROFILE_SCOPE_N("GBuffer::Execute");
@@ -1594,17 +1664,28 @@ void SceneRenderer::GBufferFeature::AddPasses(SceneRenderer& renderer,
                 if (!wt) continue;
                 const glm::mat4 world = wt->matrix * item.subLocalTransform;
 
+                const bool usesSSBO = item.material->GetType()->usesMaterialParamsSSBO;
                 if (effectivePipeline.index != currentPipeline.index) {
                     cmd.SetPipeline(effectivePipeline);
                     currentPipeline = effectivePipeline;
+                    // Issue #72 Step 6.5: set=0 (bindless) and set=1 (frame)
+                    // share engine-wide layouts → bindings survive all pipeline
+                    // changes within this pass. Bind once.
                     if (!frameSetBound) {
-                        cmd.SetDescriptorSet(0, frameSet);
+                        if (bindlessSet.IsValid())
+                            cmd.SetDescriptorSet(0, bindlessSet);
+                        cmd.SetDescriptorSet(1, frameSet);
                         frameSetBound = true;
                     }
                 }
-                item.material->Bind(&cmd);  // set=1 per-material descriptors, always needed
+                if (usesSSBO) {
+                    cmd.SetDescriptorSet(2, item.material->GetDescSet(),
+                                         std::span<const uint32_t>{&item.materialUboOffset, 1});
+                } else {
+                    item.material->Bind(&cmd);
+                }
                 if (item.isSkinned && item.skinDescSet.IsValid())
-                    cmd.SetDescriptorSet(2, item.skinDescSet);
+                    cmd.SetDescriptorSet(3, item.skinDescSet);
                 if (item.vertexBuffer.index != currentVB.index) {
                     cmd.SetVertexBuffer(0, item.vertexBuffer);
                     currentVB = item.vertexBuffer;
@@ -1693,8 +1774,8 @@ void SceneRenderer::DeferredLightingFeature::AddPasses([[maybe_unused]] SceneRen
             cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
             cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
             cmd.SetPipeline(pipeline);
-            cmd.SetDescriptorSet(0, frameSet);
-            cmd.SetDescriptorSet(1, gbDescSet);
+            cmd.SetDescriptorSet(1, frameSet);
+            cmd.SetDescriptorSet(2, gbDescSet);
             cmd.Draw(3, 1, 0, 0);
             cmd.EndRenderPass();
         });
@@ -1872,8 +1953,8 @@ void SceneRenderer::SSAOFeature::AddPasses(SceneRenderer& /*renderer*/,
                 cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(hw), float(hh)});
                 cmd.SetScissor(RHI::RHIScissor{0, 0, hw, hh});
                 cmd.SetPipeline(gtaoPipeline);
-                cmd.SetDescriptorSet(0, frameSet);
-                cmd.SetDescriptorSet(1, gtaoDescSet);
+                cmd.SetDescriptorSet(1, frameSet);
+                cmd.SetDescriptorSet(2, gtaoDescSet);
                 cmd.SetPushConstants(&gtaoPC, sizeof(gtaoPC), RHI::RHIShaderStage::Fragment);
                 cmd.Draw(3, 1, 0, 0);
                 cmd.EndRenderPass();
@@ -1906,8 +1987,8 @@ void SceneRenderer::SSAOFeature::AddPasses(SceneRenderer& /*renderer*/,
                 cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(hw), float(hh)});
                 cmd.SetScissor(RHI::RHIScissor{0, 0, hw, hh});
                 cmd.SetPipeline(blurPipeline);
-                cmd.SetDescriptorSet(0, frameSet);
-                cmd.SetDescriptorSet(1, blurHDescSet);
+                cmd.SetDescriptorSet(1, frameSet);
+                cmd.SetDescriptorSet(2, blurHDescSet);
                 cmd.SetPushConstants(&blurHPC, sizeof(blurHPC), RHI::RHIShaderStage::Fragment);
                 cmd.Draw(3, 1, 0, 0);
                 cmd.EndRenderPass();
@@ -1940,8 +2021,8 @@ void SceneRenderer::SSAOFeature::AddPasses(SceneRenderer& /*renderer*/,
                 cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(hw), float(hh)});
                 cmd.SetScissor(RHI::RHIScissor{0, 0, hw, hh});
                 cmd.SetPipeline(blurPipeline);
-                cmd.SetDescriptorSet(0, frameSet);
-                cmd.SetDescriptorSet(1, blurVDescSet);
+                cmd.SetDescriptorSet(1, frameSet);
+                cmd.SetDescriptorSet(2, blurVDescSet);
                 cmd.SetPushConstants(&blurVPC, sizeof(blurVPC), RHI::RHIShaderStage::Fragment);
                 cmd.Draw(3, 1, 0, 0);
                 cmd.EndRenderPass();
@@ -2058,8 +2139,8 @@ void SceneRenderer::TAAFeature::AddPasses(SceneRenderer& /*renderer*/,
             cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
             cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
             cmd.SetPipeline(taaPipeline);
-            cmd.SetDescriptorSet(0, frameSet);
-            cmd.SetDescriptorSet(1, resolveSet);
+            cmd.SetDescriptorSet(1, frameSet);
+            cmd.SetDescriptorSet(2, resolveSet);
             cmd.SetPushConstants(&taaPC, sizeof(taaPC), RHI::RHIShaderStage::Fragment);
             cmd.Draw(3, 1, 0, 0);
             cmd.EndRenderPass();
@@ -2210,8 +2291,8 @@ void SceneRenderer::DoFFeature::AddPasses(SceneRenderer& /*renderer*/,
                 cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
                 cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
                 cmd.SetPipeline(cocPipeline);
-                cmd.SetDescriptorSet(0, frameSet);
-                cmd.SetDescriptorSet(1, cocDs);
+                cmd.SetDescriptorSet(1, frameSet);
+                cmd.SetDescriptorSet(2, cocDs);
                 cmd.SetPushConstants(&cocPC, sizeof(cocPC), RHI::RHIShaderStage::Fragment);
                 cmd.Draw(3, 1, 0, 0);
                 cmd.EndRenderPass();
@@ -2240,8 +2321,8 @@ void SceneRenderer::DoFFeature::AddPasses(SceneRenderer& /*renderer*/,
                 cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
                 cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
                 cmd.SetPipeline(blurPipeline);
-                cmd.SetDescriptorSet(0, frameSet);
-                cmd.SetDescriptorSet(1, ds);
+                cmd.SetDescriptorSet(1, frameSet);
+                cmd.SetDescriptorSet(2, ds);
                 cmd.SetPushConstants(&blurPC, sizeof(blurPC), RHI::RHIShaderStage::Fragment);
                 cmd.Draw(3, 1, 0, 0);
                 cmd.EndRenderPass();
@@ -2273,8 +2354,8 @@ void SceneRenderer::DoFFeature::AddPasses(SceneRenderer& /*renderer*/,
                 cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
                 cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
                 cmd.SetPipeline(compositePipeline);
-                cmd.SetDescriptorSet(0, frameSet);
-                cmd.SetDescriptorSet(1, compositeDs);
+                cmd.SetDescriptorSet(1, frameSet);
+                cmd.SetDescriptorSet(2, compositeDs);
                 cmd.SetPushConstants(&compPC, sizeof(compPC), RHI::RHIShaderStage::Fragment);
                 cmd.Draw(3, 1, 0, 0);
                 cmd.EndRenderPass();
@@ -2596,8 +2677,8 @@ void SceneRenderer::TonemapFeature::AddPasses(SceneRenderer& /*renderer*/,
             cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
             cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
             cmd.SetPipeline(pipeline);
-            cmd.SetDescriptorSet(0, frameSet);
-            cmd.SetDescriptorSet(1, hdrDescSet);
+            cmd.SetDescriptorSet(1, frameSet);
+            cmd.SetDescriptorSet(2, hdrDescSet);
             cmd.SetPushConstants(&pc, sizeof(pc), RHI::RHIShaderStage::Fragment);
             cmd.Draw(3, 1, 0, 0);
             cmd.EndRenderPass();
@@ -2675,8 +2756,8 @@ void SceneRenderer::LutTonemapFeature::AddPasses(SceneRenderer& /*renderer*/,
             cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
             cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
             cmd.SetPipeline(pipeline);
-            cmd.SetDescriptorSet(0, frameSet);
-            cmd.SetDescriptorSet(1, hdrLutDescSet);
+            cmd.SetDescriptorSet(1, frameSet);
+            cmd.SetDescriptorSet(2, hdrLutDescSet);
             cmd.SetPushConstants(&pc, sizeof(pc), RHI::RHIShaderStage::Fragment);
             cmd.Draw(3, 1, 0, 0);
             cmd.EndRenderPass();
@@ -2805,8 +2886,8 @@ void SceneRenderer::BloomFeature::AddPasses(SceneRenderer& renderer,
                 cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(tw), float(th)});
                 cmd.SetScissor(RHI::RHIScissor{0, 0, tw, th});
                 cmd.SetPipeline(pipeThreshold);
-                cmd.SetDescriptorSet(0, frameSet);
-                cmd.SetDescriptorSet(1, threshDescSet);
+                cmd.SetDescriptorSet(1, frameSet);
+                cmd.SetDescriptorSet(2, threshDescSet);
                 cmd.SetPushConstants(&threshPC, sizeof(threshPC), RHI::RHIShaderStage::Fragment);
                 cmd.Draw(3, 1, 0, 0);
                 cmd.EndRenderPass();
@@ -2832,8 +2913,8 @@ void SceneRenderer::BloomFeature::AddPasses(SceneRenderer& renderer,
                 cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(dw), float(dh)});
                 cmd.SetScissor(RHI::RHIScissor{0, 0, dw, dh});
                 cmd.SetPipeline(pipeDownsample);
-                cmd.SetDescriptorSet(0, frameSet);
-                cmd.SetDescriptorSet(1, ds);
+                cmd.SetDescriptorSet(1, frameSet);
+                cmd.SetDescriptorSet(2, ds);
                 cmd.Draw(3, 1, 0, 0);
                 cmd.EndRenderPass();
             });
@@ -2868,8 +2949,8 @@ void SceneRenderer::BloomFeature::AddPasses(SceneRenderer& renderer,
                 cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(dw), float(dh)});
                 cmd.SetScissor(RHI::RHIScissor{0, 0, dw, dh});
                 cmd.SetPipeline(pipeUpsample);
-                cmd.SetDescriptorSet(0, frameSet);
-                cmd.SetDescriptorSet(1, us);
+                cmd.SetDescriptorSet(1, frameSet);
+                cmd.SetDescriptorSet(2, us);
                 cmd.SetPushConstants(&upPC, sizeof(upPC), RHI::RHIShaderStage::Fragment);
                 cmd.Draw(3, 1, 0, 0);
                 cmd.EndRenderPass();
@@ -2894,8 +2975,8 @@ void SceneRenderer::BloomFeature::AddPasses(SceneRenderer& renderer,
                 cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
                 cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
                 cmd.SetPipeline(pipeComposite);
-                cmd.SetDescriptorSet(0, frameSet);
-                cmd.SetDescriptorSet(1, compositeDescSet);
+                cmd.SetDescriptorSet(1, frameSet);
+                cmd.SetDescriptorSet(2, compositeDescSet);
                 cmd.SetPushConstants(&compPC, sizeof(compPC), RHI::RHIShaderStage::Fragment);
                 cmd.Draw(3, 1, 0, 0);
                 cmd.EndRenderPass();
@@ -3015,8 +3096,8 @@ void SceneRenderer::DebugOverlayFeature::AddPasses(
                     cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
                     cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
                     cmd.SetPipeline(pipeline);
-                    cmd.SetDescriptorSet(0, frameSet);
-                    cmd.SetDescriptorSet(1, descSet);
+                    cmd.SetDescriptorSet(1, frameSet);
+                    cmd.SetDescriptorSet(2, descSet);
                     cmd.SetPushConstants(&viewProj, sizeof(glm::mat4), RHI::RHIShaderStage::Vertex);
                     cmd.Draw(vertCount, 1, 0, 0);
                     cmd.EndRenderPass();
@@ -3056,8 +3137,8 @@ void SceneRenderer::DebugOverlayFeature::AddPasses(
                     cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
                     cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
                     cmd.SetPipeline(xrayPipeline);
-                    cmd.SetDescriptorSet(0, frameSet);
-                    cmd.SetDescriptorSet(1, xrayDescSet);
+                    cmd.SetDescriptorSet(1, frameSet);
+                    cmd.SetDescriptorSet(2, xrayDescSet);
                     cmd.SetPushConstants(&viewProj, sizeof(glm::mat4), RHI::RHIShaderStage::Vertex);
                     cmd.Draw(xrayVertCount, 1, 0, 0);
                     cmd.EndRenderPass();
@@ -3169,12 +3250,12 @@ void SceneRenderer::SelectionMaskFeature::AddPasses(
                     cmd.SetPipeline(effectivePipeline);
                     currentPipeline = effectivePipeline;
                     if (!frameSetBound) {
-                        cmd.SetDescriptorSet(0, frameSet);
+                        cmd.SetDescriptorSet(1, frameSet);
                         frameSetBound = true;
                     }
                 }
                 if (dc.isSkinned && dc.skinDescSet.IsValid())
-                    cmd.SetDescriptorSet(2, dc.skinDescSet);
+                    cmd.SetDescriptorSet(3, dc.skinDescSet);  // Step 6.5: skin at set=3
                 cmd.SetVertexBuffer(0, dc.vb);
                 cmd.SetIndexBuffer(dc.ib);
                 cmd.SetPushConstants(&dc.model, sizeof(glm::mat4),
@@ -3275,8 +3356,8 @@ void SceneRenderer::SelectionOutlineFeature::AddPasses(
                 cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
                 cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
                 cmd.SetPipeline(dilateHPipeline);
-                cmd.SetDescriptorSet(0, frameSet);
-                cmd.SetDescriptorSet(1, dilateHDesc);
+                cmd.SetDescriptorSet(1, frameSet);
+                cmd.SetDescriptorSet(2, dilateHDesc);
                 cmd.SetPushConstants(&pc, sizeof(pc), RHI::RHIShaderStage::Fragment);
                 cmd.Draw(3, 1, 0, 0);
                 cmd.EndRenderPass();
@@ -3326,8 +3407,8 @@ void SceneRenderer::SelectionOutlineFeature::AddPasses(
                 cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
                 cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
                 cmd.SetPipeline(outlinePipeline);
-                cmd.SetDescriptorSet(0, frameSet);
-                cmd.SetDescriptorSet(1, outlineDesc);
+                cmd.SetDescriptorSet(1, frameSet);
+                cmd.SetDescriptorSet(2, outlineDesc);
                 cmd.SetPushConstants(&pc, sizeof(pc), RHI::RHIShaderStage::Fragment);
                 cmd.Draw(3, 1, 0, 0);
                 cmd.EndRenderPass();
@@ -3396,7 +3477,7 @@ void SceneRenderer::InfiniteGridFeature::AddPasses(
             cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
             cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
             cmd.SetPipeline(pipeline);
-            cmd.SetDescriptorSet(0, frameSet);
+            cmd.SetDescriptorSet(1, frameSet);
             cmd.Draw(3, 1, 0, 0);
             cmd.EndRenderPass();
         });

@@ -4,8 +4,8 @@
 // Direction controlled by push-constant texelStep (vec2).
 // Depth-aware weight: exp(-|d_i - d_center|^2 * sharpness).
 
-layout(set = 1, binding = 0) uniform sampler2D t_AORaw;
-layout(set = 1, binding = 1) uniform sampler2D t_Depth;
+layout(set = 2, binding = 0) uniform sampler2D t_AORaw;
+layout(set = 2, binding = 1) uniform sampler2D t_Depth;
 
 layout(location = 0) in  vec2 v_TexCoord;
 layout(location = 0) out float out_AO;

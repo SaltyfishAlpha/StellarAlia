@@ -25,6 +25,9 @@ std::string AssetTypeFromExtension(const fs::path& ext) {
     if (e == ".sascene")
         return "Scene";
 
+    if (e == ".cs")
+        return "Script";
+
     // .sanim / .saskel / .sameta are sidecar files, not primary cook targets.
     return {};
 }
@@ -41,6 +44,11 @@ static void ApplyDefaultSettings(MetaFile& meta, const fs::path& sourcePath) {
         meta.settings["mipmaps"] = "1";
     } else if (meta.type == "Mesh") {
         meta.settings["merge_submeshes"] = "0";
+    } else if (meta.type == "Script") {
+        // C# class name defaults to file stem; users can edit the .sameta to
+        // override (e.g. when the class is in a sub-namespace or differs from
+        // the filename). Scan never overwrites an existing sameta.
+        meta.settings["class_name"] = sourcePath.stem().string();
     }
 }
 

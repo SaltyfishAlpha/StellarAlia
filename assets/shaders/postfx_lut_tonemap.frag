@@ -12,8 +12,8 @@
 //   R → x within a tile,  G → y,  B → which tile (horizontal index).
 // Trilinear interpolation is done manually across adjacent blue tiles.
 
-layout(set = 1, binding = 0) uniform sampler2D t_HDR;
-layout(set = 1, binding = 1) uniform sampler2D t_LUT;
+layout(set = 2, binding = 0) uniform sampler2D t_HDR;
+layout(set = 2, binding = 1) uniform sampler2D t_LUT;
 
 layout(push_constant) uniform PushConstants {
     float exposure;

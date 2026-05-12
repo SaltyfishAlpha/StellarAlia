@@ -1,6 +1,6 @@
 #version 450
 
-layout(set = 1, binding = 0) uniform sampler2D t_mask;
+layout(set = 2, binding = 0) uniform sampler2D t_mask;
 
 layout(push_constant) uniform PC {
     vec4  texelSize;    // .xy = (1/width, 1/height)

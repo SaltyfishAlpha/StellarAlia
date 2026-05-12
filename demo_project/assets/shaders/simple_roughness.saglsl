@@ -10,11 +10,11 @@
 #include "shading_models.glsl"
 #include "shading_model_ids.glsl"
 
-layout(set = 1, binding = 0) uniform MaterialParams {
+layout(set = 2, binding = 0) uniform MaterialParams {
     float roughnessFactor; // @Float("Roughness Factor") = 1.0
 } u_Mat;
 
-layout(set = 1, binding = 1) uniform sampler2D t_roughness; // @Texture("Roughness Map")
+layout(set = 2, binding = 1) uniform sampler2D t_roughness; // @Texture("Roughness Map")
 
 layout(location = 1) in vec3 v_Normal;
 layout(location = 3) in vec2 v_TexCoord0;

@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "core/asset/AssetID.hpp"
+#include "function/material/BindlessTextureHeap.hpp"
 #include "function/material/MaterialType.hpp"
 #include "function/material/MaterialInstance.hpp"
 #include "platform/rhi/RHITypes.hpp"
@@ -115,11 +116,29 @@ public:
     [[nodiscard]] std::unique_ptr<MaterialInstance>
     CloneInstance(const MaterialInstance* src) const;
 
+    // Bindless texture heap used by all material shaders (Issue #72).
+    // Asset textures register here at load time and obtain a stable index.
+    [[nodiscard]] BindlessTextureHeap&       GetTextureHeap()       { return m_textureHeap; }
+    [[nodiscard]] const BindlessTextureHeap& GetTextureHeap() const { return m_textureHeap; }
+
+    // Issue #72: register the per-frame MaterialParamRing's SSBO buffer so that
+    // every SSBO-path MaterialInstance's set=1 binding=0 can be wired to it.
+    // Call once at SceneRenderer init, before any MaterialType is registered.
+    void SetMaterialParamRingBuffer(RHI::RHIBufferHandle ringBuf);
+
+    [[nodiscard]] RHI::RHIBufferHandle GetMaterialParamRingBuffer() const { return m_ringBuffer; }
+
 private:
     static uint64_t HashID(const AssetID& id) { return id.hi ^ id.lo; }
 
+    // Issue #72: wire SSBO-path instance's set=1 binding=0 to the shared
+    // MaterialParamRing buffer. No-op for legacy UBO instances.
+    void WireSSBODescriptor(MaterialInstance& inst) const;
+
     RHI::IRHIDevice*      m_device         = nullptr;
     RHI::RHITextureHandle m_defaultTexture;
+    BindlessTextureHeap   m_textureHeap;
+    RHI::RHIBufferHandle  m_ringBuffer;       // MaterialParamRing's SSBO (owned by SceneRenderer)
     std::unordered_map<std::string, std::unique_ptr<MaterialType>> m_types;
     // Instances loaded via LoadMaterial(), keyed by AssetID hash.
     std::unordered_map<uint64_t, std::unique_ptr<MaterialInstance>> m_cachedInstances;

@@ -2,8 +2,8 @@
 
 // postfx_histogram.comp
 // 16×16 workgroup histogram: accumulates 256-bin log-luminance distribution from HDR buffer.
-// set=1, binding=0 = HDR texture (sampler2D)
-// set=1, binding=1 = histogram SSBO (256 × uint, cleared each frame by RG clearOnCreate)
+// set = 1, binding=0 = HDR texture (sampler2D)
+// set = 1, binding=1 = histogram SSBO (256 × uint, cleared each frame by RG clearOnCreate)
 
 layout(local_size_x = 16, local_size_y = 16) in;
 

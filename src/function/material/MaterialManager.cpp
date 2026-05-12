@@ -33,6 +33,7 @@ void MaterialManager::Init(RHI::IRHIDevice*             device,
                             Resource::ResourceManager*   resMgr) {
     m_device         = device;
     m_defaultTexture = resMgr->GetBuiltin(Resource::BuiltinTexture::White1x1);
+    m_textureHeap.Init(device, m_defaultTexture);
 }
 
 void MaterialManager::Shutdown() {
@@ -40,7 +41,24 @@ void MaterialManager::Shutdown() {
     for (auto& [name, type] : m_types)
         type->shader.Unload(m_device);
     m_types.clear();
-    m_device = nullptr;
+    m_textureHeap.Shutdown();
+    m_ringBuffer = {};
+    m_device     = nullptr;
+}
+
+void MaterialManager::SetMaterialParamRingBuffer(RHI::RHIBufferHandle ringBuf) {
+    m_ringBuffer = ringBuf;
+}
+
+// Issue #72: wires set=1 binding=0 of an SSBO-path instance to the shared
+// MaterialParamRing buffer. baseOffset=0 + dynamic offset (per draw) gives the
+// final blob location each frame; range = type->uboSize is the slot upper bound.
+void MaterialManager::WireSSBODescriptor(MaterialInstance& inst) const {
+    if (!inst.m_type || !inst.m_type->usesMaterialParamsSSBO) return;
+    if (!m_ringBuffer.IsValid() || !inst.m_descSet.IsValid())  return;
+    const uint64_t range =
+        inst.m_type->uboSize > 0 ? static_cast<uint64_t>(inst.m_type->uboSize) : 16ull;
+    m_device->WriteDescriptorBuffer(inst.m_descSet, 0, m_ringBuffer, 0, range, /*dynamic=*/true);
 }
 
 void MaterialManager::ClearProjectInstances() {
@@ -108,37 +126,71 @@ bool MaterialManager::RegisterTypeFromShaders(const MaterialTypeDesc&   desc,
     auto type  = std::make_unique<MaterialType>();
     type->name = desc.name;
 
-    if (auto ubo = merged.FindBinding(1, 0)) {
+    if (auto ubo = merged.FindBinding(2, 0)) {
+        // Issue #72 Step 6.5: SSBO at set=2 binding=0 named "MaterialParams" → new path.
+        // Block members named with `_Idx` suffix (uint = 4B) carry bindless texture
+        // indices; everything else is a regular parameter.
+        const bool isSSBO = (ubo->type == RHI::RHIDescriptorType::StorageBuffer &&
+                             ubo->name == "MaterialParams");
+        type->usesMaterialParamsSSBO = isSSBO;
         type->uboSize = ubo->blockSize;
+
         for (const auto& m : ubo->members) {
             if (!m.name.empty() && m.name[0] == '_') continue; // skip padding fields
-            ParamDef pd;
-            pd.name        = m.name;
-            pd.offset      = m.offset;
-            pd.size        = m.size;
-            pd.uiType      = m.uiType;
-            pd.displayName = m.displayName;
-            pd.minValue    = m.minValue;
-            pd.maxValue    = m.maxValue;
-            std::copy(std::begin(m.defaultValue), std::end(m.defaultValue),
-                      std::begin(pd.defaultValue));
-            type->params.push_back(std::move(pd));
+
+            const bool isTextureIdx =
+                isSSBO &&
+                m.size == 4 &&
+                m.name.size() > 4 &&
+                m.name.compare(m.name.size() - 4, 4, "_Idx") == 0;
+
+            if (isTextureIdx) {
+                TextureDef td;
+                // Strip "_Idx" suffix so .samat texture maps keep using logical names
+                // like "t_BaseColor" rather than "t_BaseColor_Idx".
+                td.name           = m.name.substr(0, m.name.size() - 4);
+                td.binding        = 0;             // unused in SSBO path
+                td.slotIndex      = static_cast<uint32_t>(type->textures.size());
+                td.uboBlobOffset  = m.offset;
+                td.displayName    = m.displayName;
+                type->textures.push_back(std::move(td));
+            } else {
+                ParamDef pd;
+                pd.name        = m.name;
+                pd.offset      = m.offset;
+                pd.size        = m.size;
+                pd.uiType      = m.uiType;
+                pd.displayName = m.displayName;
+                pd.minValue    = m.minValue;
+                pd.maxValue    = m.maxValue;
+                std::copy(std::begin(m.defaultValue), std::end(m.defaultValue),
+                          std::begin(pd.defaultValue));
+                type->params.push_back(std::move(pd));
+            }
         }
     }
 
-    for (const auto& b : merged.bindings) {
-        if (b.set != 1) continue;
-        if (b.type == RHI::RHIDescriptorType::Texture2D   ||
-            b.type == RHI::RHIDescriptorType::TextureCube  ||
-            b.type == RHI::RHIDescriptorType::Sampler)
-            type->textures.push_back({b.name, b.binding,
-                                      static_cast<uint32_t>(type->textures.size()),
-                                      b.displayName});
+    // Legacy UBO path: gather sampler textures from set=1 binding>=1.
+    // SSBO path already populated textures from block members above.
+    if (!type->usesMaterialParamsSSBO) {
+        for (const auto& b : merged.bindings) {
+            if (b.set != 2 || b.binding == 0) continue;
+            if (b.type == RHI::RHIDescriptorType::Texture2D   ||
+                b.type == RHI::RHIDescriptorType::TextureCube  ||
+                b.type == RHI::RHIDescriptorType::Sampler) {
+                TextureDef td;
+                td.name        = b.name;
+                td.binding     = b.binding;
+                td.slotIndex   = static_cast<uint32_t>(type->textures.size());
+                td.displayName = b.displayName;
+                type->textures.push_back(std::move(td));
+            }
+        }
+        std::sort(type->textures.begin(), type->textures.end(),
+                  [](const auto& a, const auto& b){ return a.binding < b.binding; });
+        for (uint32_t i = 0; i < type->textures.size(); ++i)
+            type->textures[i].slotIndex = i;
     }
-    std::sort(type->textures.begin(), type->textures.end(),
-              [](const auto& a, const auto& b){ return a.binding < b.binding; });
-    for (uint32_t i = 0; i < type->textures.size(); ++i)
-        type->textures[i].slotIndex = i;
 
     type->defaultCullMode   = desc.cullMode;
     type->defaultBlendMode  = desc.blendMode;
@@ -148,9 +200,10 @@ bool MaterialManager::RegisterTypeFromShaders(const MaterialTypeDesc&   desc,
     type->noVertexInput     = desc.noVertexInput;
 
     ShaderProgram::Desc pd;
-    pd.vertSpv     = vertSpv;  pd.vertRefl = vertRefl;
-    pd.fragSpv     = fragSpv;  pd.fragRefl = fragRefl;
-    pd.frameLayout = ctx.frameLayout;
+    pd.vertSpv        = vertSpv;  pd.vertRefl = vertRefl;
+    pd.fragSpv        = fragSpv;  pd.fragRefl = fragRefl;
+    pd.frameLayout    = ctx.frameLayout;
+    pd.bindlessLayout = m_textureHeap.GetLayout();
     if (!type->shader.Load(ctx.device, pd)) {
         SA_LOG_ERROR("MaterialManager: '{}' — shader program load failed", desc.name);
         return false;
@@ -182,9 +235,10 @@ bool MaterialManager::LoadShaderProgram(ShaderProgram& prog,
     }
 
     ShaderProgram::Desc pd;
-    pd.vertSpv     = vertSpv;  pd.vertRefl = vertRefl;
-    pd.fragSpv     = fragSpv;  pd.fragRefl = fragRefl;
-    pd.frameLayout = ctx.frameLayout;
+    pd.vertSpv        = vertSpv;  pd.vertRefl = vertRefl;
+    pd.fragSpv        = fragSpv;  pd.fragRefl = fragRefl;
+    pd.frameLayout    = ctx.frameLayout;
+    pd.bindlessLayout = m_textureHeap.GetLayout();
     if (!prog.Load(ctx.device, pd)) {
         SA_LOG_ERROR("MaterialManager::LoadShaderProgram: program load failed ({} / {})",
                      vertStem, fragStem);
@@ -333,15 +387,21 @@ MaterialManager::CloneInstance(const MaterialInstance* src) const {
     if (!src) return nullptr;
     auto clone = src->m_type->CreateInstance(m_device, m_defaultTexture);
     if (!clone) return nullptr;
+    clone->m_mgr = const_cast<MaterialManager*>(this);
+    WireSSBODescriptor(*clone);
     // Copy the UBO parameter blob wholesale — same layout, same values.
     clone->m_uboBlob    = src->m_uboBlob;
     clone->m_paramDirty = true;
-    // Re-bind each texture slot from the source (SetTexture writes the descriptor).
-    for (const auto& td : src->m_type->textures) {
-        if (td.slotIndex < src->m_textures.size()) {
-            const auto tex = src->m_textures[td.slotIndex];
-            if (tex.IsValid())
-                clone->SetTexture(td.name, tex);
+    if (src->m_type->usesMaterialParamsSSBO) {
+        clone->m_texAssetIndices = src->m_texAssetIndices;
+    } else {
+        // Re-bind each texture slot from the source (SetTexture writes the descriptor).
+        for (const auto& td : src->m_type->textures) {
+            if (td.slotIndex < src->m_textures.size()) {
+                const auto tex = src->m_textures[td.slotIndex];
+                if (tex.IsValid())
+                    clone->SetTexture(td.name, tex);
+            }
         }
     }
     return clone;
@@ -354,7 +414,12 @@ MaterialManager::CreateInstance(const std::string& typeName) const {
         SA_LOG_ERROR("MaterialManager::CreateInstance: unknown type '{}'", typeName);
         return nullptr;
     }
-    return type->CreateInstance(m_device, m_defaultTexture);
+    auto inst = type->CreateInstance(m_device, m_defaultTexture);
+    if (inst) {
+        inst->m_mgr = const_cast<MaterialManager*>(this);
+        WireSSBODescriptor(*inst);
+    }
+    return inst;
 }
 
 } // namespace StellarAlia

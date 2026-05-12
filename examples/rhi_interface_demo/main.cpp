@@ -54,8 +54,10 @@ public:
     void SetPipeline(RHIPipelineHandle pipeline) override {
         SA_LOG_INFO("[CMD] SetPipeline  handle={}", pipeline.index);
     }
-    void SetDescriptorSet(uint32_t set, RHIDescSetHandle ds) override {
-        SA_LOG_INFO("[CMD] SetDescriptorSet  set={} handle={}", set, ds.index);
+    void SetDescriptorSet(uint32_t set, RHIDescSetHandle ds,
+                          std::span<const uint32_t> dynamicOffsets = {}) override {
+        SA_LOG_INFO("[CMD] SetDescriptorSet  set={} handle={} dynOffs={}",
+                    set, ds.index, dynamicOffsets.size());
     }
     void SetPushConstants(const void*, uint32_t size, RHIShaderStage stages) override {
         SA_LOG_INFO("[CMD] SetPushConstants  size={}B stages=0x{:x}",
@@ -165,6 +167,13 @@ public:
         return h;
     }
 
+    RHIDescLayoutHandle CreateBindlessTextureLayout(uint32_t capacity) override {
+        RHIDescLayoutHandle h{m_nextDescLayout++};
+        SA_LOG_INFO("[DEV] CreateBindlessTextureLayout  handle={} capacity={}",
+                    h.index, capacity);
+        return h;
+    }
+
     RHIPipelineHandle CreatePipeline(const RHIPipelineDesc& desc) override {
         RHIPipelineHandle h{m_nextPipeline++};
         SA_LOG_INFO("[DEV] CreatePipeline  handle={} vert={} frag={} layouts={} pushBytes={}",
@@ -201,6 +210,14 @@ public:
                     ds.index, binding, texture.index);
     }
 
+    void WriteDescriptorTextureArray(RHIDescSetHandle ds,
+                                     uint32_t         binding,
+                                     uint32_t         arrayElement,
+                                     RHITextureHandle texture) override {
+        SA_LOG_INFO("[DEV] WriteDescriptorArray  ds={} binding={}[{}] <- texture={}",
+                    ds.index, binding, arrayElement, texture.index);
+    }
+
     void WriteDescriptorStorageImage(RHIDescSetHandle ds,
                                      uint32_t         binding,
                                      RHITextureHandle texture) override {
@@ -220,7 +237,8 @@ public:
                                uint32_t         binding,
                                RHIBufferHandle  buffer,
                                uint64_t         /*offset*/ = 0,
-                               uint64_t         /*range*/  = ~0ull) override {
+                               uint64_t         /*range*/  = ~0ull,
+                               bool             /*dynamic*/ = false) override {
         SA_LOG_INFO("[DEV] WriteDescriptor  ds={} binding={} <- buffer={}",
                     ds.index, binding, buffer.index);
     }
@@ -247,6 +265,7 @@ public:
     }
 
     uint32_t GetCurrentFrameIndex() const override { return 0; }
+    uint32_t GetMinStorageBufferOffsetAlignment() const override { return 16; }
 
     // ── Destruction ───────────────────────────────────────────────────────────
 

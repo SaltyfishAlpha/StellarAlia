@@ -20,7 +20,7 @@
 // preventing isolated very-bright pixels from dominating the box average
 // (eliminates temporal firefly flicker at the first HDR downsample).
 
-layout(set = 1, binding = 0) uniform sampler2D t_HDR;
+layout(set = 2, binding = 0) uniform sampler2D t_HDR;
 
 layout(push_constant) uniform PushConstants {
     float threshold;

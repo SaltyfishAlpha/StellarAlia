@@ -197,6 +197,18 @@ public:
     void MarkSkinnedMeshDirty()        { m_skinnedMeshDirty   = true; }
     bool IsAndClearSkinnedMeshDirty()  { bool v = m_skinnedMeshDirty;  m_skinnedMeshDirty   = false; return v; }
 
+    // ── Stable scene-local identity (#75) ────────────────────────────────────
+    //
+    // Each entity gets an EntityIdComponent with a monotonically-increasing
+    // sceneLocalId at creation time; the ID survives save/load and is used by
+    // script-field `EntityRef` to persist cross-entity references.
+
+    // Look up an entity by its sceneLocalId; entt::null when not found.
+    entt::entity FindBySceneLocalId(uint64_t id) const;
+    // Reserve an explicit sceneLocalId for an entity (used by SceneSerializer
+    // load to restore IDs from disk before further entity creation).
+    void          AssignSceneLocalId(entt::entity e, uint64_t id);
+
 private:
     std::string    m_name;
     WorldSettings  m_worldSettings;
@@ -211,6 +223,10 @@ private:
     bool                      m_hierarchyDirty = true;
     bool                      m_materialDirty      = false;
     bool                      m_skinnedMeshDirty   = false;
+
+    // Monotonic counter for EntityIdComponent.sceneLocalId; starts at 1
+    // (0 = "unassigned" sentinel). Reset on Clear().
+    uint64_t                  m_nextLocalId = 1;
 
     void RebuildSortedOrder();
     void MarkDirtyRecursive(entt::entity entity);

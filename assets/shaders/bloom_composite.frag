@@ -3,7 +3,7 @@
 // Bloom composite — outputs bloom * strength.
 // Pipeline uses Additive blend so the result is added to the existing HDR buffer.
 
-layout(set = 1, binding = 0) uniform sampler2D t_Bloom;
+layout(set = 2, binding = 0) uniform sampler2D t_Bloom;
 
 layout(push_constant) uniform PushConstants {
     float strength;

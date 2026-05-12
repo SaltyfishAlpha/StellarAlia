@@ -16,11 +16,15 @@ bool AnimatorDrawer::TryDraw(entt::registry& reg, entt::entity entity,
     if (RemoveButton("x##rem_anim")) { reg.remove<AnimatorComponent>(entity); return true; }
     if (!open) return true;
     DrawAssetIDField("Clip Asset", anim->clipAsset, "Animation", ctx.assetReg);
-    ImGui::DragFloat("Time (s)", &anim->time,  0.01f, 0.f, 3600.f);
-    ImGui::DragFloat("Speed",    &anim->speed, 0.01f, 0.f,   10.f);
-    ImGui::Checkbox("Looping",  &anim->looping);
+    TrackedFieldEdit(&anim->time, ctx, "Edit Time",
+        [](float* p){ return ImGui::DragFloat("Time (s)", p, 0.01f, 0.f, 3600.f); });
+    TrackedFieldEdit(&anim->speed, ctx, "Edit Speed",
+        [](float* p){ return ImGui::DragFloat("Speed", p, 0.01f, 0.f, 10.f); });
+    TrackedFieldEdit(&anim->looping, ctx, "Toggle Looping",
+        [](bool* p){ return ImGui::Checkbox("Looping", p); });
     ImGui::SameLine();
-    ImGui::Checkbox("Playing",  &anim->playing);
+    TrackedFieldEdit(&anim->playing, ctx, "Toggle Playing",
+        [](bool* p){ return ImGui::Checkbox("Playing", p); });
     return true;
 }
 
