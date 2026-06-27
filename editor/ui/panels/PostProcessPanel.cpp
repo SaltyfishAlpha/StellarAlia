@@ -145,6 +145,24 @@ void PostProcessPanel::OnDraw() {
 
     ImGui::Spacing();
 
+    // ── Motion Blur (Camera Mode) ─────────────────────────────────────────────
+    // Issue #46 Phase 1: covers camera pan/dolly/rotation only. Object & skinned
+    // motion blur are Phase 2 — UI label flags the current mode explicitly.
+    if (ImGui::CollapsingHeader("Camera Motion Blur")) {
+        if (ImGui::Checkbox("Enabled##mb", &pp.motionBlurEnabled))
+            liveUpdate = true;
+        ImGui::BeginDisabled(!pp.motionBlurEnabled);
+        if (ImGui::SliderFloat("Strength##mb",      &pp.motionBlurStrength, 0.0f, 2.0f, "%.2f"))
+            liveUpdate = true;
+        if (ImGui::SliderInt  ("Samples##mb",       &pp.motionBlurSamples,  4,    32))
+            liveUpdate = true;
+        if (ImGui::SliderFloat("Max Speed (NDC)##mb", &pp.motionBlurMaxSpeed, 0.01f, 0.3f, "%.3f"))
+            liveUpdate = true;
+        ImGui::EndDisabled();
+    }
+
+    ImGui::Spacing();
+
     // ── TAA (Temporal AA) ─────────────────────────────────────────────────────
     if (ImGui::CollapsingHeader("Temporal Anti-Aliasing (TAA)")) {
         if (ImGui::Checkbox("Enabled##taa", &pp.taaEnabled))
@@ -155,6 +173,44 @@ void PostProcessPanel::OnDraw() {
         if (ImGui::SliderFloat("Motion Blend##taa",  &pp.taaBlendMotion, 0.1f,  1.0f,  "%.2f"))
             liveUpdate = true;
         if (ImGui::Checkbox("Anti-Ghosting##taa", &pp.taaAntiGhosting))
+            liveUpdate = true;
+        ImGui::EndDisabled();
+    }
+
+    ImGui::Spacing();
+
+    // ── Screen modifications (Issue #47) ─────────────────────────────────────
+    if (ImGui::CollapsingHeader("Vignette")) {
+        if (ImGui::Checkbox("Enabled##vig", &pp.vignetteEnabled))
+            liveUpdate = true;
+        ImGui::BeginDisabled(!pp.vignetteEnabled);
+        if (ImGui::SliderFloat("Intensity##vig",  &pp.vignetteIntensity,  0.f,   1.f,  "%.2f"))
+            liveUpdate = true;
+        if (ImGui::SliderFloat("Smoothness##vig", &pp.vignetteSmoothness, 0.01f, 1.f,  "%.2f"))
+            liveUpdate = true;
+        ImGui::EndDisabled();
+    }
+
+    ImGui::Spacing();
+
+    if (ImGui::CollapsingHeader("Chromatic Aberration")) {
+        if (ImGui::Checkbox("Enabled##ca", &pp.caEnabled))
+            liveUpdate = true;
+        ImGui::BeginDisabled(!pp.caEnabled);
+        if (ImGui::SliderFloat("Strength##ca", &pp.caStrength, 0.f, 5.f, "%.2f"))
+            liveUpdate = true;
+        ImGui::EndDisabled();
+    }
+
+    ImGui::Spacing();
+
+    if (ImGui::CollapsingHeader("Film Grain")) {
+        if (ImGui::Checkbox("Enabled##grain", &pp.filmGrainEnabled))
+            liveUpdate = true;
+        ImGui::BeginDisabled(!pp.filmGrainEnabled);
+        if (ImGui::SliderFloat("Intensity##grain", &pp.filmGrainIntensity, 0.f,  0.3f, "%.3f"))
+            liveUpdate = true;
+        if (ImGui::SliderFloat("Size##grain",      &pp.filmGrainSize,      0.5f, 5.f,  "%.2f"))
             liveUpdate = true;
         ImGui::EndDisabled();
     }

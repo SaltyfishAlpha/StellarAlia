@@ -13,6 +13,7 @@
 #include <unordered_set>
 #include <vector>
 
+namespace StellarAlia          { class Application; }
 namespace StellarAlia          { class MaterialManager; }
 namespace StellarAlia          { class InputSystem; }
 namespace StellarAlia::Resource { class AssetRegistry; }
@@ -71,7 +72,7 @@ public:
     void RequestReimportAll(); // force-recook all assets under assetsRoot
 
 private:
-    enum class CreateKind : uint8_t { Mat, Saglsl, Scene, Script };
+    enum class CreateKind : uint8_t { Mat, Saglsl, Scene, Script, InputMap };
 
     // Left pane: recursive directory tree (dirs only).
     void DrawDirPane(const std::filesystem::path& dir);
@@ -84,6 +85,12 @@ private:
 
     // Create a new empty directory and enter inline rename.
     void CreateNewDir(const std::filesystem::path& parent);
+
+    // Shared "Create" menu body — call inside an open ImGui::BeginMenu("Create")
+    // block. Single source of truth for the create menu so new CreateKind values
+    // appear in every right-click context (root pane, dir pane, sub-dir item,
+    // file-pane background, file-pane dir item) without per-site duplication.
+    void RenderCreateMenuContents(const std::filesystem::path& dir);
 
     // Create a .mat from a .saglsl shader, then enter inline rename.
     void CreateMatFromShader(const std::string& typeName,
@@ -121,6 +128,7 @@ private:
     std::filesystem::path    m_selectedPath;   // primary selection (for context ops)
     std::string              m_projectDir;
     std::string              m_cookCacheDir;
+    Application*              m_app            = nullptr;
     Resource::AssetRegistry*  m_registry       = nullptr;
     MaterialManager*          m_matMgr         = nullptr;
     EditorDiagnostics*        m_diagnostics    = nullptr;

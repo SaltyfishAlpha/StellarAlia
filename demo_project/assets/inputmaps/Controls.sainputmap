@@ -1,0 +1,25 @@
+{
+  "name": "Gameplay",
+  "passthrough": true,
+  "actions": [
+    {
+      "name": "Move",
+      "type": "Axis2D",
+      "userConfigurable": false,
+      "bindings": [
+        { "kind": "WASD", "up": "Keyboard/W", "down": "Keyboard/S", "left": "Keyboard/A", "right": "Keyboard/D", "normalize": true },
+        { "kind": "Direct", "path": "Gamepad/LeftStick", "deadZone": 0.12 }
+      ]
+    },
+    {
+      "name": "Jump",
+      "type": "Button",
+      "userConfigurable": false,
+      "activationThreshold": 0.5,
+      "bindings": [
+        { "kind": "Direct", "path": "Keyboard/Space" },
+        { "kind": "Direct", "path": "Gamepad/ButtonSouth" }
+      ]
+    }
+  ]
+}

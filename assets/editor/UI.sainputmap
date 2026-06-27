@@ -1,0 +1,34 @@
+{
+  "name": "UI",
+  "passthrough": false,
+  "actions": [
+    {
+      "name": "Navigate",
+      "type": "Axis2D",
+      "userConfigurable": false,
+      "bindings": [
+        { "kind": "WASD", "up": "Keyboard/Up", "down": "Keyboard/Down", "left": "Keyboard/Left", "right": "Keyboard/Right", "normalize": false },
+        { "kind": "Direct", "path": "Gamepad/LeftStick", "deadZone": 0.3 },
+        { "kind": "Direct", "path": "Gamepad/DPad" }
+      ]
+    },
+    {
+      "name": "Submit",
+      "type": "Button",
+      "userConfigurable": false,
+      "bindings": [
+        { "kind": "Direct", "path": "Keyboard/Return" },
+        { "kind": "Direct", "path": "Gamepad/ButtonSouth" }
+      ]
+    },
+    {
+      "name": "Cancel",
+      "type": "Button",
+      "userConfigurable": false,
+      "bindings": [
+        { "kind": "Direct", "path": "Keyboard/Escape" },
+        { "kind": "Direct", "path": "Gamepad/ButtonEast" }
+      ]
+    }
+  ]
+}

@@ -12,12 +12,14 @@ void EntityTemplateRegistry::Scan(const fs::path& engineAssetsDir) {
     m_scriptTemplate.clear();
     m_matTemplate.clear();
     m_shaderTemplate.clear();
+    m_inputMapTemplate.clear();
 
     const fs::path entitiesDir  = engineAssetsDir / "templates" / "entities";
     const fs::path scenesDir    = engineAssetsDir / "templates" / "scenes";
     const fs::path scriptsDir   = engineAssetsDir / "templates" / "scripts";
     const fs::path materialsDir = engineAssetsDir / "templates" / "materials";
     const fs::path shadersDir   = engineAssetsDir / "templates" / "shaders";
+    const fs::path inputMapsDir = engineAssetsDir / "templates" / "inputmaps";
 
     const fs::path candidate = scenesDir / "default.sascene";
     if (fs::exists(candidate))
@@ -34,6 +36,10 @@ void EntityTemplateRegistry::Scan(const fs::path& engineAssetsDir) {
     const fs::path shaderCandidate = shadersDir / "NewShader.saglsl";
     if (fs::exists(shaderCandidate))
         m_shaderTemplate = fs::absolute(shaderCandidate);
+
+    const fs::path inputMapCandidate = inputMapsDir / "Controls.sainputmap";
+    if (fs::exists(inputMapCandidate))
+        m_inputMapTemplate = fs::absolute(inputMapCandidate);
 
     if (!fs::exists(entitiesDir)) return;
 

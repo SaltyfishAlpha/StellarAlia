@@ -83,8 +83,26 @@ struct PostProcessSettings {
     bool  autoFocus       = false;  // Phase 2: GPU depth readback
     float maxCocPx        = 20.0f;  // max CoC radius in pixels
 
-    // ── Future effects ────────────────────────────────────────────────────────
-    bool motionBlurEnabled = false;
+    // ── Motion Blur (Camera Mode, Issue #46 Phase 1) ─────────────────────────
+    // Reconstructs per-pixel velocity from depth + prevViewProj; covers camera
+    // pan/dolly/rotation. Per-object velocity (skinned mesh swing, moving rigid
+    // body under static camera) is Phase 2 work.
+    bool  motionBlurEnabled  = false;
+    float motionBlurStrength = 0.5f;   // [0..2] — 1.0 ~ physically correct
+    int   motionBlurSamples  = 8;      // [4..32] reconstruct sample count
+    float motionBlurMaxSpeed = 0.1f;   // NDC screen-space velocity clamp
+
+    // ── Screen modifications (Issue #47) ─────────────────────────────────────
+    // PostFX pass runs after Tonemap on the LDR buffer; each layer is
+    // independently toggleable. All three disabled → pure LDR→swapchain copy.
+    bool  vignetteEnabled     = false;
+    float vignetteIntensity   = 0.4f;   // [0..1] elliptical falloff start
+    float vignetteSmoothness  = 0.6f;   // [0.01..1] falloff width
+    bool  caEnabled           = false;
+    float caStrength          = 0.5f;   // [0..5] radial RGB offset multiplier
+    bool  filmGrainEnabled    = false;
+    float filmGrainIntensity  = 0.1f;   // [0..0.3] amplitude
+    float filmGrainSize       = 1.6f;   // [0.5..5] noise tile scale
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -182,6 +200,13 @@ public:
     // Rebuilds the topological traversal order (BFS from roots) whenever the
     // hierarchy has changed since the last call.  Call once per frame.
     void UpdateTransforms();
+
+    // Walks the parent chain from `entity` up to root, then recomputes
+    // WorldTransformComponent top-down for any node whose dirty flag is true.
+    // Used by the script API world-space accessors so they see a fresh matrix
+    // even when called between the physics tick and the per-frame
+    // UpdateTransforms pass. Cost: O(depth) — bounded by hierarchy depth.
+    void EnsureWorldUpToDate(entt::entity entity);
 
     // Mark an entity's world transform (and all descendants) as dirty.
     // Call after manually modifying a TransformComponent.

@@ -175,9 +175,24 @@ bool SceneRenderer::Init(const Desc& desc) {
     //   [Shadow?, Skybox, GBuffer, SSAO, DeferredLighting, SelectionMask, TAA, Bloom, Tonemap,
     //    ...user features, SelectionOutline, DebugOverlay]
     {
+        // PostFX runs AFTER Tonemap on the LDR buffer. Inserted first so the
+        // subsequent Tonemap front-insert pushes it to position 1; the final
+        // order ends up [..., Tonemap, PostFX, SelectionOutline, ...].
+        auto pfx = std::make_unique<PostFXFeature>();
+        m_postFxFeature = pfx.get();
+        m_features.insert(m_features.begin(), std::move(pfx));
+    }
+    {
         auto tf = std::make_unique<TonemapFeature>();
         m_tonemapFeature = tf.get();
         m_features.insert(m_features.begin(), std::move(tf));
+    }
+    {
+        // MotionBlur runs after DoF but before Tonemap (Issue #46). Inserted
+        // here so final order is [..., DoF, MotionBlur, Tonemap].
+        auto mbF = std::make_unique<MotionBlurFeature>();
+        m_motionBlurFeature = mbF.get();
+        m_features.insert(m_features.begin(), std::move(mbF));
     }
     {
         // DoF runs after Bloom but before Tonemap: inserted between them.
@@ -217,6 +232,14 @@ bool SceneRenderer::Init(const Desc& desc) {
         auto ssaoF = std::make_unique<SSAOFeature>();
         m_ssaoFeature = ssaoF.get();
         m_features.insert(m_features.begin(), std::move(ssaoF));
+    }
+    {
+        // VelocityPrepass runs after GBuffer (depth populated) and before SSAO
+        // (Issue #84). Insert order is reverse — placed between SSAO insert and
+        // GBuffer insert here so final order is [..., GBuffer, VelocityPrepass, SSAO, ...].
+        auto vpF = std::make_unique<VelocityPrepassFeature>();
+        m_velocityPrepassFeature = vpF.get();
+        m_features.insert(m_features.begin(), std::move(vpF));
     }
     {
         auto gf = std::make_unique<GBufferFeature>(this);
@@ -459,6 +482,26 @@ void SceneRenderer::ApplyWorldSettings(WorldSettings& ws, bool updateIBL)
         m_dofFeature->m_focalLength = pp.focalLength;
         m_dofFeature->m_samples     = pp.dofSamples;
         m_dofFeature->m_maxCocPx    = pp.maxCocPx;
+    }
+
+    // Motion Blur — Camera Mode (Issue #46 Phase 1).
+    if (m_motionBlurFeature) {
+        m_motionBlurFeature->m_enabled  = pp.motionBlurEnabled;
+        m_motionBlurFeature->m_strength = pp.motionBlurStrength;
+        m_motionBlurFeature->m_samples  = pp.motionBlurSamples;
+        m_motionBlurFeature->m_maxSpeed = pp.motionBlurMaxSpeed;
+    }
+
+    // PostFX (Issue #47) — vignette / chromatic aberration / film grain.
+    if (m_postFxFeature) {
+        m_postFxFeature->m_vignetteEnabled    = pp.vignetteEnabled;
+        m_postFxFeature->m_vignetteIntensity  = pp.vignetteIntensity;
+        m_postFxFeature->m_vignetteSmoothness = pp.vignetteSmoothness;
+        m_postFxFeature->m_caEnabled          = pp.caEnabled;
+        m_postFxFeature->m_caStrength         = pp.caStrength;
+        m_postFxFeature->m_filmGrainEnabled   = pp.filmGrainEnabled;
+        m_postFxFeature->m_filmGrainIntensity = pp.filmGrainIntensity;
+        m_postFxFeature->m_filmGrainSize      = pp.filmGrainSize;
     }
 
     // TAA — update runtime parameters; reset history on enable/disable toggle.
@@ -908,6 +951,11 @@ RHI::RHIDescLayoutHandle SceneRenderer::GetSkinDescLayout() const {
     return m_gbufferFeature->m_skinDescLayout;
 }
 
+RHI::RHIDescLayoutHandle SceneRenderer::GetVelocityDescLayout() const {
+    if (!m_velocityPrepassFeature) return {};
+    return m_velocityPrepassFeature->GetSkinnedLayout();
+}
+
 // ── GatherLights ──────────────────────────────────────────────────────────────
 
 LightUniforms SceneRenderer::GatherLights(const Scene& scene) const {
@@ -1021,6 +1069,7 @@ void SceneRenderer::ApplyCameraToUniforms(const CameraData& cam, FrameUniforms& 
 {
     const glm::mat4 unjitteredProj = cam.proj;
     const glm::mat4 invUnjitteredProj = glm::inverse(unjitteredProj);
+    const glm::mat4 currViewProj      = unjitteredProj * cam.view;
 
     fu.view        = cam.view;
     fu.cameraPos   = cam.worldPosition;
@@ -1029,9 +1078,16 @@ void SceneRenderer::ApplyCameraToUniforms(const CameraData& cam, FrameUniforms& 
     fu.invProj     = invUnjitteredProj;
     fu.invViewProj = RigidBodyInverse(cam.view) * invUnjitteredProj;
 
-    // Previous-frame unjittered VP for TAA reprojection.
-    fu.prevViewProj          = m_prevUnjitteredViewProj;
-    m_prevUnjitteredViewProj = unjitteredProj * cam.view;
+    // Previous-frame unjittered VP for TAA reprojection / motion blur velocity.
+    // First-frame guard (Issue #46): m_prevUnjitteredViewProj initializes to
+    // identity, which produces garbage velocity. TAA absorbs this via history
+    // weighting; motion blur cannot — seed prev = curr on first use so
+    // velocity = (currUV - prevUV) = 0 instead of catastrophic.
+    if (m_prevUnjitteredViewProj == glm::mat4(1.f))
+        m_prevUnjitteredViewProj = currViewProj;
+    fu.prevViewProj            = m_prevUnjitteredViewProj;
+    fu.currUnjitteredViewProj  = currViewProj;        // Issue #85
+    m_prevUnjitteredViewProj   = currViewProj;
 
     // Sub-pixel Halton(2,3) jitter — only applied when TAA is active.
     glm::mat4 proj = unjitteredProj;
@@ -1276,6 +1332,29 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
         d.debugName = "HDR_Color";
         m_rgHdr = m_rg.CreateTexture("HDR_Color", d);
     }
+    // Velocity RT — public interface (Issue #46). Phase 1: MotionBlurFeature
+    // fills it from depth + prevViewProj. Phase 2: GBuffer per-object writes.
+    {
+        RHI::RHITextureDesc d{};
+        d.width     = w;
+        d.height    = h;
+        d.format    = RHI::RHIFormat::RG16F;
+        d.usage     = RHI::RHITextureUsage::RenderTarget | RHI::RHITextureUsage::Sampled;
+        d.debugName = "Velocity";
+        m_rgVelocity = m_rg.CreateTexture("Velocity", d);
+    }
+    // LDR_Color — post-tonemap (Issue #47). Tonemap writes here; PostFXFeature
+    // reads it and writes the swapchain. Format matches swapchain to avoid
+    // pipeline cache churn vs. the previous direct-to-swapchain tonemap.
+    {
+        RHI::RHITextureDesc d{};
+        d.width     = w;
+        d.height    = h;
+        d.format    = m_device->GetSwapchainFormat();
+        d.usage     = RHI::RHITextureUsage::RenderTarget | RHI::RHITextureUsage::Sampled;
+        d.debugName = "LDR_Color";
+        m_rgLdr = m_rg.CreateTexture("LDR_Color", d);
+    }
     m_rgShadowMap = m_rg.ImportTexture("ShadowMap", m_shadowMap,
         RHI::RHIResourceState::Undefined, RHI::RHIResourceState::Undefined);
     for (int i = 0; i < m_bloomMipCount; ++i) {
@@ -1294,8 +1373,10 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
     RendererHandles handles{};
     handles.hdr           = m_rgHdr;
     handles.taaResolved   = m_rgHdr;  // default when TAA disabled; overridden below after TAAFeature runs
+    handles.ldr           = m_rgLdr;
     handles.swapchain     = m_rgSwapchain;
     handles.depth         = m_rgDepth;
+    handles.velocity      = m_rgVelocity;
     handles.gbufferRT0    = m_rgGbRT0;
     handles.gbufferRT1    = m_rgGbRT1;
     handles.gbufferRT2    = m_rgGbRT2;
@@ -1321,6 +1402,8 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
             handles.taaResolved = m_taaFeature->m_outputHandle;
         if (m_dofFeature && f.get() == m_dofFeature && m_dofFeature->m_outputHandle.IsValid())
             handles.hdr = m_dofFeature->m_outputHandle;
+        if (m_motionBlurFeature && f.get() == m_motionBlurFeature && m_motionBlurFeature->m_outputHandle.IsValid())
+            handles.hdr = m_motionBlurFeature->m_outputHandle;
     }
 
     // ── Compile + Execute + Present ───────────────────────────────────────────
@@ -1697,6 +1780,159 @@ void SceneRenderer::GBufferFeature::AddPasses(SceneRenderer& renderer,
                 if (item.pushConstantSize > 0)
                     cmd.SetPushConstants(&world, item.pushConstantSize,
                                          RHI::RHIShaderStage::Vertex);
+                cmd.DrawIndexed(item.indexCount, 1, item.firstIndex,
+                                item.vertexOffset, 0);
+            }
+            cmd.EndRenderPass();
+        });
+}
+
+// ── VelocityPrepassFeature (Issue #84) ───────────────────────────────────────
+
+void SceneRenderer::VelocityPrepassFeature::OnInit(const FeatureInitContext& ctx)
+{
+    if (!ctx.matMgr->LoadShaderProgram(m_staticProgram,
+                                        "velocity_prepass", "velocity_prepass", ctx)) {
+        SA_LOG_WARN("VelocityPrepassFeature: static shader load failed — feature disabled");
+        return;
+    }
+    if (!ctx.matMgr->LoadShaderProgram(m_skinnedProgram,
+                                        "velocity_prepass_skinned", "velocity_prepass", ctx)) {
+        SA_LOG_WARN("VelocityPrepassFeature: skinned shader load failed — skinned velocity unavailable");
+    }
+    // Reflected set=3 layout has bindings 0/1/2 = curr/skinData/prev.
+    // AnimationSystem reads this via SceneRenderer::GetVelocityDescLayout() to
+    // allocate per-entity velocityDescSet in PrepareEntity.
+    if (m_skinnedProgram.IsLoaded())
+        m_skinnedLayout = m_skinnedProgram.GetSet3Layout();
+}
+
+void SceneRenderer::VelocityPrepassFeature::OnShutdown(RHI::IRHIDevice* /*device*/)
+{
+    m_skinnedLayout = {};
+}
+
+void SceneRenderer::VelocityPrepassFeature::AddPasses(SceneRenderer& renderer,
+                                                       const FrameContext& ctx,
+                                                       const RendererHandles& handles,
+                                                       const entt::registry& reg,
+                                                       uint32_t w, uint32_t h)
+{
+    SA_PROFILE_SCOPE_N("VelocityPrepass::AddPasses");
+    // Issue #85: handles.velocity now consumed by MotionBlur OR TAA (and future
+    // #48 SSR). Add OR conditions here as new consumers appear.
+    const bool needVelocity =
+           (renderer.m_motionBlurFeature && renderer.m_motionBlurFeature->m_enabled)
+        || (renderer.m_taaFeature        && renderer.m_taaFeature->m_enabled);
+    if (!needVelocity) return;
+    if (!m_staticProgram.IsLoaded()) return;
+
+    AttachmentKey velKey{};
+    velKey.colorCount      = 1;
+    velKey.colorFormats[0] = RHI::RHIFormat::RG16F;
+    velKey.depthFormat     = RHI::RHIFormat::D32F;
+
+    // depthTest=true (cull occluded fragments), depthWrite=false (don't overwrite
+    // GBuffer's depth buffer). Cull mode matches GBuffer (Back).
+    const RHI::RHIPipelineHandle staticPipeline = m_staticProgram.GetOrCreatePipeline(
+        ctx.device, velKey,
+        RHI::RHICullMode::Back, RHI::RHIBlendMode::Opaque, RHI::RHITopology::TriangleList,
+        /*depthTest=*/true, /*depthWrite=*/false, /*noVertexInput=*/false);
+    RHI::RHIPipelineHandle skinnedPipeline{};
+    if (m_skinnedProgram.IsLoaded())
+        skinnedPipeline = m_skinnedProgram.GetOrCreatePipeline(
+            ctx.device, velKey,
+            RHI::RHICullMode::Back, RHI::RHIBlendMode::Opaque, RHI::RHITopology::TriangleList,
+            true, false, false);
+
+    const RGTextureHandle       rgVelocity = handles.velocity;
+    const RGTextureHandle       rgDepth    = handles.depth;
+    const RHI::RHIDescSetHandle frameSet   = ctx.frameSet;
+    const entt::registry*       regPtr     = &reg;
+
+    ctx.rg->AddPass("VelocityPrepass",
+        [rgVelocity, rgDepth](RGPassBuilder& b) {
+            b.Write(rgVelocity);
+            // Depth is an attachment we *test* against (pipeline depthWrite=false),
+            // but RG only has WriteDepth — semantically the slot must be in
+            // depth-attachment layout. Pipeline state guards against actual writes.
+            b.WriteDepth(rgDepth);
+        },
+        [&drawItems = renderer.m_visibleDrawItems, regPtr, frameSet,
+         staticPipeline, skinnedPipeline,
+         rgVelocity, rgDepth, w, h]
+        (RHI::IRHICommandList& cmd, const RGResources& res)
+        {
+            SA_PROFILE_SCOPE_N("VelocityPrepass::Execute");
+            RHI::RHIRenderPassDesc rpDesc{};
+            rpDesc.colorAttachmentCount        = 1;
+            rpDesc.colorAttachments[0].texture     = res.Get(rgVelocity);
+            rpDesc.colorAttachments[0].clearOnLoad = true;  // skybox / non-rasterized pixels stay 0
+            rpDesc.depthAttachment.texture     = res.Get(rgDepth);
+            rpDesc.depthAttachment.clearOnLoad = false;
+            rpDesc.hasDepth = true;
+            rpDesc.width    = w;
+            rpDesc.height   = h;
+
+            cmd.BeginRenderPass(rpDesc);
+            cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
+            cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
+
+            // Per-draw push constants: { mat4 currModel; mat4 prevModel; } = 128B exact.
+            struct PrepassPC { glm::mat4 currModel; glm::mat4 prevModel; };
+
+            RHI::RHIPipelineHandle currentPipeline{};
+            RHI::RHIBufferHandle   currentVB{};
+            RHI::RHIBufferHandle   currentIB{};
+            bool frameSetBound = false;
+
+            for (const DrawItem* itemPtr : drawItems) {
+                const auto& item = *itemPtr;
+
+                const RHI::RHIPipelineHandle effective =
+                    (item.isSkinned && skinnedPipeline.IsValid()) ? skinnedPipeline : staticPipeline;
+                if (!effective.IsValid()) continue;
+
+                const auto* wt = regPtr->try_get<WorldTransformComponent>(item.entity);
+                if (!wt) continue;
+
+                // prevWorld: fall back to currWorld when PrevTransform is missing
+                // (raw emplace path bypassed Scene::CreateEntity) → velocity=0.
+                glm::mat4 prevWorld = wt->matrix;
+                if (const auto* pt = regPtr->try_get<PrevTransformComponent>(item.entity); pt && pt->seeded)
+                    prevWorld = pt->prevModel;
+
+                const PrepassPC pc{
+                    wt->matrix * item.subLocalTransform,
+                    prevWorld  * item.subLocalTransform,
+                };
+
+                if (effective.index != currentPipeline.index) {
+                    cmd.SetPipeline(effective);
+                    currentPipeline = effective;
+                    if (!frameSetBound) {
+                        cmd.SetDescriptorSet(1, frameSet);
+                        frameSetBound = true;
+                    }
+                }
+
+                if (item.isSkinned) {
+                    // velocityDescSet (set=3, bindings 0/1/2 = curr/skinData/prev) —
+                    // separate from item.skinDescSet because layouts differ.
+                    const auto* smc = regPtr->try_get<SkinnedMeshComponent>(item.entity);
+                    if (!smc || !smc->velocityDescSet.IsValid()) continue;
+                    cmd.SetDescriptorSet(3, smc->velocityDescSet);
+                }
+
+                if (item.vertexBuffer.index != currentVB.index) {
+                    cmd.SetVertexBuffer(0, item.vertexBuffer);
+                    currentVB = item.vertexBuffer;
+                }
+                if (item.indexBuffer.index != currentIB.index) {
+                    cmd.SetIndexBuffer(item.indexBuffer);
+                    currentIB = item.indexBuffer;
+                }
+                cmd.SetPushConstants(&pc, sizeof(pc), RHI::RHIShaderStage::Vertex);
                 cmd.DrawIndexed(item.indexCount, 1, item.firstIndex,
                                 item.vertexOffset, 0);
             }
@@ -2099,6 +2335,7 @@ void SceneRenderer::TAAFeature::AddPasses(SceneRenderer& /*renderer*/,
     ctx.BindTexture(m_resolveSet, 0, handles.hdr);
     ctx.BindTexture(m_resolveSet, 1, rgHistoryRead);
     ctx.BindTexture(m_resolveSet, 2, handles.depth);
+    ctx.BindTexture(m_resolveSet, 3, handles.velocity);  // Issue #85
 
     AttachmentKey hdrKey{};
     hdrKey.colorCount      = 1;
@@ -2116,13 +2353,15 @@ void SceneRenderer::TAAFeature::AddPasses(SceneRenderer& /*renderer*/,
 
     const RGTextureHandle rgCurrent  = handles.hdr;
     const RGTextureHandle rgDepth    = handles.depth;
+    const RGTextureHandle rgVelocity = handles.velocity;  // Issue #85
     const RHI::RHIDescSetHandle resolveSet = m_resolveSet;
     const RHI::RHIDescSetHandle frameSet   = ctx.frameSet;
 
     ctx.rg->AddPass("TAA_Resolve",
-        [rgCurrent, rgDepth, rgHistoryRead, rgHistoryWrite](RGPassBuilder& b) {
+        [rgCurrent, rgDepth, rgVelocity, rgHistoryRead, rgHistoryWrite](RGPassBuilder& b) {
             b.Read(rgCurrent);
             b.Read(rgDepth);
+            b.Read(rgVelocity);
             b.Read(rgHistoryRead);
             b.Write(rgHistoryWrite);
         },
@@ -2357,6 +2596,202 @@ void SceneRenderer::DoFFeature::AddPasses(SceneRenderer& /*renderer*/,
                 cmd.SetDescriptorSet(1, frameSet);
                 cmd.SetDescriptorSet(2, compositeDs);
                 cmd.SetPushConstants(&compPC, sizeof(compPC), RHI::RHIShaderStage::Fragment);
+                cmd.Draw(3, 1, 0, 0);
+                cmd.EndRenderPass();
+            });
+    }
+}
+
+// ── MotionBlurFeature ─────────────────────────────────────────────────────────
+
+void SceneRenderer::MotionBlurFeature::OnInit(const FeatureInitContext& ctx)
+{
+    // Issue #84: MB_Velocity pass removed — handles.velocity is filled by
+    // VelocityPrepassFeature now (per-object writes, not depth reprojection).
+    ctx.matMgr->RegisterTypeFromShaders(
+        {"MotionBlur_TileMax", "fullscreen_tri", "motion_blur_tile_max",
+         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque, RHI::RHITopology::TriangleList, false, false, true}, ctx);
+    ctx.matMgr->RegisterTypeFromShaders(
+        {"MotionBlur_NeighborMax", "fullscreen_tri", "motion_blur_neighbor_max",
+         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque, RHI::RHITopology::TriangleList, false, false, true}, ctx);
+    ctx.matMgr->RegisterTypeFromShaders(
+        {"MotionBlur_Reconstruct", "fullscreen_tri", "motion_blur_reconstruct",
+         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque, RHI::RHITopology::TriangleList, false, false, true}, ctx);
+
+    m_tileMaxMat     = ctx.matMgr->GetType("MotionBlur_TileMax");
+    m_neighborMaxMat = ctx.matMgr->GetType("MotionBlur_NeighborMax");
+    m_reconstructMat = ctx.matMgr->GetType("MotionBlur_Reconstruct");
+    if (!m_tileMaxMat || !m_neighborMaxMat || !m_reconstructMat) {
+        SA_LOG_WARN("MotionBlurFeature: shader load failed — motion blur disabled");
+        return;
+    }
+
+    m_tileMaxDescSet     = ctx.device->AllocateDescriptorSet(m_tileMaxMat->shader.GetMaterialLayout());
+    m_neighborMaxDescSet = ctx.device->AllocateDescriptorSet(m_neighborMaxMat->shader.GetMaterialLayout());
+    m_reconstructDescSet = ctx.device->AllocateDescriptorSet(m_reconstructMat->shader.GetMaterialLayout());
+}
+
+void SceneRenderer::MotionBlurFeature::OnShutdown(RHI::IRHIDevice* /*device*/)
+{
+    m_tileMaxDescSet     = {};
+    m_neighborMaxDescSet = {};
+    m_reconstructDescSet = {};
+    m_tileMaxMat = m_neighborMaxMat = m_reconstructMat = nullptr;
+}
+
+void SceneRenderer::MotionBlurFeature::AddPasses(SceneRenderer& /*renderer*/,
+                                                  const FrameContext& ctx,
+                                                  const RendererHandles& handles,
+                                                  const entt::registry& /*reg*/,
+                                                  uint32_t w, uint32_t h)
+{
+    SA_PROFILE_SCOPE_N("MotionBlur::AddPasses");
+    if (!m_enabled || !m_tileMaxMat || !m_tileMaxDescSet.IsValid()) {
+        m_outputHandle = {};
+        return;
+    }
+
+    // ── Transient intermediates ───────────────────────────────────────────────
+    const uint32_t tileW = (w + kTileSize - 1) / kTileSize;
+    const uint32_t tileH = (h + kTileSize - 1) / kTileSize;
+
+    RHI::RHITextureDesc rg16fTile{};
+    rg16fTile.width     = tileW;
+    rg16fTile.height    = tileH;
+    rg16fTile.format    = RHI::RHIFormat::RG16F;
+    rg16fTile.usage     = RHI::RHITextureUsage::RenderTarget | RHI::RHITextureUsage::Sampled;
+    rg16fTile.debugName = "MB_TileMax";
+    const RGTextureHandle rgTileMax     = ctx.rg->CreateTexture("MB_TileMax",     rg16fTile);
+    rg16fTile.debugName = "MB_NeighborMax";
+    const RGTextureHandle rgNeighborMax = ctx.rg->CreateTexture("MB_NeighborMax", rg16fTile);
+
+    RHI::RHITextureDesc rgbaOut{};
+    rgbaOut.width     = w;
+    rgbaOut.height    = h;
+    rgbaOut.format    = RHI::RHIFormat::RGBA16F;
+    rgbaOut.usage     = RHI::RHITextureUsage::RenderTarget | RHI::RHITextureUsage::Sampled;
+    rgbaOut.debugName = "MB_Output";
+    const RGTextureHandle rgOutput = ctx.rg->CreateTexture("MB_Output", rgbaOut);
+    m_outputHandle = rgOutput;
+
+    // ── Descriptor bindings (resolved by FlushBindings) ───────────────────────
+    ctx.BindTexture(m_tileMaxDescSet,     0, handles.velocity);
+    ctx.BindTexture(m_neighborMaxDescSet, 0, rgTileMax);
+    ctx.BindTexture(m_reconstructDescSet, 0, handles.hdr);
+    ctx.BindTexture(m_reconstructDescSet, 1, handles.velocity);
+    ctx.BindTexture(m_reconstructDescSet, 2, rgNeighborMax);
+    ctx.BindTexture(m_reconstructDescSet, 3, handles.depth);
+
+    // ── Attachment keys ───────────────────────────────────────────────────────
+    AttachmentKey velKey{};
+    velKey.colorCount      = 1;
+    velKey.colorFormats[0] = RHI::RHIFormat::RG16F;
+    velKey.depthFormat     = RHI::RHIFormat::Undefined;
+
+    AttachmentKey hdrKey{};
+    hdrKey.colorCount      = 1;
+    hdrKey.colorFormats[0] = RHI::RHIFormat::RGBA16F;
+    hdrKey.depthFormat     = RHI::RHIFormat::Undefined;
+
+    const RHI::RHIPipelineHandle tileMaxPipeline     = m_tileMaxMat->GetOrCreatePipeline(ctx.device, velKey);
+    const RHI::RHIPipelineHandle neighborMaxPipeline = m_neighborMaxMat->GetOrCreatePipeline(ctx.device, velKey);
+    const RHI::RHIPipelineHandle reconstructPipeline = m_reconstructMat->GetOrCreatePipeline(ctx.device, hdrKey);
+
+    const RHI::RHIDescSetHandle frameSet         = ctx.frameSet;
+    const RHI::RHIDescSetHandle tileMaxDs        = m_tileMaxDescSet;
+    const RHI::RHIDescSetHandle neighborMaxDs    = m_neighborMaxDescSet;
+    const RHI::RHIDescSetHandle reconstructDs    = m_reconstructDescSet;
+
+    const RGTextureHandle rgHdr      = handles.hdr;
+    const RGTextureHandle rgDepth    = handles.depth;
+    const RGTextureHandle rgVelocity = handles.velocity;
+
+    struct TileMaxPC { int tileSize; int _pad0; int _pad1; int _pad2; };
+    struct ReconstructPC {
+        float strength;  float maxSpeed;
+        int   samples;   int   _pad;
+        float invScreenX; float invScreenY;
+        float invTileX;   float invTileY;
+    };
+    const TileMaxPC     tileMaxPC{ kTileSize, 0, 0, 0 };
+    const ReconstructPC reconPC  { m_strength, m_maxSpeed, m_samples, 0,
+                                   1.f / float(w), 1.f / float(h),
+                                   1.f / float(kTileSize), 1.f / float(kTileSize) };
+
+    // Issue #84: MB_Velocity pass deleted — handles.velocity is populated by
+    // VelocityPrepassFeature (per-object writes), TileMax/NeighborMax/Reconstruct unchanged.
+
+    // ── Pass 1: TileMax (16× downscale of handles.velocity) ───────────────────
+    {
+        ctx.rg->AddPass("MB_TileMax",
+            [rgVelocity, rgTileMax](RGPassBuilder& b) { b.Read(rgVelocity); b.Write(rgTileMax); },
+            [tileMaxPipeline, frameSet, tileMaxDs, tileMaxPC, rgTileMax, tileW, tileH]
+            (RHI::IRHICommandList& cmd, const RGResources& res)
+            {
+                RHI::RHIRenderPassDesc rp{};
+                rp.colorAttachmentCount            = 1;
+                rp.colorAttachments[0].texture     = res.Get(rgTileMax);
+                rp.colorAttachments[0].clearOnLoad = true;
+                rp.width = tileW; rp.height = tileH;
+                cmd.BeginRenderPass(rp);
+                cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(tileW), float(tileH)});
+                cmd.SetScissor(RHI::RHIScissor{0, 0, tileW, tileH});
+                cmd.SetPipeline(tileMaxPipeline);
+                cmd.SetDescriptorSet(1, frameSet);
+                cmd.SetDescriptorSet(2, tileMaxDs);
+                cmd.SetPushConstants(&tileMaxPC, sizeof(tileMaxPC), RHI::RHIShaderStage::Fragment);
+                cmd.Draw(3, 1, 0, 0);
+                cmd.EndRenderPass();
+            });
+    }
+
+    // ── Pass 3: NeighborMax (3×3 dilate) ──────────────────────────────────────
+    {
+        ctx.rg->AddPass("MB_NeighborMax",
+            [rgTileMax, rgNeighborMax](RGPassBuilder& b) { b.Read(rgTileMax); b.Write(rgNeighborMax); },
+            [neighborMaxPipeline, frameSet, neighborMaxDs, rgNeighborMax, tileW, tileH]
+            (RHI::IRHICommandList& cmd, const RGResources& res)
+            {
+                RHI::RHIRenderPassDesc rp{};
+                rp.colorAttachmentCount            = 1;
+                rp.colorAttachments[0].texture     = res.Get(rgNeighborMax);
+                rp.colorAttachments[0].clearOnLoad = true;
+                rp.width = tileW; rp.height = tileH;
+                cmd.BeginRenderPass(rp);
+                cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(tileW), float(tileH)});
+                cmd.SetScissor(RHI::RHIScissor{0, 0, tileW, tileH});
+                cmd.SetPipeline(neighborMaxPipeline);
+                cmd.SetDescriptorSet(1, frameSet);
+                cmd.SetDescriptorSet(2, neighborMaxDs);
+                cmd.Draw(3, 1, 0, 0);
+                cmd.EndRenderPass();
+            });
+    }
+
+    // ── Pass 4: Reconstruct (McGuire 2012; writes to MB_Output) ───────────────
+    // Writing to a fresh RT (not directly hdr) so RG can read hdr while we
+    // write — same trick DoF Composite uses. RenderFrame redirects handles.hdr.
+    {
+        ctx.rg->AddPass("MB_Reconstruct",
+            [rgHdr, rgVelocity, rgNeighborMax, rgDepth, rgOutput](RGPassBuilder& b) {
+                b.Read(rgHdr); b.Read(rgVelocity); b.Read(rgNeighborMax); b.Read(rgDepth);
+                b.Write(rgOutput);
+            },
+            [reconstructPipeline, frameSet, reconstructDs, reconPC, rgOutput, w, h]
+            (RHI::IRHICommandList& cmd, const RGResources& res)
+            {
+                RHI::RHIRenderPassDesc rp{};
+                rp.colorAttachmentCount            = 1;
+                rp.colorAttachments[0].texture     = res.Get(rgOutput);
+                rp.colorAttachments[0].clearOnLoad = true;
+                rp.width = w; rp.height = h;
+                cmd.BeginRenderPass(rp);
+                cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
+                cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
+                cmd.SetPipeline(reconstructPipeline);
+                cmd.SetDescriptorSet(1, frameSet);
+                cmd.SetDescriptorSet(2, reconstructDs);
+                cmd.SetPushConstants(&reconPC, sizeof(reconPC), RHI::RHIShaderStage::Fragment);
                 cmd.Draw(3, 1, 0, 0);
                 cmd.EndRenderPass();
             });
@@ -2652,23 +3087,23 @@ void SceneRenderer::TonemapFeature::AddPasses(SceneRenderer& /*renderer*/,
     const RHI::RHIDescSetHandle frameSet   = ctx.frameSet;
     const RHI::RHIDescSetHandle hdrDescSet = m_hdrDescSet;
     const RGTextureHandle rgHdr       = handles.hdr;
-    const RGTextureHandle rgSwapchain = handles.swapchain;
+    const RGTextureHandle rgTarget    = handles.ldr;
 
     struct TonemapPC { float exposure; float cgEnabled; float _pad0; float _pad1; };
     const float cgOn = (m_cgSettings.enabled && m_cgLutTex.IsValid() && m_cgBakeProg.IsLoaded()) ? 1.f : 0.f;
     const TonemapPC pc{m_exposure, cgOn, 0.f, 0.f};
 
     ctx.rg->AddPass("Tonemap",
-        [rgHdr, rgSwapchain](RGPassBuilder& b) {
+        [rgHdr, rgTarget](RGPassBuilder& b) {
             b.Read(rgHdr);
-            b.Write(rgSwapchain);
+            b.Write(rgTarget);
         },
-        [pipeline, frameSet, hdrDescSet, pc, rgSwapchain, w, h]
+        [pipeline, frameSet, hdrDescSet, pc, rgTarget, w, h]
         (RHI::IRHICommandList& cmd, const RGResources& res)
         {
             RHI::RHIRenderPassDesc rpDesc{};
             rpDesc.colorAttachmentCount = 1;
-            rpDesc.colorAttachments[0].texture     = res.Get(rgSwapchain);
+            rpDesc.colorAttachments[0].texture     = res.Get(rgTarget);
             rpDesc.colorAttachments[0].clearOnLoad = true;
             rpDesc.width  = w;
             rpDesc.height = h;
@@ -2732,17 +3167,112 @@ void SceneRenderer::LutTonemapFeature::AddPasses(SceneRenderer& /*renderer*/,
     const RHI::RHIDescSetHandle  frameSet     = ctx.frameSet;
     const RHI::RHIDescSetHandle  hdrLutDescSet = m_hdrLutDescSet;
     const RGTextureHandle        rgHdr         = handles.hdr;
-    const RGTextureHandle        rgSwapchain   = handles.swapchain;
+    const RGTextureHandle        rgTarget      = handles.ldr;
 
     struct LutTonemapPC { float exposure; float lutStrength; float _pad0; float _pad1; };
     const LutTonemapPC pc{m_exposure, m_lutStrength, 0.f, 0.f};
 
     ctx.rg->AddPass("Tonemap",
-        [rgHdr, rgSwapchain](RGPassBuilder& b) {
+        [rgHdr, rgTarget](RGPassBuilder& b) {
             b.Read(rgHdr);
+            b.Write(rgTarget);
+        },
+        [pipeline, frameSet, hdrLutDescSet, pc, rgTarget, w, h]
+        (RHI::IRHICommandList& cmd, const RGResources& res)
+        {
+            RHI::RHIRenderPassDesc rpDesc{};
+            rpDesc.colorAttachmentCount = 1;
+            rpDesc.colorAttachments[0].texture     = res.Get(rgTarget);
+            rpDesc.colorAttachments[0].clearOnLoad = true;
+            rpDesc.width  = w;
+            rpDesc.height = h;
+
+            cmd.BeginRenderPass(rpDesc);
+            cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
+            cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
+            cmd.SetPipeline(pipeline);
+            cmd.SetDescriptorSet(1, frameSet);
+            cmd.SetDescriptorSet(2, hdrLutDescSet);
+            cmd.SetPushConstants(&pc, sizeof(pc), RHI::RHIShaderStage::Fragment);
+            cmd.Draw(3, 1, 0, 0);
+            cmd.EndRenderPass();
+        });
+}
+
+// ── PostFXFeature ─────────────────────────────────────────────────────────────
+
+void SceneRenderer::PostFXFeature::OnInit(const FeatureInitContext& ctx)
+{
+    ctx.matMgr->RegisterTypeFromShaders(
+        {"PostFX", "fullscreen_tri", "postfx",
+         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque, RHI::RHITopology::TriangleList, false, false, true}, ctx);
+    m_type = ctx.matMgr->GetType("PostFX");
+    if (!m_type) { SA_LOG_WARN("PostFXFeature: shader load failed"); return; }
+    m_descSet = ctx.device->AllocateDescriptorSet(m_type->shader.GetMaterialLayout());
+}
+
+void SceneRenderer::PostFXFeature::OnShutdown(RHI::IRHIDevice* /*device*/)
+{
+    m_descSet = {};
+    m_type = nullptr;
+}
+
+void SceneRenderer::PostFXFeature::AddPasses(SceneRenderer& /*renderer*/,
+                                              const FrameContext& ctx,
+                                              const RendererHandles& handles,
+                                              const entt::registry& /*reg*/,
+                                              uint32_t w, uint32_t h)
+{
+    if (!m_type || !m_descSet.IsValid()) return;
+
+    ctx.BindTexture(m_descSet, 0, handles.ldr);
+
+    AttachmentKey swapKey{};
+    swapKey.colorCount      = 1;
+    swapKey.colorFormats[0] = ctx.device->GetSwapchainFormat();
+    swapKey.depthFormat     = RHI::RHIFormat::Undefined;
+
+    const RHI::RHIPipelineHandle pipeline    = m_type->GetOrCreatePipeline(ctx.device, swapKey);
+    const RHI::RHIDescSetHandle  frameSet    = ctx.frameSet;
+    const RHI::RHIDescSetHandle  descSet     = m_descSet;
+    const RGTextureHandle        rgLdr       = handles.ldr;
+    const RGTextureHandle        rgSwapchain = handles.swapchain;
+
+    struct PostFXPC {
+        float vignetteEnable;
+        float vignetteIntensity;
+        float vignetteSmoothness;
+        float aspectRatio;
+        float caEnable;
+        float caStrength;
+        float caPxScale;
+        float _pad0;
+        float filmGrainEnable;
+        float filmGrainIntensity;
+        float filmGrainSize;
+        float _pad1;
+    };
+    const PostFXPC pc{
+        m_vignetteEnabled ? 1.f : 0.f,
+        m_vignetteIntensity,
+        m_vignetteSmoothness,
+        (h > 0) ? float(w) / float(h) : 1.f,
+        m_caEnabled ? 1.f : 0.f,
+        m_caStrength,
+        0.005f,  // NDC offset scale; tunable but kept fixed per design
+        0.f,
+        m_filmGrainEnabled ? 1.f : 0.f,
+        m_filmGrainIntensity,
+        m_filmGrainSize,
+        0.f,
+    };
+
+    ctx.rg->AddPass("PostFX",
+        [rgLdr, rgSwapchain](RGPassBuilder& b) {
+            b.Read(rgLdr);
             b.Write(rgSwapchain);
         },
-        [pipeline, frameSet, hdrLutDescSet, pc, rgSwapchain, w, h]
+        [pipeline, frameSet, descSet, pc, rgSwapchain, w, h]
         (RHI::IRHICommandList& cmd, const RGResources& res)
         {
             RHI::RHIRenderPassDesc rpDesc{};
@@ -2757,7 +3287,7 @@ void SceneRenderer::LutTonemapFeature::AddPasses(SceneRenderer& /*renderer*/,
             cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
             cmd.SetPipeline(pipeline);
             cmd.SetDescriptorSet(1, frameSet);
-            cmd.SetDescriptorSet(2, hdrLutDescSet);
+            cmd.SetDescriptorSet(2, descSet);
             cmd.SetPushConstants(&pc, sizeof(pc), RHI::RHIShaderStage::Fragment);
             cmd.Draw(3, 1, 0, 0);
             cmd.EndRenderPass();

@@ -16,19 +16,19 @@ public class BouncingRotator : ScriptBase
     public override void OnStart()
     {
         Debug.Log("START");
-        originY = Self.GetPosition().Y;
-        rotY = Self.GetRotationEuler().Y;
+        originY = Self.LocalPosition.Y;
+        rotY = Self.LocalRotationEuler.Y;
     }
 
     public override void OnUpdate(float dt)
     {
         float t = Time.TotalTime;
 
-        var pos = Self.GetPosition();
+        var pos = Self.LocalPosition;
         pos.Y = originY + MathF.Sin(t * bobFrequency * MathF.PI * 2f) * bobAmplitude;
-        Self.SetPosition(pos);
+        Self.LocalPosition = pos;
 
         rotY += rotateSpeed * dt;
-        Self.SetRotationEuler(new Vector3(0f, rotY, 0f));
+        Self.LocalRotationEuler = new Vector3(0f, rotY, 0f);
     }
 }

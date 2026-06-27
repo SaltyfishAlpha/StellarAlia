@@ -70,6 +70,8 @@ private:
     EditorUI                   m_ui;
     bool                       m_viewportActive      = false;
     bool                       m_textInputMapPushed  = false;
+    bool                       m_gameMapPushed       = false;  // PIE-side: project .sainputmap active
+    bool                       m_editorGlobalPushed  = false;  // Phase 3b: kept across PIE
 
     EditorDiagnostics                 m_diagnostics;
     std::unique_ptr<EditorLogCapture> m_logCapture;

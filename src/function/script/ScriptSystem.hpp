@@ -9,6 +9,7 @@
 
 namespace StellarAlia {
 class Scene;
+class SceneRenderer;
 class InputSystem;
 class DebugDraw;
 class PhysicsSystem;
@@ -37,6 +38,7 @@ class ScriptSystem {
 public:
     struct Context {
         Scene*                   scene         = nullptr;
+        SceneRenderer*           renderer      = nullptr;
         InputSystem*             input         = nullptr;
         DebugDraw*               debug         = nullptr;
         PhysicsSystem*           physics       = nullptr;

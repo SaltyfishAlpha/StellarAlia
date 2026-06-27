@@ -172,7 +172,7 @@ bool ScriptSystem::Init(const Context& ctx) {
     SA_LOG_INFO("[ScriptSystem] NativeApi initialized on managed side");
 
     // 7. Set C API context
-    SA_Script_SetContext({ ctx.scene, ctx.input, ctx.debug, ctx.physics, 0.f, 0.f });
+    SA_Script_SetContext({ ctx.scene, ctx.renderer, ctx.input, ctx.debug, ctx.physics, 0.f, 0.f });
 
     m_available = true;
     SA_LOG_INFO("[ScriptSystem] C# scripting ready");
@@ -216,7 +216,7 @@ void ScriptSystem::OnPlayStart(Scene& gameScene) {
     if (!m_available) return;
 
     // Redirect all script API calls (SetPosition etc.) to the game copy.
-    SA_Script_SetContext({ &gameScene, m_ctx.input, m_ctx.debug, m_ctx.physics, 0.f, 0.f });
+    SA_Script_SetContext({ &gameScene, m_ctx.renderer, m_ctx.input, m_ctx.debug, m_ctx.physics, 0.f, 0.f });
 
     auto& reg = gameScene.Registry();
 

@@ -1,5 +1,10 @@
 #include "importer/ImportScanner.hpp"
 
+#include "importer/MeshImporter.hpp"
+#include "importer/TextureImporter.hpp"
+#include "importer/MaterialImporter.hpp"
+#include "importer/InputMapImporter.hpp"
+
 #include <algorithm>
 #include <iostream>
 
@@ -28,6 +33,9 @@ std::string AssetTypeFromExtension(const fs::path& ext) {
     if (e == ".cs")
         return "Script";
 
+    if (e == ".sainputmap")
+        return "InputMap";
+
     // .sanim / .saskel / .sameta are sidecar files, not primary cook targets.
     return {};
 }
@@ -50,6 +58,44 @@ static void ApplyDefaultSettings(MetaFile& meta, const fs::path& sourcePath) {
         // the filename). Scan never overwrites an existing sameta.
         meta.settings["class_name"] = sourcePath.stem().string();
     }
+}
+
+AssetEntry EnsureMeta(const fs::path& srcPath, const std::string& type) {
+    const fs::path metaPath = MetaFile::MetaPathFor(srcPath);
+
+    AssetEntry ae;
+    ae.sourcePath = srcPath;
+    ae.metaPath   = metaPath;
+
+    if (fs::exists(metaPath)) {
+        if (!MetaFile::Load(metaPath, ae.meta)) {
+            std::cerr << "[Import] Failed to load existing meta: " << metaPath << '\n';
+        }
+        return ae;
+    }
+
+    ae.meta.uuid = AssetID::Generate();
+    ae.meta.type = type;
+    ApplyDefaultSettings(ae.meta, srcPath);
+
+    if (!MetaFile::Save(metaPath, ae.meta)) {
+        std::cerr << "[Import] Failed to write meta: " << metaPath << '\n';
+    } else {
+        std::cout << "[Import] " << srcPath.filename() << "  →  "
+                  << ae.meta.uuid.ToString() << '\n';
+    }
+    return ae;
+}
+
+void CookAssetEntry(const AssetEntry& entry, const fs::path& cookCacheDir) {
+    if (cookCacheDir.empty()) return;
+    const std::string& t = entry.meta.type;
+    if      (t == "Mesh")     CookMesh(entry, cookCacheDir, /*force=*/false);
+    else if (t == "Texture")  CookTexture(entry, cookCacheDir, /*force=*/false);
+    else if (t == "Material") CookStandaloneMaterial(entry.sourcePath, entry.meta.uuid,
+                                                     cookCacheDir, /*force=*/false);
+    else if (t == "InputMap") CookInputMap(entry, cookCacheDir, /*force=*/false);
+    // Script, Scene, Shader: no cooked output.
 }
 
 std::vector<AssetEntry> ScanAndImport(const fs::path& dir) {
@@ -76,29 +122,8 @@ std::vector<AssetEntry> ScanAndImport(const fs::path& dir) {
         const std::string type = AssetTypeFromExtension(src.extension());
         if (type.empty()) continue;
 
-        const fs::path metaPath = MetaFile::MetaPathFor(src);
-
-        AssetEntry ae;
-        ae.sourcePath = src;
-        ae.metaPath   = metaPath;
-
-        if (fs::exists(metaPath)) {
-            if (!MetaFile::Load(metaPath, ae.meta)) {
-                std::cerr << "[Import] Failed to load existing meta: " << metaPath << '\n';
-                continue;
-            }
-        } else {
-            ae.meta.uuid = AssetID::Generate();
-            ae.meta.type = type;
-            ApplyDefaultSettings(ae.meta, src);
-
-            if (!MetaFile::Save(metaPath, ae.meta)) {
-                std::cerr << "[Import] Failed to write meta: " << metaPath << '\n';
-                continue;
-            }
-            std::cout << "[Import] " << src.filename() << "  →  "
-                      << ae.meta.uuid.ToString() << '\n';
-        }
+        AssetEntry ae = EnsureMeta(src, type);
+        if (!ae.meta.IsValid()) continue;
 
         results.push_back(std::move(ae));
     }

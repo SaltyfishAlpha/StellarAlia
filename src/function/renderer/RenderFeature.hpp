@@ -45,8 +45,15 @@ struct RendererHandles {
     // ── Primary buffers ───────────────────────────────────────────────────────
     RGTextureHandle hdr;          // RGBA16F  HDR target: raw lighting → BloomComposite writes here → Tonemap reads
     RGTextureHandle taaResolved;  // RGBA16F  TAA history output (= hdr when TAA disabled); Bloom threshold reads this
+    RGTextureHandle ldr;          // swapchain-format  post-tonemap LDR; PostFXFeature reads it and writes swapchain
     RGTextureHandle swapchain;    // swapchain colour attachment
     RGTextureHandle depth;        // D32F     scene depth
+    // ── Velocity (Issue #46) ──────────────────────────────────────────────────
+    // RG16F  per-pixel (currUV - prevUV) in unnormalised screen-space.
+    // Phase 1: filled by MotionBlurFeature's first pass from depth + prevViewProj.
+    // Phase 2: target is GBuffer-time per-object writes on the same RT; the
+    //          motion blur pipeline (TileMax/NeighborMax/Reconstruct) is unchanged.
+    RGTextureHandle velocity;
 
     // ── G-Buffer ──────────────────────────────────────────────────────────────
     RGTextureHandle gbufferRT0;   // RGBA8_UNORM  albedo.rgb + occlusion.a

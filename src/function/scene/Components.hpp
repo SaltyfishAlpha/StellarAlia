@@ -165,10 +165,24 @@ struct AnimatorComponent {
 // Shared mesh data (vertexBuffer, indexBuffer, subMeshes, skinDataBuffer) lives in GPUMesh.
 struct SkinnedMeshComponent {
     AssetID               meshAsset;
-    RHI::RHIBufferHandle  skinMatricesBuffer;
+    RHI::RHIBufferHandle  skinMatricesBuffer;        // current-frame bone matrices
+    RHI::RHIBufferHandle  skinMatricesBufferPrev;    // previous-frame bone matrices (Issue #84)
     RHI::RHIDescSetHandle skinDescSet;
-    uint32_t              boneCount = 0;
-    bool                  ready     = false;
+    RHI::RHIDescSetHandle velocityDescSet;           // set=3 with bindings 0/1/2 (curr/skinData/prev) for VelocityPrepass
+    uint32_t              boneCount   = 0;
+    bool                  ready       = false;
+    bool                  poseSeeded  = false;       // Issue #84: first-eval guard; cleared on PrepareEntity / clip swap
+    AssetID               lastEvalClipId;            // Issue #84: detect clip swap → force prev=curr that frame
+};
+
+// ── PrevTransform (Issue #84) ────────────────────────────────────────────────
+// Captures the previous frame's WorldTransformComponent.matrix. Stamped at the
+// top of Scene::UpdateTransforms for seeded entities, seeded at tail for fresh
+// entities (velocity=0 on first frame). VelocityPrepass reads this to compute
+// per-object screen-space velocity = currUV − prevUV.
+struct PrevTransformComponent {
+    glm::mat4 prevModel = glm::mat4(1.f);
+    bool      seeded    = false;
 };
 
 // ── Physics ───────────────────────────────────────────────────────────────────

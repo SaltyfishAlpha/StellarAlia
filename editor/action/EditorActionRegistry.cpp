@@ -3,6 +3,7 @@
 #include "EditorContext.hpp"
 #include "command/CommandManager.hpp"
 #include "function/input/InputSystem.hpp"
+#include "core/logs/Log.hpp"
 
 #include <algorithm>
 
@@ -14,8 +15,11 @@ void EditorActionRegistry::Register(EditorAction action) {
 
 void EditorActionRegistry::PollAndDispatch(InputSystem& input, EditorContext& ctx) {
     for (auto& action : m_actions) {
-        if (input.WasActivated(action.id))
+        if (input.WasActivated(action.id)) {
+            SA_LOG_INFO("EditorActionRegistry: '{}' fired (top map='{}')",
+                        action.id, std::string(input.GetTopMapName()));
             Dispatch(action, ctx);
+        }
     }
 }
 

@@ -10,8 +10,14 @@ glm::quat EditorCamera::Rotation() const {
 }
 
 void EditorCamera::Update(const InputSystem& input, float dt, bool mouseLook) {
+    // Map-qualified reads (Issue #71): pin lookups to the editor's "Viewport"
+    // map so the player's same-name "Move" / "Look" / "Sprint" in a Gameplay
+    // .sainputmap (PIE) never moves the editor camera. PIE pops "Viewport",
+    // so the qualified key is absent → reads naturally return zero.
+    static constexpr std::string_view kMap = "Viewport";
+
     if (mouseLook) {
-        const glm::vec2 look = input.ReadVec2("Look");
+        const glm::vec2 look = input.ReadVec2(kMap, "Look");
         yaw   -= look.x;
         pitch -= look.y;
         pitch  = glm::clamp(pitch, -80.f, 80.f);
@@ -20,8 +26,8 @@ void EditorCamera::Update(const InputSystem& input, float dt, bool mouseLook) {
     const glm::quat  rot   = Rotation();
     const glm::vec3  fwd   = rot * glm::vec3{ 0.f,  0.f, -1.f };
     const glm::vec3  right = rot * glm::vec3{ 1.f,  0.f,  0.f };
-    const glm::vec2  move  = input.ReadVec2("Move");
-    const float      spd   = input.IsActive("Sprint") ? sprintSpeed : moveSpeed;
+    const glm::vec2  move  = input.ReadVec2(kMap, "Move");
+    const float      spd   = input.IsActive(kMap, "Sprint") ? sprintSpeed : moveSpeed;
 
     position += (right * move.x + fwd * move.y) * spd * dt;
 }

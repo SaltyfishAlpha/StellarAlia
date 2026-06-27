@@ -1,0 +1,4 @@
+# StellarAlia Asset Meta v1
+uuid=605b3622-26b7-46a0-b921-f246b5489d34
+type=Script
+class_name=PauseToggle

@@ -27,6 +27,9 @@ entt::entity Scene::CreateEntity(std::string_view name) {
     m_registry.emplace<TagComponent>(e, std::string(name));
     m_registry.emplace<TransformComponent>(e);
     m_registry.emplace<WorldTransformComponent>(e);
+    // Issue #84: PrevTransform stamped each frame by UpdateTransforms.
+    // seeded=false → first-frame velocity forced to 0.
+    m_registry.emplace<PrevTransformComponent>(e);
     m_registry.emplace<EntityIdComponent>(e, m_nextLocalId++);
     m_rootOrder.push_back(e);
     m_hierarchyDirty = true;
@@ -164,6 +167,12 @@ void Scene::UpdateTransforms() {
         auto* w = m_registry.try_get<WorldTransformComponent>(e);
         if (!w || !w->dirty) continue;
 
+        // Issue #84: capture last-frame world matrix into PrevTransform before
+        // overwriting w->matrix. Only seeded entities snapshot here; fresh
+        // entities are seeded at the end (prev=curr, velocity=0 first frame).
+        if (auto* prev = m_registry.try_get<PrevTransformComponent>(e); prev && prev->seeded)
+            prev->prevModel = w->matrix;
+
         // Prefer AnimatedTransformComponent when the animation system has set it.
         const glm::mat4 local = [&]() -> glm::mat4 {
             if (const auto* a = m_registry.try_get<AnimatedTransformComponent>(e))
@@ -184,6 +193,61 @@ void Scene::UpdateTransforms() {
         }
         w->dirty = false;
     }
+
+    // Issue #84: seed prev=curr for fresh entities (first frame, velocity=0).
+    auto seedView = m_registry.view<WorldTransformComponent, PrevTransformComponent>();
+    for (entt::entity e : seedView) {
+        auto& prev = seedView.get<PrevTransformComponent>(e);
+        if (!prev.seeded) {
+            prev.prevModel = seedView.get<WorldTransformComponent>(e).matrix;
+            prev.seeded    = true;
+        }
+    }
+}
+
+void Scene::EnsureWorldUpToDate(entt::entity entity) {
+    if (!m_registry.valid(entity)) return;
+
+    // Walk up to root collecting ancestors. Stack-allocated for the common
+    // shallow hierarchy case; falls back to heap when depth >= 32.
+    entt::entity stack[32];
+    int top = 0;
+    std::vector<entt::entity> overflow;
+    for (entt::entity cur = entity; cur != entt::null; ) {
+        if (top < 32) stack[top++] = cur;
+        else          overflow.push_back(cur);
+        const auto* h = m_registry.try_get<HierarchyComponent>(cur);
+        cur = (h ? h->parent : entt::null);
+    }
+
+    // Walk root → leaf, recomputing any dirty link. Mirrors the body of
+    // UpdateTransforms exactly (Animated > Transform priority).
+    auto recompute = [&](entt::entity e) {
+        auto* w = m_registry.try_get<WorldTransformComponent>(e);
+        if (!w || !w->dirty) return;
+        const glm::mat4 local = [&]() -> glm::mat4 {
+            if (const auto* a = m_registry.try_get<AnimatedTransformComponent>(e))
+                return glm::translate(glm::mat4(1.f), a->position)
+                     * glm::mat4_cast(a->rotation)
+                     * glm::scale(glm::mat4(1.f), a->scale);
+            if (const auto* t = m_registry.try_get<TransformComponent>(e))
+                return LocalMatrix(*t);
+            return glm::mat4(1.f);
+        }();
+        const auto* h = m_registry.try_get<HierarchyComponent>(e);
+        if (!h || h->parent == entt::null) {
+            w->matrix = local;
+        } else {
+            const auto* pw = m_registry.try_get<WorldTransformComponent>(h->parent);
+            w->matrix = (pw ? pw->matrix : glm::mat4(1.f)) * local;
+        }
+        w->dirty = false;
+    };
+
+    for (auto it = overflow.rbegin(); it != overflow.rend(); ++it)
+        recompute(*it);
+    for (int i = top - 1; i >= 0; --i)
+        recompute(stack[i]);
 }
 
 void Scene::MarkDirty(entt::entity entity) {

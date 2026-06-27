@@ -15,12 +15,12 @@ namespace StellarAlia::Editor {
 
 ShortcutsPresenter::ShortcutsPresenter(EditorContext& ctx)
     : m_ctx(ctx)
-    , m_defaultConfigPath(std::filesystem::path(StellarAliaApp::BIN_DIR) / "editor_shortcuts.json")
+    , m_defaultConfigPath(std::filesystem::path(StellarAliaApp::BIN_DIR) / "editor_shortcuts.sainputmap")
 {}
 
 void ShortcutsPresenter::RunRegisterMaps() {
     if (m_ctx.shortcuts && m_ctx.input)
-        m_ctx.input->RegisterMaps(m_ctx.shortcuts->ApplyTo(MakeViewportMaps()));
+        m_ctx.input->RegisterMaps(m_ctx.shortcuts->ApplyTo(MakeBuiltinEditorMaps()));
 }
 
 void ShortcutsPresenter::Update(float /*dt*/) {
@@ -29,7 +29,7 @@ void ShortcutsPresenter::Update(float /*dt*/) {
 #ifdef SA_SHORTCUTS_NFD
         if (NFD_Init() == NFD_OKAY) {
             nfdchar_t* outPath = nullptr;
-            const nfdfilteritem_t filter[] = { { "Shortcut config", "json" } };
+            const nfdfilteritem_t filter[] = { { "Shortcut config", "sainputmap" } };
             if (NFD_OpenDialogU8(&outPath, filter, 1, nullptr) == NFD_OKAY && outPath) {
                 if (m_ctx.shortcuts)
                     m_ctx.shortcuts->ImportFrom(std::filesystem::path(outPath));
@@ -46,8 +46,8 @@ void ShortcutsPresenter::Update(float /*dt*/) {
 #ifdef SA_SHORTCUTS_NFD
         if (NFD_Init() == NFD_OKAY) {
             nfdchar_t* outPath = nullptr;
-            const nfdfilteritem_t filter[] = { { "Shortcut config", "json" } };
-            if (NFD_SaveDialogU8(&outPath, filter, 1, nullptr, "shortcuts.json") == NFD_OKAY && outPath) {
+            const nfdfilteritem_t filter[] = { { "Shortcut config", "sainputmap" } };
+            if (NFD_SaveDialogU8(&outPath, filter, 1, nullptr, "shortcuts.sainputmap") == NFD_OKAY && outPath) {
                 if (m_ctx.shortcuts)
                     m_ctx.shortcuts->ExportTo(std::filesystem::path(outPath));
                 NFD_FreePathU8(outPath);

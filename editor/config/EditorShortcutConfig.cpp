@@ -1,56 +1,81 @@
 #include "config/EditorShortcutConfig.hpp"
 
-#include <nlohmann/json.hpp>
+#include "function/input/ActionMapJsonParser.hpp"
+
 #include <fstream>
+#include <sstream>
 
 namespace StellarAlia::Editor {
+
+// ─── Internal helpers ────────────────────────────────────────────────────────
+
+// Build an ActionMapDef "EditorOverrides" containing only overridden actions,
+// each carrying the override binding as its sole entry. Loading reverses this:
+// each action in the parsed map contributes one (name → bindings[0]) entry.
+static ActionMapDef BuildOverrideMap(
+    const std::unordered_map<std::string, BindingDef>& overrides)
+{
+    ActionMapDef def;
+    def.name = "EditorOverrides";
+    def.actions.reserve(overrides.size());
+    for (const auto& [name, b] : overrides) {
+        ActionDef a;
+        a.name             = name;
+        a.type             = ActionType::Button;  // bindings[0] is what matters
+        a.userConfigurable = true;
+        a.bindings         = { b };
+        def.actions.push_back(std::move(a));
+    }
+    return def;
+}
+
+static bool ReadFileToString(const std::filesystem::path& path, std::string& out) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) return false;
+    std::stringstream ss;
+    ss << f.rdbuf();
+    out = ss.str();
+    return true;
+}
+
+static bool LoadOverridesFromFile(
+    const std::filesystem::path& path,
+    std::unordered_map<std::string, BindingDef>& outOverrides)
+{
+    std::string json;
+    if (!ReadFileToString(path, json)) return false;
+
+    ActionMapDef def;
+    if (!ActionMapJsonParser::Parse(json, def)) return false;
+
+    outOverrides.clear();
+    for (const auto& a : def.actions) {
+        if (a.bindings.empty()) continue;
+        outOverrides[a.name] = a.bindings.front();
+    }
+    return true;
+}
+
+static bool SaveOverridesToFile(
+    const std::filesystem::path& path,
+    const std::unordered_map<std::string, BindingDef>& overrides)
+{
+    std::string json;
+    ActionMapJsonParser::Serialize(BuildOverrideMap(overrides), json);
+    std::ofstream f(path, std::ios::binary);
+    if (!f.is_open()) return false;
+    f << json;
+    return true;
+}
+
+// ─── Public API ──────────────────────────────────────────────────────────────
 
 void EditorShortcutConfig::Load(const std::filesystem::path& configPath) {
     m_configPath = configPath;
     m_overrides.clear();
-
-    std::ifstream f(configPath);
-    if (!f.is_open()) return;
-
-    try {
-        const auto j        = nlohmann::json::parse(f);
-        const auto overrides = j.value("overrides", nlohmann::json::object());
-        for (const auto& [name, entry] : overrides.items()) {
-            const auto mods = entry.value("modifiers", std::vector<std::string>{});
-            const auto key  = entry.value("key", std::string{});
-            if (key.empty()) continue;
-
-            BindingDef b;
-            if (mods.empty())
-                b = BindingDef::Direct(key);
-            else
-                b = BindingDef::Composite(std::vector<std::string>(mods), key);
-
-            m_overrides[name] = std::move(b);
-        }
-    } catch (...) {}
-
+    // Missing file is fine — we silently start from defaults.
+    LoadOverridesFromFile(configPath, m_overrides);
     m_dirty = false;
-}
-
-static nlohmann::json SerializeOverrides(
-    const std::unordered_map<std::string, BindingDef>& overrides)
-{
-    nlohmann::json j;
-    j["version"] = 1;
-    auto& ovr = j["overrides"];
-    for (const auto& [name, b] : overrides) {
-        nlohmann::json entry;
-        if (b.kind == BindingDef::Kind::Composite) {
-            entry["modifiers"] = b.composite.modifierPaths;
-            entry["key"]       = b.composite.keyPath;
-        } else {
-            entry["modifiers"] = nlohmann::json::array();
-            entry["key"]       = b.path;
-        }
-        ovr[name] = entry;
-    }
-    return j;
 }
 
 void EditorShortcutConfig::Reload() {
@@ -60,35 +85,19 @@ void EditorShortcutConfig::Reload() {
 
 void EditorShortcutConfig::Save() const {
     if (m_configPath.empty()) return;
-    std::ofstream f(m_configPath);
-    if (f.is_open())
-        f << SerializeOverrides(m_overrides).dump(2);
+    SaveOverridesToFile(m_configPath, m_overrides);
 }
 
 void EditorShortcutConfig::ExportTo(const std::filesystem::path& path) const {
-    std::ofstream f(path);
-    if (f.is_open())
-        f << SerializeOverrides(m_overrides).dump(2);
+    SaveOverridesToFile(path, m_overrides);
 }
 
 void EditorShortcutConfig::ImportFrom(const std::filesystem::path& path) {
-    std::ifstream f(path);
-    if (!f.is_open()) return;
-    try {
-        const auto j         = nlohmann::json::parse(f);
-        const auto overrides = j.value("overrides", nlohmann::json::object());
-        m_overrides.clear();
-        for (const auto& [name, entry] : overrides.items()) {
-            const auto mods = entry.value("modifiers", std::vector<std::string>{});
-            const auto key  = entry.value("key", std::string{});
-            if (key.empty()) continue;
-            m_overrides[name] = mods.empty()
-                ? BindingDef::Direct(key)
-                : BindingDef::Composite(std::vector<std::string>(mods), key);
-        }
-        m_configPath = path;  // switch active config so Save/Reload target this file
-        m_dirty = false;      // just loaded — nothing to save yet
-    } catch (...) {}
+    std::unordered_map<std::string, BindingDef> loaded;
+    if (!LoadOverridesFromFile(path, loaded)) return;
+    m_overrides  = std::move(loaded);
+    m_configPath = path;   // switch active config so Save/Reload target this file
+    m_dirty      = false;  // just loaded — nothing to save yet
 }
 
 std::vector<ActionMapDef> EditorShortcutConfig::ApplyTo(

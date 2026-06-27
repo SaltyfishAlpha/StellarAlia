@@ -1,0 +1,4 @@
+# StellarAlia Asset Meta v1
+uuid=612a4cb2-b801-43c2-8f88-f364efd17f6e
+type=Script
+class_name=CameraFollow

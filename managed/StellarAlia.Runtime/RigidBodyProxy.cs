@@ -2,6 +2,16 @@ using System.Numerics;
 
 namespace StellarAlia;
 
+/// <summary>Motion type of a physics body. Mirrors C++ RigidBodyComponent::Type.</summary>
+public enum RigidBodyType {
+    /// <summary>Immovable collider. Not affected by forces; cannot have velocity.</summary>
+    Static = 0,
+    /// <summary>Moved by scripts. Pushes dynamics but is not pushed back.</summary>
+    Kinematic = 1,
+    /// <summary>Fully simulated. Affected by gravity, forces, and impulses.</summary>
+    Dynamic = 2,
+}
+
 /// <summary>
 /// Proxy for physics body operations on an entity.
 /// Call <see cref="Entity.GetRigidBody"/> to obtain an instance.
@@ -10,6 +20,10 @@ public readonly struct RigidBodyProxy
 {
     private readonly ulong _id;
     internal RigidBodyProxy(ulong id) { _id = id; }
+
+    /// <summary>The body's motion type (Static / Kinematic / Dynamic). LinearVelocity
+    /// and AddImpulse only have observable effect on <see cref="RigidBodyType.Dynamic"/>.</summary>
+    public RigidBodyType Type => (RigidBodyType)NativeApi.SA_RigidBody_GetType(_id);
 
     /// <summary>Linear velocity in world space (m/s).</summary>
     public Vector3 LinearVelocity {

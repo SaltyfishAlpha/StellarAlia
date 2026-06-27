@@ -1,0 +1,60 @@
+{
+  "name": "EditorGlobal",
+  "passthrough": false,
+  "actions": [
+    {
+      "name": "SaveScene",
+      "type": "Button",
+      "userConfigurable": true,
+      "bindings": [ { "kind": "Composite", "modifiers": ["Keyboard/LeftControl"], "key": "Keyboard/S" } ]
+    },
+    {
+      "name": "NewScene",
+      "type": "Button",
+      "userConfigurable": true,
+      "bindings": [ { "kind": "Composite", "modifiers": ["Keyboard/LeftControl"], "key": "Keyboard/N" } ]
+    },
+    {
+      "name": "Undo",
+      "type": "Button",
+      "userConfigurable": true,
+      "bindings": [ { "kind": "Composite", "modifiers": ["Keyboard/LeftControl"], "key": "Keyboard/Z" } ]
+    },
+    {
+      "name": "Redo",
+      "type": "Button",
+      "userConfigurable": true,
+      "bindings": [ { "kind": "Composite", "modifiers": ["Keyboard/LeftControl"], "key": "Keyboard/Y" } ]
+    },
+    {
+      "name": "SelectAll",
+      "type": "Button",
+      "userConfigurable": true,
+      "bindings": [ { "kind": "Composite", "modifiers": ["Keyboard/LeftControl"], "key": "Keyboard/A" } ]
+    },
+    {
+      "name": "EntityDelete",
+      "type": "Button",
+      "userConfigurable": true,
+      "bindings": [ { "kind": "Direct", "path": "Keyboard/Delete" } ]
+    },
+    {
+      "name": "EntityDuplicate",
+      "type": "Button",
+      "userConfigurable": true,
+      "bindings": [ { "kind": "Composite", "modifiers": ["Keyboard/LeftControl"], "key": "Keyboard/D" } ]
+    },
+    {
+      "name": "EntityRename",
+      "type": "Button",
+      "userConfigurable": true,
+      "bindings": [ { "kind": "Direct", "path": "Keyboard/F2" } ]
+    },
+    {
+      "name": "TogglePanels",
+      "type": "Button",
+      "userConfigurable": true,
+      "bindings": [ { "kind": "Direct", "path": "Keyboard/F8" } ]
+    }
+  ]
+}

@@ -4,8 +4,10 @@ using System.Numerics;
 namespace StellarAlia;
 
 /// <summary>
-/// Maps friendly key names to engine device paths (e.g. Key.W → "Keyboard/W").
+/// Logical key identifiers. Mapped internally to engine device paths
+/// (e.g. <see cref="Key.W"/> → "Keyboard/W").
 /// </summary>
+#pragma warning disable CS1591 // Member names are self-documenting.
 public enum Key
 {
     A, B, C, D, E, F, G, H, I, J, K, L, M,
@@ -16,9 +18,22 @@ public enum Key
     F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
     Num0, Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9,
 }
+#pragma warning restore CS1591
 
-public enum MouseButton { Left, Right, Middle }
+/// <summary>Mouse button identifiers.</summary>
+public enum MouseButton {
+    /// <summary>The primary (left) mouse button.</summary>
+    Left,
+    /// <summary>The secondary (right) mouse button.</summary>
+    Right,
+    /// <summary>The middle mouse button / scroll-wheel click.</summary>
+    Middle
+}
 
+/// <summary>
+/// Raw device-path keyboard and mouse polling. For decoupled named actions
+/// configured via .sainputmap assets, use <see cref="InputAction"/> instead.
+/// </summary>
 public static class Input
 {
     private static readonly HashSet<Key> _prev = new();
@@ -64,18 +79,19 @@ public static class Input
         _ => $"Keyboard/{k}"
     };
 
-    /// Returns true while the key is held.
+    /// <summary>Returns true while the key is held.</summary>
     public static bool IsKeyDown(Key k) => _curr.Contains(k);
 
-    /// Returns true on the first frame the key was pressed.
+    /// <summary>Returns true on the first frame the key was pressed.</summary>
     public static bool IsKeyJustPressed(Key k) => _curr.Contains(k) && !_prev.Contains(k);
 
-    /// Returns true on the first frame the key was released.
+    /// <summary>Returns true on the first frame the key was released.</summary>
     public static bool IsKeyJustReleased(Key k) => !_curr.Contains(k) && _prev.Contains(k);
 
-    /// Returns the raw analog value [0,1] for a key (useful for triggers/axes).
+    /// <summary>Returns the raw analog value [0,1] for a key (useful for triggers/axes).</summary>
     public static float GetKeyValue(Key k) => NativeApi.SA_Input_GetKey(KeyPath(k));
 
+    /// <summary>Returns true while the given mouse button is held.</summary>
     public static bool IsMouseButtonDown(MouseButton btn) {
         string path = btn switch {
             MouseButton.Left   => "Mouse/Left",
@@ -86,8 +102,32 @@ public static class Input
         return NativeApi.SA_Input_GetKey(path) > 0.5f;
     }
 
+    /// <summary>Returns the mouse movement delta this frame in pixels.</summary>
     public static Vector2 GetMouseDelta() {
         NativeApi.SA_Input_GetAxis2D("Mouse/Delta", out float x, out float y);
         return new Vector2(x, y);
     }
+}
+
+/// <summary>
+/// Named-action input (Issue #71). Queries the engine InputSystem by action
+/// name as configured via .sainputmap assets — decoupled from device paths.
+/// </summary>
+public static class InputAction
+{
+    /// <summary>Reads the current scalar value of an action (e.g. a trigger axis).</summary>
+    public static float Read(string action) => NativeApi.SA_InputAction_ReadFloat(action);
+
+    /// <summary>Reads the current 2D value of an action (e.g. a stick or composite XY).</summary>
+    public static Vector2 ReadVec2(string action) {
+        NativeApi.SA_InputAction_ReadVec2(action, out float x, out float y);
+        return new Vector2(x, y);
+    }
+
+    /// <summary>True while the action is currently active.</summary>
+    public static bool IsActive(string action)       => NativeApi.SA_InputAction_IsActive(action)       != 0;
+    /// <summary>True on the first frame the action became active this frame.</summary>
+    public static bool WasActivated(string action)   => NativeApi.SA_InputAction_WasActivated(action)   != 0;
+    /// <summary>True on the first frame the action became inactive this frame.</summary>
+    public static bool WasDeactivated(string action) => NativeApi.SA_InputAction_WasDeactivated(action) != 0;
 }

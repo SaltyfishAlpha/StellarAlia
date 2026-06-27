@@ -1,0 +1,68 @@
+{
+  "name": "Viewport",
+  "passthrough": true,
+  "actions": [
+    {
+      "name": "Move",
+      "type": "Axis2D",
+      "userConfigurable": false,
+      "bindings": [
+        { "kind": "WASD", "up": "Keyboard/W", "down": "Keyboard/S", "left": "Keyboard/A", "right": "Keyboard/D", "normalize": true },
+        { "kind": "Direct", "path": "Gamepad/LeftStick", "deadZone": 0.12 }
+      ]
+    },
+    {
+      "name": "Look",
+      "type": "Axis2D",
+      "userConfigurable": false,
+      "bindings": [
+        { "kind": "Direct", "path": "Mouse/Delta", "scale": 0.08 },
+        { "kind": "Direct", "path": "Gamepad/RightStick", "deadZone": 0.12, "scale": [2.0, -2.0] }
+      ]
+    },
+    {
+      "name": "Sprint",
+      "type": "Button",
+      "userConfigurable": false,
+      "bindings": [
+        { "kind": "Direct", "path": "Keyboard/LeftShift" },
+        { "kind": "Direct", "path": "Gamepad/LeftBumper" }
+      ]
+    },
+    {
+      "name": "MouseLook",
+      "type": "Button",
+      "userConfigurable": false,
+      "bindings": [
+        { "kind": "Direct", "path": "Mouse/RightButton" }
+      ]
+    },
+    {
+      "name": "ToggleUI",
+      "type": "Button",
+      "userConfigurable": true,
+      "bindings": [
+        { "kind": "Direct", "path": "Keyboard/Escape" },
+        { "kind": "Direct", "path": "Gamepad/Start" }
+      ]
+    },
+    {
+      "name": "GizmoTranslate",
+      "type": "Button",
+      "userConfigurable": true,
+      "bindings": [ { "kind": "Direct", "path": "Keyboard/T" } ]
+    },
+    {
+      "name": "GizmoRotate",
+      "type": "Button",
+      "userConfigurable": true,
+      "bindings": [ { "kind": "Direct", "path": "Keyboard/R" } ]
+    },
+    {
+      "name": "GizmoScale",
+      "type": "Button",
+      "userConfigurable": true,
+      "bindings": [ { "kind": "Direct", "path": "Keyboard/S" } ]
+    }
+  ]
+}

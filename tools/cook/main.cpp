@@ -2,6 +2,7 @@
 #include "importer/TextureImporter.hpp"
 #include "importer/MeshImporter.hpp"
 #include "importer/MaterialImporter.hpp"
+#include "importer/InputMapImporter.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -107,6 +108,8 @@ int main(int argc, char** argv) {
             } else if (entry.meta.type == "Material") {
                 ok = CookStandaloneMaterial(entry.sourcePath, entry.meta.uuid,
                                             opts.outputDir, opts.force);
+            } else if (entry.meta.type == "InputMap") {
+                ok = CookInputMap(entry, opts.outputDir, opts.force);
             } else {
                 std::cout << "[Cook] SKIP (unsupported type: "
                           << entry.meta.type << ")  "

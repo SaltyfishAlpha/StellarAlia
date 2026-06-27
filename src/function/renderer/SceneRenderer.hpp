@@ -190,6 +190,11 @@ public:
     // Valid after Init(); used by AnimationSystem::Init to allocate per-entity skinDescSets.
     [[nodiscard]] RHI::RHIDescLayoutHandle GetSkinDescLayout() const;
 
+    // Issue #84: layout for VelocityPrepass skinned vert (set=3 bindings 0/1/2).
+    // Invalid if velocity_prepass_skinned shader unavailable — AnimationSystem
+    // then skips velocityDescSet allocation per entity.
+    [[nodiscard]] RHI::RHIDescLayoutHandle GetVelocityDescLayout() const;
+
     // Ray-cast against the scene BVH (render mesh AABBs).
     // Returns the nearest hit entity, or entt::null when nothing was hit.
     // Intended for editor mouse-picking (Issue #30).
@@ -273,6 +278,30 @@ private:
         SceneRenderer*           m_owner          = nullptr;
         ShaderProgram            m_skinnedProgram;   // deferred_geometry_skinned.vert + _geometry.frag
         RHI::RHIDescLayoutHandle m_skinDescLayout;   // set=2 layout from m_skinnedProgram
+    };
+
+    // Issue #84 — Per-object velocity prepass.
+    // Runs after GBuffer (depth populated). For each visible DrawItem, samples
+    // currModel + prevModel push constants (and curr/prev bone matrices for
+    // skinned meshes) to write per-pixel (currUV − prevUV) into handles.velocity.
+    // Skipped entirely when MotionBlurFeature is disabled.
+    class VelocityPrepassFeature final : public RenderFeature {
+        friend class SceneRenderer;
+    public:
+        void OnInit    (const FeatureInitContext& ctx) override;
+        void OnShutdown(RHI::IRHIDevice* device)       override;
+        void AddPasses (SceneRenderer& renderer, const FrameContext& ctx,
+                        const RendererHandles& handles, const entt::registry& reg,
+                        uint32_t w, uint32_t h) override;
+
+        // Layout exposed for AnimationSystem to allocate per-entity velocityDescSet
+        // (set=3 with bindings 0=curr, 1=skinData, 2=prev).
+        RHI::RHIDescLayoutHandle GetSkinnedLayout() const { return m_skinnedLayout; }
+
+    private:
+        ShaderProgram            m_staticProgram;    // velocity_prepass.{vert,frag}
+        ShaderProgram            m_skinnedProgram;   // velocity_prepass_skinned.vert + shared frag
+        RHI::RHIDescLayoutHandle m_skinnedLayout;    // reflected set=3 with bindings 0/1/2
     };
 
     // Fullscreen deferred lighting: reads G-Buffer, writes HDR with AlphaBlend
@@ -519,6 +548,65 @@ private:
         RHI::RHIDescSetHandle m_compositeDescSet;
     };
 
+    // Issue #46 Phase 1 — Camera Motion Blur (4 fullscreen passes:
+    // VelocityFill / TileMax / NeighborMax / Reconstruct).  Reads handles.depth,
+    // writes handles.velocity (public RG resource), produces in-place hdr blur
+    // via m_outputHandle redirect.  Phase 2 will replace VelocityFill with
+    // per-object writes from GBuffer; the rest stays unchanged.
+    class MotionBlurFeature final : public RenderFeature {
+    public:
+        void OnInit    (const FeatureInitContext& ctx) override;
+        void OnShutdown(RHI::IRHIDevice* device)       override;
+        void AddPasses (SceneRenderer& renderer, const FrameContext& ctx,
+                        const RendererHandles& handles, const entt::registry& reg,
+                        uint32_t w, uint32_t h) override;
+
+        // Set by AddPasses on a successful run; RenderFrame redirects handles.hdr.
+        RGTextureHandle m_outputHandle;
+
+        bool  m_enabled  = false;
+        float m_strength = 0.5f;
+        int   m_samples  = 8;
+        float m_maxSpeed = 0.1f;
+
+        static constexpr int kTileSize = 16;
+    private:
+        // Issue #84: handles.velocity is now filled by VelocityPrepassFeature;
+        // MB_Velocity pass + m_velocityMat / m_velocityDescSet removed.
+        MaterialType*         m_tileMaxMat     = nullptr;
+        MaterialType*         m_neighborMaxMat = nullptr;
+        MaterialType*         m_reconstructMat = nullptr;
+        RHI::RHIDescSetHandle m_tileMaxDescSet;
+        RHI::RHIDescSetHandle m_neighborMaxDescSet;
+        RHI::RHIDescSetHandle m_reconstructDescSet;
+    };
+
+    // Issue #47 — Screen modifications.  Runs after Tonemap on the LDR buffer
+    // (`handles.ldr` → `handles.swapchain`).  Single fullscreen pass that
+    // optionally applies vignette / chromatic aberration / film grain.  When
+    // all three effects are disabled the shader degrades to a single texture
+    // copy; the pass is never skipped so swapchain always gets written.
+    class PostFXFeature final : public RenderFeature {
+    public:
+        void OnInit    (const FeatureInitContext& ctx) override;
+        void OnShutdown(RHI::IRHIDevice* device)       override;
+        void AddPasses (SceneRenderer& renderer, const FrameContext& ctx,
+                        const RendererHandles& handles, const entt::registry& reg,
+                        uint32_t w, uint32_t h) override;
+
+        bool  m_vignetteEnabled    = false;
+        float m_vignetteIntensity  = 0.4f;
+        float m_vignetteSmoothness = 0.6f;
+        bool  m_caEnabled          = false;
+        float m_caStrength         = 0.5f;
+        bool  m_filmGrainEnabled   = false;
+        float m_filmGrainIntensity = 0.1f;
+        float m_filmGrainSize      = 1.6f;
+    private:
+        MaterialType*         m_type = nullptr;
+        RHI::RHIDescSetHandle m_descSet;
+    };
+
     // GPU histogram → exponential-smoothing exposure adaptation.
     // Runs after DeferredLighting on the raw HDR buffer; skipped when disabled.
     class AutoExposureFeature final : public RenderFeature {
@@ -586,6 +674,7 @@ private:
     // Raw pointers into m_features — stable as long as the vector doesn't reallocate.
     // Set during Init, updated by ApplyWorldSettings on tonemap replacement.
     GBufferFeature*          m_gbufferFeature          = nullptr;
+    VelocityPrepassFeature*  m_velocityPrepassFeature  = nullptr;
     DeferredLightingFeature* m_deferredLightingFeature = nullptr;
     SkyboxFeature*           m_skyboxFeature           = nullptr;
     BloomFeature*         m_bloomFeature   = nullptr;
@@ -593,7 +682,9 @@ private:
     TAAFeature*           m_taaFeature     = nullptr;
     AutoExposureFeature*  m_aeFeature      = nullptr;
     DoFFeature*           m_dofFeature     = nullptr;
+    MotionBlurFeature*    m_motionBlurFeature = nullptr;
     RenderFeature*        m_tonemapFeature = nullptr;  // either TonemapFeature or LutTonemapFeature
+    PostFXFeature*        m_postFxFeature  = nullptr;
 
     // ── Solid-color ambient environment ──────────────────────────────────────
     // A 1×1 RGBA32F cubemap filled with backgroundColor.  Written to
@@ -674,6 +765,8 @@ private:
     RGTextureHandle m_rgGbRT1;
     RGTextureHandle m_rgGbRT2;
     RGTextureHandle m_rgHdr;
+    RGTextureHandle m_rgLdr;
+    RGTextureHandle m_rgVelocity;
 
     // ── Frame data helpers (private, called from RenderFrame) ─────────────────
     [[nodiscard]] LightUniforms GatherLights(const Scene& scene) const;

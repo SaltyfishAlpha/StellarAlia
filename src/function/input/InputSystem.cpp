@@ -1,5 +1,7 @@
 #include "function/input/InputSystem.hpp"
 
+#include "core/logs/Log.hpp"
+
 #include <glm/glm.hpp>
 #include <algorithm>
 #include <cassert>
@@ -15,6 +17,7 @@ void InputSystem::Init(Platform::IInputProvider* provider) {
     m_activeFamily = DeviceFamily::KeyboardMouse;
     m_curr.clear();
     m_prev.clear();
+    m_currTop.clear();
     m_stack.clear();
 }
 
@@ -24,13 +27,17 @@ void InputSystem::Shutdown() {
     m_stack.clear();
     m_curr.clear();
     m_prev.clear();
+    m_currTop.clear();
 }
 
 // ── Map registration & stack ──────────────────────────────────────────────────
 
 void InputSystem::RegisterMaps(std::vector<ActionMapDef> defs) {
     for (auto& def : defs) {
-        // Replace existing entry with same name, or append.
+        // Replace existing entry with same name, or append. Same-name replace is
+        // an intentional editor mechanism (shortcuts override + project hot-reload);
+        // duplicate-name detection at the project .sainputmap level lives in
+        // InputMapLoader where it has the file-path context to give a useful diag.
         auto it = std::find_if(m_registry.begin(), m_registry.end(),
             [&](const ActionMapDef& r){ return r.name == def.name; });
         if (it != m_registry.end())
@@ -46,14 +53,20 @@ static size_t FindMap(const std::vector<ActionMapDef>& reg, std::string_view nam
     return SIZE_MAX;
 }
 
-void InputSystem::PushMap(std::string_view name) {
+bool InputSystem::TryPushMap(std::string_view name) {
     const size_t idx = FindMap(m_registry, name);
-    assert(idx != SIZE_MAX && "InputSystem::PushMap: unknown map name");
-    if (idx == SIZE_MAX) return;
+    if (idx == SIZE_MAX) return false;
     m_stack.push_back(idx);
     // Clear action states so the new map starts fresh (no ghost inputs).
     m_curr.clear();
     m_prev.clear();
+    m_currTop.clear();
+    return true;
+}
+
+void InputSystem::PushMap(std::string_view name) {
+    if (!TryPushMap(name))
+        SA_LOG_ERROR("InputSystem::PushMap: unknown map name '{}'", std::string(name));
 }
 
 void InputSystem::PopMap() {
@@ -61,13 +74,34 @@ void InputSystem::PopMap() {
     m_stack.pop_back();
     m_curr.clear();
     m_prev.clear();
+    m_currTop.clear();
 }
 
-void InputSystem::ReplaceMap(std::string_view name) {
+bool InputSystem::TryReplaceMap(std::string_view name) {
+    const size_t idx = FindMap(m_registry, name);
+    if (idx == SIZE_MAX) return false;
     m_stack.clear();
     m_curr.clear();
     m_prev.clear();
-    PushMap(name);
+    m_currTop.clear();
+    m_stack.push_back(idx);
+    return true;
+}
+
+void InputSystem::ReplaceMap(std::string_view name) {
+    if (!TryReplaceMap(name))
+        SA_LOG_ERROR("InputSystem::ReplaceMap: unknown map name '{}'", std::string(name));
+}
+
+std::string_view InputSystem::GetTopMapName() const {
+    if (m_stack.empty()) return {};
+    return m_registry[m_stack.back()].name;
+}
+
+bool InputSystem::IsMapInStack(std::string_view name) const {
+    for (size_t idx : m_stack)
+        if (m_registry[idx].name == name) return true;
+    return false;
 }
 
 // ── Poll ──────────────────────────────────────────────────────────────────────
@@ -88,24 +122,41 @@ void InputSystem::Poll() {
     // Rotate state buffers.
     m_prev = std::move(m_curr);
     m_curr.clear();
+    m_currTop.clear();
 
     // Evaluate all actions in the active map stack (top → bottom, stop at
-    // first non-passthrough layer).
+    // first non-passthrough layer). Store each action under a qualified key
+    // ("mapName\x1factionName") so map-owners can read their own namespace
+    // without being shadowed by a higher map that happens to share names.
+    // Also populate m_currTop with the unqualified name on first encounter
+    // so default (unqualified) Lookup stays O(1) and reflects top-most-wins.
     for (auto it = m_stack.rbegin(); it != m_stack.rend(); ++it) {
         const ActionMapDef& map = m_registry[*it];
         for (const auto& actionDef : map.actions) {
-            // Don't overwrite an action already resolved by a higher layer.
-            if (m_curr.count(actionDef.name)) continue;
+            const std::string key = MakeKey(map.name, actionDef.name);
+            // Same (map,action) shouldn't appear twice this frame; guard anyway.
+            if (m_curr.count(key)) continue;
 
             ActionState state       = EvaluateAction(actionDef);
-            const auto  prevIt      = m_prev.find(actionDef.name);
+            const auto  prevIt      = m_prev.find(key);
             const bool  wasActive   = (prevIt != m_prev.end()) && prevIt->second.active;
             state.activatedThisFrame   = state.active && !wasActive;
             state.deactivatedThisFrame = !state.active && wasActive;
-            m_curr[actionDef.name] = state;
+            m_curr[key] = state;
+            // top-most layer claims the unqualified name (first writer wins).
+            m_currTop.try_emplace(actionDef.name, state);
         }
         if (!map.passthrough) break;
     }
+}
+
+std::string InputSystem::MakeKey(std::string_view mapName, std::string_view action) {
+    std::string out;
+    out.reserve(mapName.size() + 1 + action.size());
+    out.append(mapName.data(), mapName.size());
+    out.push_back('\x1f');
+    out.append(action.data(), action.size());
+    return out;
 }
 
 // ── Action queries ────────────────────────────────────────────────────────────
@@ -116,7 +167,14 @@ const ActionState& InputSystem::DefaultState() {
 }
 
 const ActionState& InputSystem::Lookup(std::string_view action) const {
-    auto it = m_curr.find(std::string(action));
+    // m_currTop holds the top-most-wins unqualified view populated by Poll.
+    auto it = m_currTop.find(std::string(action));
+    return (it != m_currTop.end()) ? it->second : DefaultState();
+}
+
+const ActionState& InputSystem::LookupQualified(std::string_view mapName,
+                                                 std::string_view action) const {
+    auto it = m_curr.find(MakeKey(mapName, action));
     return (it != m_curr.end()) ? it->second : DefaultState();
 }
 
@@ -125,6 +183,12 @@ glm::vec2 InputSystem::ReadVec2 (std::string_view a) const { return Lookup(a).va
 bool InputSystem::IsActive      (std::string_view a) const { return Lookup(a).active; }
 bool InputSystem::WasActivated  (std::string_view a) const { return Lookup(a).activatedThisFrame; }
 bool InputSystem::WasDeactivated(std::string_view a) const { return Lookup(a).deactivatedThisFrame; }
+
+float     InputSystem::ReadFloat(std::string_view m, std::string_view a) const { return LookupQualified(m, a).valueFloat; }
+glm::vec2 InputSystem::ReadVec2 (std::string_view m, std::string_view a) const { return LookupQualified(m, a).valueVec2;  }
+bool InputSystem::IsActive      (std::string_view m, std::string_view a) const { return LookupQualified(m, a).active; }
+bool InputSystem::WasActivated  (std::string_view m, std::string_view a) const { return LookupQualified(m, a).activatedThisFrame; }
+bool InputSystem::WasDeactivated(std::string_view m, std::string_view a) const { return LookupQualified(m, a).deactivatedThisFrame; }
 
 // ── Low-level pass-through ────────────────────────────────────────────────────
 

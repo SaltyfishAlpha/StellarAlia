@@ -4,25 +4,247 @@
         <name>StellarAlia.Runtime</name>
     </assembly>
     <members>
-        <member name="T:StellarAlia.Entity">
+        <member name="T:StellarAlia.AnimatorProxy">
             <summary>
-            Lightweight handle to a scene entity. Cheap to copy; check IsValid before use.
+            Proxy for AnimatorComponent playback control on an entity.
+            Call <see cref="M:StellarAlia.Entity.GetAnimator"/> to obtain an instance.
             </summary>
         </member>
-        <member name="M:StellarAlia.Entity.GetRotation">
-            <summary>Gets the rotation as a quaternion (lossless, no gimbal lock).</summary>
+        <member name="P:StellarAlia.AnimatorProxy.IsPlaying">
+            <summary>True while the animator is advancing; false when paused or stopped.</summary>
         </member>
-        <member name="M:StellarAlia.Entity.SetRotation(System.Numerics.Quaternion)">
-            <summary>Sets the rotation from a quaternion. Normalised automatically.</summary>
+        <member name="P:StellarAlia.AnimatorProxy.Speed">
+            <summary>Playback speed multiplier (1 = normal, 0 = paused, negative = reverse).</summary>
+        </member>
+        <member name="M:StellarAlia.AnimatorProxy.Play">
+            <summary>Resumes playback (sets <see cref="P:StellarAlia.AnimatorProxy.IsPlaying"/> to true).</summary>
+        </member>
+        <member name="M:StellarAlia.AnimatorProxy.Stop">
+            <summary>Pauses playback (sets <see cref="P:StellarAlia.AnimatorProxy.IsPlaying"/> to false).</summary>
+        </member>
+        <member name="T:StellarAlia.AssetRef">
+            <summary>
+            Reference to a cooked asset by stable UUID — wire-compatible with native
+            AssetID (16 bytes: hi LE + lo LE).
+            Inspector resolves this via <see cref="T:StellarAlia.AssetTypeAttribute"/>; the editor's
+            asset picker filters by that type tag.
+            </summary>
+        </member>
+        <member name="F:StellarAlia.AssetRef.Hi">
+            <summary>High 64 bits of the 128-bit UUID.</summary>
+        </member>
+        <member name="F:StellarAlia.AssetRef.Lo">
+            <summary>Low 64 bits of the 128-bit UUID.</summary>
+        </member>
+        <member name="M:StellarAlia.AssetRef.#ctor(System.UInt64,System.UInt64)">
+            <summary>Constructs an AssetRef from raw hi/lo halves of a 128-bit UUID.</summary>
+        </member>
+        <member name="F:StellarAlia.AssetRef.Invalid">
+            <summary>The all-zero UUID, used as the "unassigned" sentinel.</summary>
+        </member>
+        <member name="P:StellarAlia.AssetRef.IsValid">
+            <summary>True when this ref points at a non-zero UUID.</summary>
+        </member>
+        <member name="M:StellarAlia.AssetRef.GetHashCode">
+            <inheritdoc/>
+        </member>
+        <member name="M:StellarAlia.AssetRef.Equals(StellarAlia.AssetRef)">
+            <inheritdoc/>
+        </member>
+        <member name="M:StellarAlia.AssetRef.Equals(System.Object)">
+            <inheritdoc/>
+        </member>
+        <member name="M:StellarAlia.AssetRef.op_Equality(StellarAlia.AssetRef,StellarAlia.AssetRef)">
+            <summary>Returns true when both refs point at the same UUID.</summary>
+        </member>
+        <member name="M:StellarAlia.AssetRef.op_Inequality(StellarAlia.AssetRef,StellarAlia.AssetRef)">
+            <summary>Returns true when the refs point at different UUIDs.</summary>
+        </member>
+        <member name="M:StellarAlia.AssetRef.ToString">
+            <summary>Formats as canonical UUID string "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx".</summary>
+        </member>
+        <member name="M:StellarAlia.AssetRef.FromString(System.String)">
+            <summary>Parses a canonical UUID string. Empty or malformed input returns <see cref="F:StellarAlia.AssetRef.Invalid"/>.</summary>
+        </member>
+        <member name="T:StellarAlia.AssetTypeAttribute">
+            <summary>
+            Tag a public AssetRef field with the AssetEntry::type the Inspector picker
+            should filter by ("Mesh", "Texture", "Material", "Script", "Animation", …).
+            Omitting it lets the picker show all assets.
+            </summary>
+        </member>
+        <member name="F:StellarAlia.AssetTypeAttribute.Type">
+            <summary>The AssetEntry::type tag the Inspector should filter by.</summary>
+        </member>
+        <member name="M:StellarAlia.AssetTypeAttribute.#ctor(System.String)">
+            <summary>Constructs the attribute with the given asset type tag.</summary>
+        </member>
+        <member name="T:StellarAlia.Color">
+            <summary>
+            Linear-space RGBA color (float channels, 0..1 typical but unclamped).
+            Wire-compatible with <see cref="T:System.Numerics.Vector4"/>: 4×f32 LE in the field-value blob.
+            </summary>
+        </member>
+        <member name="F:StellarAlia.Color.R">
+            <summary>Red channel (linear, 0..1 typical).</summary>
+        </member>
+        <member name="F:StellarAlia.Color.G">
+            <summary>Green channel (linear, 0..1 typical).</summary>
+        </member>
+        <member name="F:StellarAlia.Color.B">
+            <summary>Blue channel (linear, 0..1 typical).</summary>
+        </member>
+        <member name="F:StellarAlia.Color.A">
+            <summary>Alpha channel (0 = transparent, 1 = opaque).</summary>
+        </member>
+        <member name="M:StellarAlia.Color.#ctor(System.Single,System.Single,System.Single,System.Single)">
+            <summary>Constructs a color from RGBA channels. Alpha defaults to 1 (opaque).</summary>
+        </member>
+        <member name="F:StellarAlia.Color.White">
+            <summary>Opaque white (1, 1, 1, 1).</summary>
+        </member>
+        <member name="F:StellarAlia.Color.Black">
+            <summary>Opaque black (0, 0, 0, 1).</summary>
+        </member>
+        <member name="F:StellarAlia.Color.Red">
+            <summary>Opaque red (1, 0, 0, 1).</summary>
+        </member>
+        <member name="F:StellarAlia.Color.Green">
+            <summary>Opaque green (0, 1, 0, 1).</summary>
+        </member>
+        <member name="F:StellarAlia.Color.Blue">
+            <summary>Opaque blue (0, 0, 1, 1).</summary>
+        </member>
+        <member name="F:StellarAlia.Color.Yellow">
+            <summary>Opaque yellow (1, 1, 0, 1).</summary>
+        </member>
+        <member name="F:StellarAlia.Color.Magenta">
+            <summary>Opaque magenta (1, 0, 1, 1).</summary>
+        </member>
+        <member name="F:StellarAlia.Color.Cyan">
+            <summary>Opaque cyan (0, 1, 1, 1).</summary>
+        </member>
+        <member name="F:StellarAlia.Color.Clear">
+            <summary>Fully transparent black (0, 0, 0, 0).</summary>
+        </member>
+        <member name="M:StellarAlia.Color.AsVector4">
+            <summary>Returns this color as a <see cref="T:System.Numerics.Vector4"/> (R, G, B, A).</summary>
+        </member>
+        <member name="M:StellarAlia.Color.op_Implicit(StellarAlia.Color)~System.Numerics.Vector4">
+            <summary>Implicit conversion to <see cref="T:System.Numerics.Vector4"/>.</summary>
+        </member>
+        <member name="M:StellarAlia.Color.op_Implicit(System.Numerics.Vector4)~StellarAlia.Color">
+            <summary>Implicit conversion from <see cref="T:System.Numerics.Vector4"/> (X→R, Y→G, Z→B, W→A).</summary>
+        </member>
+        <member name="T:StellarAlia.Debug">
+            <summary>
+            Script-side logging and debug-draw utilities. Output is routed to the
+            engine console; debug lines render in the editor viewport for one frame.
+            </summary>
+        </member>
+        <member name="M:StellarAlia.Debug.Log(System.String)">
+            <summary>Writes an informational message to the engine console.</summary>
+        </member>
+        <member name="M:StellarAlia.Debug.Warn(System.String)">
+            <summary>Writes a warning message to the engine console.</summary>
+        </member>
+        <member name="M:StellarAlia.Debug.Error(System.String)">
+            <summary>Writes an error message to the engine console.</summary>
+        </member>
+        <member name="M:StellarAlia.Debug.DrawLine(System.Numerics.Vector3,System.Numerics.Vector3,System.Numerics.Vector4)">
+            <summary>Draws a one-frame line in world space with the given RGBA color.</summary>
+        </member>
+        <member name="M:StellarAlia.Debug.DrawLine(System.Numerics.Vector3,System.Numerics.Vector3)">
+            <summary>Draws a one-frame white line in world space.</summary>
+        </member>
+        <member name="T:StellarAlia.Entity">
+             <summary>
+             Lightweight handle to a scene entity. Cheap to copy; check IsValid before use.
+            
+             Transform API: all accessors are explicit about coordinate space —
+             <see cref="P:StellarAlia.Entity.LocalPosition"/> / <see cref="P:StellarAlia.Entity.LocalRotation"/> / <see cref="P:StellarAlia.Entity.LocalScale"/>
+             are parent-relative (the serialised form the Inspector shows), while
+             <see cref="P:StellarAlia.Entity.WorldPosition"/> / <see cref="P:StellarAlia.Entity.WorldRotation"/> /
+             <see cref="P:StellarAlia.Entity.LossyWorldScale"/> walk the hierarchy. World-space readers are
+             lazily refreshed in native code, so a freshly-set parent transform is
+             visible immediately within the same script frame.
+             </summary>
+        </member>
+        <member name="P:StellarAlia.Entity.IsValid">
+            <summary>True when the underlying entity still exists in the scene.</summary>
+        </member>
+        <member name="P:StellarAlia.Entity.LocalPosition">
+            <summary>The entity's local-space position (parent-relative).</summary>
+        </member>
+        <member name="P:StellarAlia.Entity.LocalRotationEuler">
+            <summary>The entity's local rotation as Euler angles in degrees (XYZ order).</summary>
+        </member>
+        <member name="P:StellarAlia.Entity.LocalRotation">
+            <summary>The entity's local rotation quaternion (parent-relative).</summary>
+        </member>
+        <member name="P:StellarAlia.Entity.LocalScale">
+            <summary>The entity's local scale.</summary>
+        </member>
+        <member name="P:StellarAlia.Entity.WorldPosition">
+            <summary>The entity's world-space position (parent chain composed).</summary>
+        </member>
+        <member name="P:StellarAlia.Entity.WorldRotation">
+            <summary>The entity's world rotation as a quaternion.</summary>
+        </member>
+        <member name="P:StellarAlia.Entity.WorldRotationEuler">
+            <summary>The entity's world rotation as Euler angles in degrees (XYZ order).</summary>
+        </member>
+        <member name="P:StellarAlia.Entity.LossyWorldScale">
+            <summary>
+            Lossy world scale extracted from the world matrix basis vector lengths.
+            Read-only by design — non-uniform parent scale would make a world-scale
+            setter ambiguous (Unity follows the same convention).
+            </summary>
+        </member>
+        <member name="P:StellarAlia.Entity.WorldMatrix">
+            <summary>
+            The entity's 4×4 world matrix. Returned in System.Numerics row-major
+            layout, so <c>Vector3.Transform(point, WorldMatrix)</c> applies the
+            full TRS chain. Useful as the raw input for custom space conversions.
+            </summary>
         </member>
         <member name="P:StellarAlia.Entity.Forward">
-            <summary>Local forward direction (−Z of the entity's rotation).</summary>
+            <summary>World-space forward vector (engine convention: −Z of world rotation).</summary>
         </member>
         <member name="P:StellarAlia.Entity.Right">
-            <summary>Local right direction (+X of the entity's rotation).</summary>
+            <summary>World-space right vector (+X of world rotation).</summary>
         </member>
         <member name="P:StellarAlia.Entity.Up">
-            <summary>Local up direction (+Y of the entity's rotation).</summary>
+            <summary>World-space up vector (+Y of world rotation).</summary>
+        </member>
+        <member name="M:StellarAlia.Entity.Translate(System.Numerics.Vector3,StellarAlia.Space)">
+            <summary>
+            Translates the entity by <paramref name="delta"/>. <see cref="F:StellarAlia.Space.Self"/>
+            interprets <paramref name="delta"/> in the entity's local frame (so
+            <c>Translate(Vector3.UnitX)</c> moves along Right); <see cref="F:StellarAlia.Space.World"/>
+            applies the delta directly in world space.
+            </summary>
+        </member>
+        <member name="M:StellarAlia.Entity.Rotate(System.Numerics.Quaternion,StellarAlia.Space)">
+            <summary>
+            Rotates the entity by <paramref name="delta"/>. <see cref="F:StellarAlia.Space.Self"/>
+            pre-composes (local), <see cref="F:StellarAlia.Space.World"/> post-composes (world).
+            </summary>
+        </member>
+        <member name="M:StellarAlia.Entity.TransformPoint(System.Numerics.Vector3)">
+            <summary>Transforms a point from this entity's local space into world space.</summary>
+        </member>
+        <member name="M:StellarAlia.Entity.InverseTransformPoint(System.Numerics.Vector3)">
+            <summary>Transforms a point from world space into this entity's local space.</summary>
+        </member>
+        <member name="M:StellarAlia.Entity.TransformDirection(System.Numerics.Vector3)">
+            <summary>
+            Transforms a direction from local to world space — rotation only, scale
+            and translation are ignored (matches Unity's TransformDirection).
+            </summary>
+        </member>
+        <member name="M:StellarAlia.Entity.InverseTransformDirection(System.Numerics.Vector3)">
+            <summary>Transforms a direction from world to local space (rotation only).</summary>
         </member>
         <member name="M:StellarAlia.Entity.Destroy">
             <summary>Destroys this entity and all its components.</summary>
@@ -30,37 +252,186 @@
         <member name="M:StellarAlia.Entity.Create">
             <summary>Creates a new empty entity with a TagComponent and TransformComponent.</summary>
         </member>
+        <member name="M:StellarAlia.Entity.GetName">
+            <summary>Returns the entity's TagComponent name (UTF-8, truncated to 255 bytes).</summary>
+        </member>
+        <member name="M:StellarAlia.Entity.FindChild(System.String)">
+            <summary>Finds an immediate child by name, or null when none matches.</summary>
+        </member>
         <member name="M:StellarAlia.Entity.GetAnimator">
             <summary>Returns an animator proxy for this entity, or null if not valid.</summary>
         </member>
         <member name="M:StellarAlia.Entity.GetRigidBody">
-            <summary>Returns a rigidbody proxy for this entity, or null if not valid.</summary>
+            <summary>Returns a rigidbody proxy for this entity, or null when the
+            entity has no RigidBodyComponent. Previous behaviour returned a proxy
+            unconditionally and let LinearVelocity / AddImpulse silently no-op —
+            which made misconfigured scenes hard to diagnose (Issue #71 demo).</summary>
         </member>
         <member name="M:StellarAlia.Entity.GetPointLight">
             <summary>Returns a point-light proxy for this entity, or null if not valid.</summary>
         </member>
+        <member name="M:StellarAlia.Entity.GetMesh">
+            <summary>Returns a mesh proxy (StaticMesh + MeshRenderer) for this entity, or null if not valid.</summary>
+        </member>
+        <member name="M:StellarAlia.Entity.GetMaterialOverride">
+            <summary>Returns a material-override proxy for this entity, or null if not valid.</summary>
+        </member>
         <member name="M:StellarAlia.Entity.Find(System.String)">
             <summary>O(N) scene scan — cache the result in OnStart, do not call per-frame.</summary>
         </member>
+        <member name="M:StellarAlia.Entity.ToString">
+            <inheritdoc/>
+        </member>
         <member name="T:StellarAlia.Key">
             <summary>
-            Maps friendly key names to engine device paths (e.g. Key.W → "Keyboard/W").
+            Logical key identifiers. Mapped internally to engine device paths
+            (e.g. <see cref="F:StellarAlia.Key.W"/> → "Keyboard/W").
+            </summary>
+        </member>
+        <member name="T:StellarAlia.MouseButton">
+            <summary>Mouse button identifiers.</summary>
+        </member>
+        <member name="F:StellarAlia.MouseButton.Left">
+            <summary>The primary (left) mouse button.</summary>
+        </member>
+        <member name="F:StellarAlia.MouseButton.Right">
+            <summary>The secondary (right) mouse button.</summary>
+        </member>
+        <member name="F:StellarAlia.MouseButton.Middle">
+            <summary>The middle mouse button / scroll-wheel click.</summary>
+        </member>
+        <member name="T:StellarAlia.Input">
+            <summary>
+            Raw device-path keyboard and mouse polling. For decoupled named actions
+            configured via .sainputmap assets, use <see cref="T:StellarAlia.InputAction"/> instead.
             </summary>
         </member>
         <member name="M:StellarAlia.Input.IsKeyDown(StellarAlia.Key)">
-            Returns true while the key is held.
+            <summary>Returns true while the key is held.</summary>
         </member>
         <member name="M:StellarAlia.Input.IsKeyJustPressed(StellarAlia.Key)">
-            Returns true on the first frame the key was pressed.
+            <summary>Returns true on the first frame the key was pressed.</summary>
         </member>
         <member name="M:StellarAlia.Input.IsKeyJustReleased(StellarAlia.Key)">
-            Returns true on the first frame the key was released.
+            <summary>Returns true on the first frame the key was released.</summary>
         </member>
         <member name="M:StellarAlia.Input.GetKeyValue(StellarAlia.Key)">
-            Returns the raw analog value [0,1] for a key (useful for triggers/axes).
+            <summary>Returns the raw analog value [0,1] for a key (useful for triggers/axes).</summary>
+        </member>
+        <member name="M:StellarAlia.Input.IsMouseButtonDown(StellarAlia.MouseButton)">
+            <summary>Returns true while the given mouse button is held.</summary>
+        </member>
+        <member name="M:StellarAlia.Input.GetMouseDelta">
+            <summary>Returns the mouse movement delta this frame in pixels.</summary>
+        </member>
+        <member name="T:StellarAlia.InputAction">
+            <summary>
+            Named-action input (Issue #71). Queries the engine InputSystem by action
+            name as configured via .sainputmap assets — decoupled from device paths.
+            </summary>
+        </member>
+        <member name="M:StellarAlia.InputAction.Read(System.String)">
+            <summary>Reads the current scalar value of an action (e.g. a trigger axis).</summary>
+        </member>
+        <member name="M:StellarAlia.InputAction.ReadVec2(System.String)">
+            <summary>Reads the current 2D value of an action (e.g. a stick or composite XY).</summary>
+        </member>
+        <member name="M:StellarAlia.InputAction.IsActive(System.String)">
+            <summary>True while the action is currently active.</summary>
+        </member>
+        <member name="M:StellarAlia.InputAction.WasActivated(System.String)">
+            <summary>True on the first frame the action became active this frame.</summary>
+        </member>
+        <member name="M:StellarAlia.InputAction.WasDeactivated(System.String)">
+            <summary>True on the first frame the action became inactive this frame.</summary>
+        </member>
+        <member name="T:StellarAlia.InputMap">
+             <summary>
+             Runtime control of the InputSystem map stack (Issue #71 Phase 3a). Pair with
+             <see cref="T:StellarAlia.InputAction"/> to switch the named-action set seen by the script
+             (pause menus, vehicle/on-foot mode swaps, level-specific control schemes).
+            
+             All names refer to <c>ActionMapDef.name</c> values from project
+             <c>.sainputmap</c> assets (NOT file names). Maps unknown to the InputSystem
+             log a warning on the engine side; the script methods return false / empty.
+             </summary>
+        </member>
+        <member name="M:StellarAlia.InputMap.Push(System.String)">
+            <summary>Push the named map on top of the stack. Returns false when no
+            map with this name is registered.</summary>
+        </member>
+        <member name="M:StellarAlia.InputMap.Pop">
+            <summary>Pop the top map. No-op when the stack is already empty.</summary>
+        </member>
+        <member name="M:StellarAlia.InputMap.Replace(System.String)">
+            <summary>Clear the stack and push the named map. Returns false on unknown name.</summary>
+        </member>
+        <member name="M:StellarAlia.InputMap.IsActive(System.String)">
+            <summary>True when any layer of the stack references this map name.
+            For "is this specifically the top map?" use <see cref="M:StellarAlia.InputMap.GetActive"/>.</summary>
+        </member>
+        <member name="M:StellarAlia.InputMap.GetActive">
+            <summary>Name of the current top-of-stack map, or empty string when the
+            stack is empty (game scripts not yet reached PIE entry).</summary>
+        </member>
+        <member name="T:StellarAlia.Log">
+            <summary>Shorthand for engine-console logging. See also <see cref="T:StellarAlia.Debug"/>.</summary>
+        </member>
+        <member name="M:StellarAlia.Log.Info(System.String)">
+            <summary>Writes an informational message to the engine console.</summary>
+        </member>
+        <member name="M:StellarAlia.Log.Warn(System.String)">
+            <summary>Writes a warning message to the engine console.</summary>
+        </member>
+        <member name="M:StellarAlia.Log.Error(System.String)">
+            <summary>Writes an error message to the engine console.</summary>
+        </member>
+        <member name="T:StellarAlia.MaterialOverrideProxy">
+            <summary>
+            Lightweight proxy for MaterialOverrideComponent (Issue #71). Reads / writes
+            per-entity material parameter overrides by name. Names must match the
+            shader ParamDef. Returns zero / no-op when the entity has no
+            MaterialOverrideComponent — add it from the editor first.
+            </summary>
+        </member>
+        <member name="M:StellarAlia.MaterialOverrideProxy.GetFloat(System.String)">
+            <summary>Reads a float-typed material parameter override. Returns 0 when unset.</summary>
+        </member>
+        <member name="M:StellarAlia.MaterialOverrideProxy.SetFloat(System.String,System.Single)">
+            <summary>Writes a float-typed material parameter override.</summary>
+        </member>
+        <member name="M:StellarAlia.MaterialOverrideProxy.GetVec3(System.String)">
+            <summary>Reads a vec3-typed material parameter override. Returns zero when unset.</summary>
+        </member>
+        <member name="M:StellarAlia.MaterialOverrideProxy.SetVec3(System.String,System.Numerics.Vector3)">
+            <summary>Writes a vec3-typed material parameter override.</summary>
+        </member>
+        <member name="M:StellarAlia.MaterialOverrideProxy.GetVec4(System.String)">
+            <summary>Reads a vec4-typed material parameter override. Returns zero when unset.</summary>
+        </member>
+        <member name="M:StellarAlia.MaterialOverrideProxy.SetVec4(System.String,System.Numerics.Vector4)">
+            <summary>Writes a vec4-typed material parameter override.</summary>
+        </member>
+        <member name="M:StellarAlia.MaterialOverrideProxy.GetColor(System.String)">
+            <summary>Reads a vec4 override as <see cref="T:StellarAlia.Color"/>. Returns zero when unset.</summary>
+        </member>
+        <member name="M:StellarAlia.MaterialOverrideProxy.SetColor(System.String,StellarAlia.Color)">
+            <summary>Writes a vec4 override from a <see cref="T:StellarAlia.Color"/>.</summary>
         </member>
         <member name="T:StellarAlia.Mathf">
             <summary>Common math helpers wrapping <see cref="T:System.MathF"/>.</summary>
+        </member>
+        <member name="F:StellarAlia.Mathf.PI">
+            <summary>π (3.14159…).</summary>
+        </member>
+        <member name="F:StellarAlia.Mathf.Deg2Rad">
+            <summary>Multiplier from degrees to radians.</summary>
+        </member>
+        <member name="F:StellarAlia.Mathf.Rad2Deg">
+            <summary>Multiplier from radians to degrees.</summary>
+        </member>
+        <member name="F:StellarAlia.Mathf.Epsilon">
+            <summary>Default tolerance used by <see cref="M:StellarAlia.Mathf.Approximately(System.Single,System.Single,System.Single)"/>.</summary>
         </member>
         <member name="M:StellarAlia.Mathf.Lerp(System.Single,System.Single,System.Single)">
             <summary>Linear interpolation (unclamped).</summary>
@@ -68,14 +439,97 @@
         <member name="M:StellarAlia.Mathf.LerpClamped(System.Single,System.Single,System.Single)">
             <summary>Linear interpolation clamped to [0,1].</summary>
         </member>
+        <member name="M:StellarAlia.Mathf.Clamp(System.Single,System.Single,System.Single)">
+            <summary>Clamps <paramref name="v"/> into the inclusive range [<paramref name="min"/>, <paramref name="max"/>].</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.Clamp(System.Int32,System.Int32,System.Int32)">
+            <summary>Clamps <paramref name="v"/> into the inclusive range [<paramref name="min"/>, <paramref name="max"/>].</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.Clamp01(System.Single)">
+            <summary>Clamps <paramref name="v"/> into [0, 1].</summary>
+        </member>
         <member name="M:StellarAlia.Mathf.PingPong(System.Single,System.Single)">
             <summary>Ping-pongs t in [0, length].</summary>
         </member>
         <member name="M:StellarAlia.Mathf.SmoothStep(System.Single,System.Single,System.Single)">
             <summary>Hermite smooth step in [a,b] at edge0=a, edge1=b.</summary>
         </member>
+        <member name="M:StellarAlia.Mathf.Approximately(System.Single,System.Single,System.Single)">
+            <summary>Returns true when |a − b| ≤ eps (defaults to <see cref="F:StellarAlia.Mathf.Epsilon"/>).</summary>
+        </member>
         <member name="M:StellarAlia.Mathf.MoveTowards(System.Single,System.Single,System.Single)">
             <summary>Moves current towards target by at most maxDelta (handles negative delta).</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.Abs(System.Single)">
+            <summary>Absolute value of <paramref name="v"/>.</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.Sign(System.Single)">
+            <summary>Sign of <paramref name="v"/> (−1, 0, or 1).</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.Sqrt(System.Single)">
+            <summary>Square root of <paramref name="v"/>.</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.Pow(System.Single,System.Single)">
+            <summary><paramref name="b"/> raised to the power <paramref name="e"/>.</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.Sin(System.Single)">
+            <summary>Sine of an angle in radians.</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.Cos(System.Single)">
+            <summary>Cosine of an angle in radians.</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.Tan(System.Single)">
+            <summary>Tangent of an angle in radians.</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.Asin(System.Single)">
+            <summary>Arc sine in radians.</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.Acos(System.Single)">
+            <summary>Arc cosine in radians.</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.Atan2(System.Single,System.Single)">
+            <summary>Two-argument arc tangent in radians.</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.Floor(System.Single)">
+            <summary>Largest integer ≤ <paramref name="v"/>.</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.Ceil(System.Single)">
+            <summary>Smallest integer ≥ <paramref name="v"/>.</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.Round(System.Single)">
+            <summary>Rounds <paramref name="v"/> to the nearest integer (banker's rounding).</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.Max(System.Single,System.Single)">
+            <summary>Maximum of <paramref name="a"/> and <paramref name="b"/>.</summary>
+        </member>
+        <member name="M:StellarAlia.Mathf.Min(System.Single,System.Single)">
+            <summary>Minimum of <paramref name="a"/> and <paramref name="b"/>.</summary>
+        </member>
+        <member name="T:StellarAlia.MeshProxy">
+            <summary>
+            Lightweight proxy for StaticMeshComponent + MeshRendererComponent of an
+            entity (Issue #71). Use to read the mesh asset, query / override material
+            slots at runtime, and toggle per-renderer shadow flags.
+            </summary>
+        </member>
+        <member name="P:StellarAlia.MeshProxy.MeshAsset">
+            <summary>UUID of the static mesh asset. Invalid when no StaticMeshComponent.</summary>
+        </member>
+        <member name="P:StellarAlia.MeshProxy.MaterialCount">
+            <summary>Number of material override slots on the MeshRendererComponent.</summary>
+        </member>
+        <member name="M:StellarAlia.MeshProxy.GetMaterial(System.Int32)">
+            <summary>Read the material assigned to the given slot. Returns Invalid when out of range.</summary>
+        </member>
+        <member name="M:StellarAlia.MeshProxy.SetMaterial(System.Int32,StellarAlia.AssetRef)">
+            <summary>Override the material in the given slot. Returns true when applied
+            (slot in range), false otherwise — out-of-range slots do not auto-grow.</summary>
+        </member>
+        <member name="P:StellarAlia.MeshProxy.CastShadow">
+            <summary>Whether this mesh casts shadows into the shadow map.</summary>
+        </member>
+        <member name="P:StellarAlia.MeshProxy.ReceiveShadow">
+            <summary>Whether this mesh receives sampled shadows in the lighting pass.</summary>
         </member>
         <member name="T:StellarAlia.RaycastHit">
             <summary>Result of a successful <see cref="M:StellarAlia.Physics.Raycast(System.Numerics.Vector3,System.Numerics.Vector3,System.Single,StellarAlia.RaycastHit@)"/> call.</summary>
@@ -114,6 +568,53 @@
         <member name="P:StellarAlia.PointLightProxy.Range">
             <summary>Attenuation range in world units.</summary>
         </member>
+        <member name="T:StellarAlia.PostProcess">
+            <summary>
+            Runtime access to the active scene's screen-modification effects
+            (Issue #47).  Mirrors the Editor's PostProcess panel — setters mutate
+            WorldSettings.pp and live-apply to the renderer immediately.
+            </summary>
+            <example>
+            // Pulse the vignette with time:
+            void Update() {
+                PostProcess.Vignette.Enabled   = true;
+                PostProcess.Vignette.Intensity = 0.4f + Mathf.Sin(Time.TotalTime) * 0.1f;
+            }
+            </example>
+        </member>
+        <member name="T:StellarAlia.PostProcess.Vignette">
+            <summary>Radial darkening around the screen edges.</summary>
+        </member>
+        <member name="P:StellarAlia.PostProcess.Vignette.Enabled">
+            <summary>Toggle for this effect layer.</summary>
+        </member>
+        <member name="P:StellarAlia.PostProcess.Vignette.Intensity">
+            <summary>Radius at which the vignette starts darkening (0..1, normalized to the half-diagonal).</summary>
+        </member>
+        <member name="P:StellarAlia.PostProcess.Vignette.Smoothness">
+            <summary>Falloff width — larger = softer edge (0.01..1).</summary>
+        </member>
+        <member name="T:StellarAlia.PostProcess.ChromaticAberration">
+            <summary>Radial RGB offset that mimics a real lens (no offset at the centre, max at the edges).</summary>
+        </member>
+        <member name="P:StellarAlia.PostProcess.ChromaticAberration.Enabled">
+            <summary>Toggle for this effect layer.</summary>
+        </member>
+        <member name="P:StellarAlia.PostProcess.ChromaticAberration.Strength">
+            <summary>RGB shift magnitude (0..5). 1.0 ≈ a few pixels at 1080p.</summary>
+        </member>
+        <member name="T:StellarAlia.PostProcess.FilmGrain">
+            <summary>Per-frame hash noise attenuated in bright regions to mimic film stock.</summary>
+        </member>
+        <member name="P:StellarAlia.PostProcess.FilmGrain.Enabled">
+            <summary>Toggle for this effect layer.</summary>
+        </member>
+        <member name="P:StellarAlia.PostProcess.FilmGrain.Intensity">
+            <summary>Noise amplitude (0..0.3).</summary>
+        </member>
+        <member name="P:StellarAlia.PostProcess.FilmGrain.Size">
+            <summary>Grain tile scale; larger = chunkier noise (0.5..5).</summary>
+        </member>
         <member name="T:StellarAlia.QuaternionExt">
             <summary>Extension and factory helpers for <see cref="T:System.Numerics.Quaternion"/>.</summary>
         </member>
@@ -138,11 +639,27 @@
         <member name="M:StellarAlia.QuaternionExt.ToEulerDegrees(System.Numerics.Quaternion)">
             <summary>Extracts Euler angles in degrees (XYZ, matching glm eulerAngles convention).</summary>
         </member>
+        <member name="T:StellarAlia.RigidBodyType">
+            <summary>Motion type of a physics body. Mirrors C++ RigidBodyComponent::Type.</summary>
+        </member>
+        <member name="F:StellarAlia.RigidBodyType.Static">
+            <summary>Immovable collider. Not affected by forces; cannot have velocity.</summary>
+        </member>
+        <member name="F:StellarAlia.RigidBodyType.Kinematic">
+            <summary>Moved by scripts. Pushes dynamics but is not pushed back.</summary>
+        </member>
+        <member name="F:StellarAlia.RigidBodyType.Dynamic">
+            <summary>Fully simulated. Affected by gravity, forces, and impulses.</summary>
+        </member>
         <member name="T:StellarAlia.RigidBodyProxy">
             <summary>
             Proxy for physics body operations on an entity.
             Call <see cref="M:StellarAlia.Entity.GetRigidBody"/> to obtain an instance.
             </summary>
+        </member>
+        <member name="P:StellarAlia.RigidBodyProxy.Type">
+            <summary>The body's motion type (Static / Kinematic / Dynamic). LinearVelocity
+            and AddImpulse only have observable effect on <see cref="F:StellarAlia.RigidBodyType.Dynamic"/>.</summary>
         </member>
         <member name="P:StellarAlia.RigidBodyProxy.LinearVelocity">
             <summary>Linear velocity in world space (m/s).</summary>
@@ -156,10 +673,53 @@
         <member name="M:StellarAlia.RigidBodyProxy.AddImpulse(System.Numerics.Vector3)">
             <summary>Applies an instantaneous impulse (N·s). Applied immediately.</summary>
         </member>
+        <member name="T:StellarAlia.RangeAttribute">
+            <summary>Constrains a numeric field to a slider in the Inspector.</summary>
+        </member>
+        <member name="F:StellarAlia.RangeAttribute.Min">
+            <summary>Inclusive lower bound shown by the slider.</summary>
+        </member>
+        <member name="F:StellarAlia.RangeAttribute.Max">
+            <summary>Inclusive upper bound shown by the slider.</summary>
+        </member>
+        <member name="M:StellarAlia.RangeAttribute.#ctor(System.Single,System.Single)">
+            <summary>Constructs the attribute with the given inclusive bounds.</summary>
+        </member>
+        <member name="T:StellarAlia.TooltipAttribute">
+            <summary>Sets a hover tooltip on a field in the Inspector.</summary>
+        </member>
+        <member name="F:StellarAlia.TooltipAttribute.Text">
+            <summary>Tooltip text shown when the user hovers the field.</summary>
+        </member>
+        <member name="M:StellarAlia.TooltipAttribute.#ctor(System.String)">
+            <summary>Constructs the attribute with the given tooltip text.</summary>
+        </member>
+        <member name="T:StellarAlia.HeaderAttribute">
+            <summary>Inserts a labelled section separator before the field in the Inspector.</summary>
+        </member>
+        <member name="F:StellarAlia.HeaderAttribute.Text">
+            <summary>Header label rendered above the field.</summary>
+        </member>
+        <member name="M:StellarAlia.HeaderAttribute.#ctor(System.String)">
+            <summary>Constructs the attribute with the given header label.</summary>
+        </member>
+        <member name="T:StellarAlia.HideInInspectorAttribute">
+            <summary>Hides a field from the Inspector while still serializing it.</summary>
+        </member>
+        <member name="T:StellarAlia.SerializeFieldAttribute">
+            <summary>
+            Opt-in serialization for non-public fields. Reserved for the #75 plan:
+            when honoured the reflector will include <c>private</c> fields marked
+            with this attribute alongside the default <c>public</c> set.
+            </summary>
+        </member>
         <member name="T:StellarAlia.ScriptBase">
             <summary>
             Base class for all user scripts. Attach to an Entity via ScriptComponent.
             </summary>
+        </member>
+        <member name="P:StellarAlia.ScriptBase.Self">
+            <summary>The entity this script is attached to.</summary>
         </member>
         <member name="M:StellarAlia.ScriptBase.OnAttach">
             Called once when the script is first attached (other scripts may not be ready yet).
@@ -181,6 +741,28 @@
         </member>
         <member name="M:StellarAlia.ScriptBase.OnDetach">
             Called when the script is removed or the scene is unloaded.
+        </member>
+        <member name="T:StellarAlia.Space">
+            <summary>
+            Coordinate-space tag used by <see cref="M:StellarAlia.Entity.Translate(System.Numerics.Vector3,StellarAlia.Space)"/> and
+            <see cref="M:StellarAlia.Entity.Rotate(System.Numerics.Quaternion,StellarAlia.Space)"/> to disambiguate whether the supplied delta is
+            expressed in the entity's local frame or in world space.
+            </summary>
+        </member>
+        <member name="F:StellarAlia.Space.Self">
+            <summary>Apply the delta in the entity's local frame (parent-relative).</summary>
+        </member>
+        <member name="F:StellarAlia.Space.World">
+            <summary>Apply the delta in world space.</summary>
+        </member>
+        <member name="T:StellarAlia.Time">
+            <summary>Frame and total-elapsed time queries.</summary>
+        </member>
+        <member name="P:StellarAlia.Time.DeltaTime">
+            <summary>Seconds elapsed since the previous frame.</summary>
+        </member>
+        <member name="P:StellarAlia.Time.TotalTime">
+            <summary>Seconds elapsed since the engine started (or scene loaded, depending on context).</summary>
         </member>
     </members>
 </doc>

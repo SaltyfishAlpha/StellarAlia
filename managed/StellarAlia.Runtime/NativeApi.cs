@@ -7,7 +7,7 @@ namespace StellarAlia;
 // The C++ side passes a ScriptApiFunctionTable* in ScriptBridgeEntry.Initialize().
 internal static unsafe class NativeApi
 {
-    internal const uint ExpectedTableVersion = 2;
+    internal const uint ExpectedTableVersion = 7;
 
     private static ScriptApiFunctionTable* s_table;
 
@@ -15,39 +15,67 @@ internal static unsafe class NativeApi
         s_table = (ScriptApiFunctionTable*)tablePtr;
     }
 
-    // ── Entity — transform ────────────────────────────────────────────────────
+    // ── Entity — transform (local, parent-relative) ───────────────────────────
 
-    internal static void SA_Entity_GetPosition(ulong id, out float x, out float y, out float z) {
+    internal static void SA_Entity_GetLocalPosition(ulong id, out float x, out float y, out float z) {
         float lx, ly, lz;
-        s_table->Entity_GetPosition(id, &lx, &ly, &lz);
+        s_table->Entity_GetLocalPosition(id, &lx, &ly, &lz);
         x = lx; y = ly; z = lz;
     }
-    internal static void SA_Entity_SetPosition(ulong id, float x, float y, float z)
-        => s_table->Entity_SetPosition(id, x, y, z);
+    internal static void SA_Entity_SetLocalPosition(ulong id, float x, float y, float z)
+        => s_table->Entity_SetLocalPosition(id, x, y, z);
 
-    internal static void SA_Entity_GetRotationEuler(ulong id, out float x, out float y, out float z) {
+    internal static void SA_Entity_GetLocalRotationEuler(ulong id, out float x, out float y, out float z) {
         float lx, ly, lz;
-        s_table->Entity_GetRotationEuler(id, &lx, &ly, &lz);
+        s_table->Entity_GetLocalRotationEuler(id, &lx, &ly, &lz);
         x = lx; y = ly; z = lz;
     }
-    internal static void SA_Entity_SetRotationEuler(ulong id, float x, float y, float z)
-        => s_table->Entity_SetRotationEuler(id, x, y, z);
+    internal static void SA_Entity_SetLocalRotationEuler(ulong id, float x, float y, float z)
+        => s_table->Entity_SetLocalRotationEuler(id, x, y, z);
 
-    internal static void SA_Entity_GetRotationQuat(ulong id, out float w, out float x, out float y, out float z) {
+    internal static void SA_Entity_GetLocalRotationQuat(ulong id, out float w, out float x, out float y, out float z) {
         float lw, lx, ly, lz;
-        s_table->Entity_GetRotationQuat(id, &lw, &lx, &ly, &lz);
+        s_table->Entity_GetLocalRotationQuat(id, &lw, &lx, &ly, &lz);
         w = lw; x = lx; y = ly; z = lz;
     }
-    internal static void SA_Entity_SetRotationQuat(ulong id, float w, float x, float y, float z)
-        => s_table->Entity_SetRotationQuat(id, w, x, y, z);
+    internal static void SA_Entity_SetLocalRotationQuat(ulong id, float w, float x, float y, float z)
+        => s_table->Entity_SetLocalRotationQuat(id, w, x, y, z);
 
-    internal static void SA_Entity_GetScale(ulong id, out float x, out float y, out float z) {
+    internal static void SA_Entity_GetLocalScale(ulong id, out float x, out float y, out float z) {
         float lx, ly, lz;
-        s_table->Entity_GetScale(id, &lx, &ly, &lz);
+        s_table->Entity_GetLocalScale(id, &lx, &ly, &lz);
         x = lx; y = ly; z = lz;
     }
-    internal static void SA_Entity_SetScale(ulong id, float x, float y, float z)
-        => s_table->Entity_SetScale(id, x, y, z);
+    internal static void SA_Entity_SetLocalScale(ulong id, float x, float y, float z)
+        => s_table->Entity_SetLocalScale(id, x, y, z);
+
+    // ── Entity — transform (world-space; lazy-refreshed in native) ────────────
+
+    internal static void SA_Entity_GetWorldPosition(ulong id, out float x, out float y, out float z) {
+        float lx, ly, lz;
+        s_table->Entity_GetWorldPosition(id, &lx, &ly, &lz);
+        x = lx; y = ly; z = lz;
+    }
+    internal static void SA_Entity_SetWorldPosition(ulong id, float x, float y, float z)
+        => s_table->Entity_SetWorldPosition(id, x, y, z);
+
+    internal static void SA_Entity_GetWorldRotationQuat(ulong id, out float w, out float x, out float y, out float z) {
+        float lw, lx, ly, lz;
+        s_table->Entity_GetWorldRotationQuat(id, &lw, &lx, &ly, &lz);
+        w = lw; x = lx; y = ly; z = lz;
+    }
+    internal static void SA_Entity_SetWorldRotationQuat(ulong id, float w, float x, float y, float z)
+        => s_table->Entity_SetWorldRotationQuat(id, w, x, y, z);
+
+    internal static void SA_Entity_GetLossyWorldScale(ulong id, out float x, out float y, out float z) {
+        float lx, ly, lz;
+        s_table->Entity_GetLossyWorldScale(id, &lx, &ly, &lz);
+        x = lx; y = ly; z = lz;
+    }
+
+    // Writes 16 floats (glm column-major) into the caller-provided buffer.
+    internal static void SA_Entity_GetWorldMatrix(ulong id, float* out16)
+        => s_table->Entity_GetWorldMatrix(id, out16);
 
     // ── Entity — lifecycle ────────────────────────────────────────────────────
 
@@ -155,6 +183,139 @@ internal static unsafe class NativeApi
         x = lx; y = ly;
     }
 
+    // ── InputAction (Block 3, Issue #71) ─────────────────────────────────────
+
+    internal static float SA_InputAction_ReadFloat(string action) {
+        byte[] bytes = Encoding.UTF8.GetBytes(action + '\0');
+        fixed (byte* p = bytes)
+            return s_table->InputAction_ReadFloat((sbyte*)p);
+    }
+    internal static void SA_InputAction_ReadVec2(string action, out float x, out float y) {
+        float lx = 0f, ly = 0f;
+        byte[] bytes = Encoding.UTF8.GetBytes(action + '\0');
+        fixed (byte* p = bytes)
+            s_table->InputAction_ReadVec2((sbyte*)p, &lx, &ly);
+        x = lx; y = ly;
+    }
+    internal static int SA_InputAction_IsActive(string action) {
+        byte[] bytes = Encoding.UTF8.GetBytes(action + '\0');
+        fixed (byte* p = bytes)
+            return s_table->InputAction_IsActive((sbyte*)p);
+    }
+    internal static int SA_InputAction_WasActivated(string action) {
+        byte[] bytes = Encoding.UTF8.GetBytes(action + '\0');
+        fixed (byte* p = bytes)
+            return s_table->InputAction_WasActivated((sbyte*)p);
+    }
+    internal static int SA_InputAction_WasDeactivated(string action) {
+        byte[] bytes = Encoding.UTF8.GetBytes(action + '\0');
+        fixed (byte* p = bytes)
+            return s_table->InputAction_WasDeactivated((sbyte*)p);
+    }
+
+    // ── StaticMesh / MeshRenderer (Block 3, Issue #71) ───────────────────────
+
+    private static string ReadUuidBuffer(byte[] buf) {
+        int len = System.Array.IndexOf(buf, (byte)0);
+        return Encoding.UTF8.GetString(buf, 0, len < 0 ? buf.Length : len);
+    }
+
+    internal static string SA_StaticMesh_GetAssetUUID(ulong id) {
+        byte[] buf = new byte[64];
+        fixed (byte* p = buf)
+            s_table->StaticMesh_GetAssetUUID(id, (sbyte*)p, buf.Length);
+        return ReadUuidBuffer(buf);
+    }
+
+    internal static int SA_MeshRenderer_GetSlotCount(ulong id)
+        => s_table->MeshRenderer_GetSlotCount(id);
+
+    internal static string SA_MeshRenderer_GetSlotUUID(ulong id, int slot) {
+        byte[] buf = new byte[64];
+        fixed (byte* p = buf)
+            s_table->MeshRenderer_GetSlotUUID(id, slot, (sbyte*)p, buf.Length);
+        return ReadUuidBuffer(buf);
+    }
+
+    internal static int SA_MeshRenderer_SetSlotUUID(ulong id, int slot, string uuid) {
+        byte[] bytes = Encoding.UTF8.GetBytes(uuid + '\0');
+        fixed (byte* p = bytes)
+            return s_table->MeshRenderer_SetSlotUUID(id, slot, (sbyte*)p);
+    }
+
+    internal static int  SA_MeshRenderer_GetCastShadow   (ulong id) => s_table->MeshRenderer_GetCastShadow(id);
+    internal static void SA_MeshRenderer_SetCastShadow   (ulong id, int v) => s_table->MeshRenderer_SetCastShadow(id, v);
+    internal static int  SA_MeshRenderer_GetReceiveShadow(ulong id) => s_table->MeshRenderer_GetReceiveShadow(id);
+    internal static void SA_MeshRenderer_SetReceiveShadow(ulong id, int v) => s_table->MeshRenderer_SetReceiveShadow(id, v);
+
+    // ── MaterialOverride (Block 3, Issue #71) ────────────────────────────────
+
+    internal static float SA_MaterialOverride_GetFloat(ulong id, string param) {
+        byte[] bytes = Encoding.UTF8.GetBytes(param + '\0');
+        fixed (byte* p = bytes)
+            return s_table->MaterialOverride_GetFloat(id, (sbyte*)p);
+    }
+    internal static void SA_MaterialOverride_SetFloat(ulong id, string param, float value) {
+        byte[] bytes = Encoding.UTF8.GetBytes(param + '\0');
+        fixed (byte* p = bytes)
+            s_table->MaterialOverride_SetFloat(id, (sbyte*)p, value);
+    }
+    internal static void SA_MaterialOverride_GetVec3(ulong id, string param, out float x, out float y, out float z) {
+        float lx = 0f, ly = 0f, lz = 0f;
+        byte[] bytes = Encoding.UTF8.GetBytes(param + '\0');
+        fixed (byte* p = bytes)
+            s_table->MaterialOverride_GetVec3(id, (sbyte*)p, &lx, &ly, &lz);
+        x = lx; y = ly; z = lz;
+    }
+    internal static void SA_MaterialOverride_SetVec3(ulong id, string param, float x, float y, float z) {
+        byte[] bytes = Encoding.UTF8.GetBytes(param + '\0');
+        fixed (byte* p = bytes)
+            s_table->MaterialOverride_SetVec3(id, (sbyte*)p, x, y, z);
+    }
+    internal static void SA_MaterialOverride_GetVec4(ulong id, string param, out float x, out float y, out float z, out float w) {
+        float lx = 0f, ly = 0f, lz = 0f, lw = 0f;
+        byte[] bytes = Encoding.UTF8.GetBytes(param + '\0');
+        fixed (byte* p = bytes)
+            s_table->MaterialOverride_GetVec4(id, (sbyte*)p, &lx, &ly, &lz, &lw);
+        x = lx; y = ly; z = lz; w = lw;
+    }
+    internal static void SA_MaterialOverride_SetVec4(ulong id, string param, float x, float y, float z, float w) {
+        byte[] bytes = Encoding.UTF8.GetBytes(param + '\0');
+        fixed (byte* p = bytes)
+            s_table->MaterialOverride_SetVec4(id, (sbyte*)p, x, y, z, w);
+    }
+
+    // ── RigidBody diagnostics (Block 3 v4, Issue #71) ────────────────────────
+
+    internal static int SA_RigidBody_HasComponent(ulong id) => s_table->RigidBody_HasComponent(id);
+    internal static int SA_RigidBody_GetType     (ulong id) => s_table->RigidBody_GetType(id);
+
+    // ── InputMap (Block 3 v5, Issue #71 Phase 3a) ────────────────────────────
+
+    internal static int SA_InputMap_Push(string name) {
+        byte[] bytes = Encoding.UTF8.GetBytes(name + '\0');
+        fixed (byte* p = bytes)
+            return s_table->InputMap_Push((sbyte*)p);
+    }
+    internal static void SA_InputMap_Pop() => s_table->InputMap_Pop();
+    internal static int  SA_InputMap_Replace(string name) {
+        byte[] bytes = Encoding.UTF8.GetBytes(name + '\0');
+        fixed (byte* p = bytes)
+            return s_table->InputMap_Replace((sbyte*)p);
+    }
+    internal static int  SA_InputMap_IsActive(string name) {
+        byte[] bytes = Encoding.UTF8.GetBytes(name + '\0');
+        fixed (byte* p = bytes)
+            return s_table->InputMap_IsActive((sbyte*)p);
+    }
+    internal static string SA_InputMap_GetActive() {
+        byte[] buf = new byte[64];
+        fixed (byte* p = buf)
+            s_table->InputMap_GetActive((sbyte*)p, buf.Length);
+        int len = System.Array.IndexOf(buf, (byte)0);
+        return Encoding.UTF8.GetString(buf, 0, len < 0 ? buf.Length : len);
+    }
+
     // ── Debug ─────────────────────────────────────────────────────────────────
 
     internal static void SA_Debug_DrawLine(
@@ -182,6 +343,25 @@ internal static unsafe class NativeApi
 
     internal static float SA_Time_GetDeltaTime() => s_table->Time_GetDeltaTime();
     internal static float SA_Time_GetTotalTime() => s_table->Time_GetTotalTime();
+
+    // ── PostProcess (v7, Issue #47) ──────────────────────────────────────────
+
+    internal static int   SA_PostProcess_GetVignetteEnabled()        => s_table->PostProcess_GetVignetteEnabled();
+    internal static void  SA_PostProcess_SetVignetteEnabled(int v)   => s_table->PostProcess_SetVignetteEnabled(v);
+    internal static float SA_PostProcess_GetVignetteIntensity()      => s_table->PostProcess_GetVignetteIntensity();
+    internal static void  SA_PostProcess_SetVignetteIntensity(float v)=> s_table->PostProcess_SetVignetteIntensity(v);
+    internal static float SA_PostProcess_GetVignetteSmoothness()     => s_table->PostProcess_GetVignetteSmoothness();
+    internal static void  SA_PostProcess_SetVignetteSmoothness(float v)=> s_table->PostProcess_SetVignetteSmoothness(v);
+    internal static int   SA_PostProcess_GetCAEnabled()              => s_table->PostProcess_GetCAEnabled();
+    internal static void  SA_PostProcess_SetCAEnabled(int v)         => s_table->PostProcess_SetCAEnabled(v);
+    internal static float SA_PostProcess_GetCAStrength()             => s_table->PostProcess_GetCAStrength();
+    internal static void  SA_PostProcess_SetCAStrength(float v)      => s_table->PostProcess_SetCAStrength(v);
+    internal static int   SA_PostProcess_GetFilmGrainEnabled()       => s_table->PostProcess_GetFilmGrainEnabled();
+    internal static void  SA_PostProcess_SetFilmGrainEnabled(int v)  => s_table->PostProcess_SetFilmGrainEnabled(v);
+    internal static float SA_PostProcess_GetFilmGrainIntensity()     => s_table->PostProcess_GetFilmGrainIntensity();
+    internal static void  SA_PostProcess_SetFilmGrainIntensity(float v)=> s_table->PostProcess_SetFilmGrainIntensity(v);
+    internal static float SA_PostProcess_GetFilmGrainSize()          => s_table->PostProcess_GetFilmGrainSize();
+    internal static void  SA_PostProcess_SetFilmGrainSize(float v)   => s_table->PostProcess_SetFilmGrainSize(v);
 }
 
 // ── ScriptApiFunctionTable — mirrors ScriptApiExports.hpp ────────────────────
@@ -191,15 +371,15 @@ internal static unsafe class NativeApi
 internal unsafe struct ScriptApiFunctionTable
 {
     public uint Version;
-    // Entity — transform
-    public delegate*unmanaged<ulong, float*, float*, float*, void>            Entity_GetPosition;
-    public delegate*unmanaged<ulong, float,  float,  float,  void>            Entity_SetPosition;
-    public delegate*unmanaged<ulong, float*, float*, float*, void>            Entity_GetRotationEuler;
-    public delegate*unmanaged<ulong, float,  float,  float,  void>            Entity_SetRotationEuler;
-    public delegate*unmanaged<ulong, float*, float*, float*, float*, void>    Entity_GetRotationQuat;
-    public delegate*unmanaged<ulong, float,  float,  float,  float,  void>    Entity_SetRotationQuat;
-    public delegate*unmanaged<ulong, float*, float*, float*, void>            Entity_GetScale;
-    public delegate*unmanaged<ulong, float,  float,  float,  void>            Entity_SetScale;
+    // Entity — local transform (parent-relative)
+    public delegate*unmanaged<ulong, float*, float*, float*, void>            Entity_GetLocalPosition;
+    public delegate*unmanaged<ulong, float,  float,  float,  void>            Entity_SetLocalPosition;
+    public delegate*unmanaged<ulong, float*, float*, float*, void>            Entity_GetLocalRotationEuler;
+    public delegate*unmanaged<ulong, float,  float,  float,  void>            Entity_SetLocalRotationEuler;
+    public delegate*unmanaged<ulong, float*, float*, float*, float*, void>    Entity_GetLocalRotationQuat;
+    public delegate*unmanaged<ulong, float,  float,  float,  float,  void>    Entity_SetLocalRotationQuat;
+    public delegate*unmanaged<ulong, float*, float*, float*, void>            Entity_GetLocalScale;
+    public delegate*unmanaged<ulong, float,  float,  float,  void>            Entity_SetLocalScale;
     // Entity — lifecycle
     public delegate*unmanaged<ulong, void>                                    Entity_Destroy;
     public delegate*unmanaged<ulong>                                          Entity_Create;
@@ -242,4 +422,63 @@ internal unsafe struct ScriptApiFunctionTable
     // Time
     public delegate*unmanaged<float>                                          Time_GetDeltaTime;
     public delegate*unmanaged<float>                                          Time_GetTotalTime;
+
+    // ── Block 3 — v3 (Issue #71) ─────────────────────────────────────────────
+    // InputAction
+    public delegate*unmanaged<sbyte*, float>                                  InputAction_ReadFloat;
+    public delegate*unmanaged<sbyte*, float*, float*, void>                   InputAction_ReadVec2;
+    public delegate*unmanaged<sbyte*, int>                                    InputAction_IsActive;
+    public delegate*unmanaged<sbyte*, int>                                    InputAction_WasActivated;
+    public delegate*unmanaged<sbyte*, int>                                    InputAction_WasDeactivated;
+    // StaticMesh / MeshRenderer
+    public delegate*unmanaged<ulong, sbyte*, int, void>                       StaticMesh_GetAssetUUID;
+    public delegate*unmanaged<ulong, int>                                     MeshRenderer_GetSlotCount;
+    public delegate*unmanaged<ulong, int, sbyte*, int, void>                  MeshRenderer_GetSlotUUID;
+    public delegate*unmanaged<ulong, int, sbyte*, int>                        MeshRenderer_SetSlotUUID;
+    public delegate*unmanaged<ulong, int>                                     MeshRenderer_GetCastShadow;
+    public delegate*unmanaged<ulong, int, void>                               MeshRenderer_SetCastShadow;
+    public delegate*unmanaged<ulong, int>                                     MeshRenderer_GetReceiveShadow;
+    public delegate*unmanaged<ulong, int, void>                               MeshRenderer_SetReceiveShadow;
+    // MaterialOverride
+    public delegate*unmanaged<ulong, sbyte*, float>                           MaterialOverride_GetFloat;
+    public delegate*unmanaged<ulong, sbyte*, float, void>                     MaterialOverride_SetFloat;
+    public delegate*unmanaged<ulong, sbyte*, float*, float*, float*, void>    MaterialOverride_GetVec3;
+    public delegate*unmanaged<ulong, sbyte*, float,  float,  float,  void>    MaterialOverride_SetVec3;
+    public delegate*unmanaged<ulong, sbyte*, float*, float*, float*, float*, void> MaterialOverride_GetVec4;
+    public delegate*unmanaged<ulong, sbyte*, float,  float,  float,  float,  void> MaterialOverride_SetVec4;
+    // RigidBody diagnostics (v4)
+    public delegate*unmanaged<ulong, int>                                          RigidBody_HasComponent;
+    public delegate*unmanaged<ulong, int>                                          RigidBody_GetType;
+    // InputMap stack control (v5)
+    public delegate*unmanaged<sbyte*, int>                                         InputMap_Push;
+    public delegate*unmanaged<void>                                                InputMap_Pop;
+    public delegate*unmanaged<sbyte*, int>                                         InputMap_Replace;
+    public delegate*unmanaged<sbyte*, int>                                         InputMap_IsActive;
+    public delegate*unmanaged<sbyte*, int, void>                                   InputMap_GetActive;
+
+    // World-space transform accessors (v6, Issue #81)
+    public delegate*unmanaged<ulong, float*, float*, float*, void>                 Entity_GetWorldPosition;
+    public delegate*unmanaged<ulong, float,  float,  float,  void>                 Entity_SetWorldPosition;
+    public delegate*unmanaged<ulong, float*, float*, float*, float*, void>         Entity_GetWorldRotationQuat;
+    public delegate*unmanaged<ulong, float,  float,  float,  float,  void>         Entity_SetWorldRotationQuat;
+    public delegate*unmanaged<ulong, float*, float*, float*, void>                 Entity_GetLossyWorldScale;
+    public delegate*unmanaged<ulong, float*, void>                                 Entity_GetWorldMatrix;
+
+    // ── PostProcess — screen modifications (v7, Issue #47) ───────────────────
+    public delegate*unmanaged<int>                                                 PostProcess_GetVignetteEnabled;
+    public delegate*unmanaged<int, void>                                           PostProcess_SetVignetteEnabled;
+    public delegate*unmanaged<float>                                               PostProcess_GetVignetteIntensity;
+    public delegate*unmanaged<float, void>                                         PostProcess_SetVignetteIntensity;
+    public delegate*unmanaged<float>                                               PostProcess_GetVignetteSmoothness;
+    public delegate*unmanaged<float, void>                                         PostProcess_SetVignetteSmoothness;
+    public delegate*unmanaged<int>                                                 PostProcess_GetCAEnabled;
+    public delegate*unmanaged<int, void>                                           PostProcess_SetCAEnabled;
+    public delegate*unmanaged<float>                                               PostProcess_GetCAStrength;
+    public delegate*unmanaged<float, void>                                         PostProcess_SetCAStrength;
+    public delegate*unmanaged<int>                                                 PostProcess_GetFilmGrainEnabled;
+    public delegate*unmanaged<int, void>                                           PostProcess_SetFilmGrainEnabled;
+    public delegate*unmanaged<float>                                               PostProcess_GetFilmGrainIntensity;
+    public delegate*unmanaged<float, void>                                         PostProcess_SetFilmGrainIntensity;
+    public delegate*unmanaged<float>                                               PostProcess_GetFilmGrainSize;
+    public delegate*unmanaged<float, void>                                         PostProcess_SetFilmGrainSize;
 }

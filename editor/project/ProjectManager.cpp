@@ -28,10 +28,11 @@ fs::path ProjectManager::CreateProject(const fs::path& parentDir,
     }
 
     // Create directory structure
-    fs::create_directories(projectRoot / "assets" / "scenes",  ec);
-    fs::create_directories(projectRoot / "assets" / "models",  ec);
-    fs::create_directories(projectRoot / "assets" / "textures", ec);
+    fs::create_directories(projectRoot / "assets" / "scenes",    ec);
+    fs::create_directories(projectRoot / "assets" / "models",    ec);
+    fs::create_directories(projectRoot / "assets" / "textures",  ec);
     fs::create_directories(projectRoot / "assets" / "materials", ec);
+    fs::create_directories(projectRoot / "assets" / "inputmaps", ec);
     fs::create_directories(projectRoot / "cook_cache", ec);
     if (ec) {
         SA_LOG_WARN("ProjectManager::CreateProject — failed to create directories: {}",
@@ -59,6 +60,34 @@ fs::path ProjectManager::CreateProject(const fs::path& parentDir,
         // Fallback: write a minimal empty scene
         std::ofstream f(sceneDest);
         f << R"({"version":1,"name":"default","world":{},"entities":[]})" << '\n';
+    }
+
+    // Copy the starter InputMap template so the project ships with a usable
+    // Move/Look/Jump/Fire map out of the box (Issue #71). Missing template is
+    // not fatal — user can right-click → Create → InputMap to add one.
+    {
+        const fs::path imSrc  = engineAssetsDir / "templates" / "inputmaps" / "Controls.sainputmap";
+        const fs::path imDest = projectRoot / "assets" / "inputmaps" / "Controls.sainputmap";
+        if (fs::exists(imSrc, ec)) {
+            fs::copy_file(imSrc, imDest, fs::copy_options::overwrite_existing, ec);
+            if (ec)
+                SA_LOG_WARN("ProjectManager::CreateProject — could not copy inputmap template: {}",
+                            ec.message());
+        }
+    }
+
+    // Seed .gitignore so first commit doesn't capture Library/, obj/, bin/ etc.
+    // (Issue #82). Application::GenerateIdeProjectFiles also writes this lazily
+    // for legacy projects, but new projects get a clean copy up front.
+    {
+        const fs::path giSrc  = engineAssetsDir / "templates" / "project" / ".gitignore.template";
+        const fs::path giDest = projectRoot / ".gitignore";
+        if (fs::exists(giSrc, ec)) {
+            fs::copy_file(giSrc, giDest, fs::copy_options::overwrite_existing, ec);
+            if (ec)
+                SA_LOG_WARN("ProjectManager::CreateProject — could not copy .gitignore template: {}",
+                            ec.message());
+        }
     }
 
     // Write .saproject

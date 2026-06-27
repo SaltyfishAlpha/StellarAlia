@@ -7,9 +7,6 @@
 #include "core/asset/AssetID.hpp"
 
 #include "importer/ImportScanner.hpp"
-#include "importer/MeshImporter.hpp"
-#include "importer/TextureImporter.hpp"
-#include "importer/MaterialImporter.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -36,38 +33,6 @@ static std::string AssetTypeFromExt(const fs::path& ext) {
         e == ".bmp" || e == ".tga")                 return "Texture";
     if (e == ".hdr")                                return "Texture";
     return {};
-}
-
-static void CookEntry(const Import::AssetEntry& entry, const std::string& cookCacheDir) {
-    if (cookCacheDir.empty()) return;
-    const fs::path outDir(cookCacheDir);
-    if (entry.meta.type == "Mesh")
-        Import::CookMesh(entry, outDir, /*force=*/false);
-    else if (entry.meta.type == "Texture")
-        Import::CookTexture(entry, outDir, /*force=*/false);
-    else if (entry.meta.type == "Material")
-        Import::CookStandaloneMaterial(entry.sourcePath, entry.meta.uuid, outDir, /*force=*/false);
-}
-
-static Import::AssetEntry MakeAndSaveMeta(const fs::path& srcPath, const std::string& type) {
-    const fs::path metaPath = Import::MetaFile::MetaPathFor(srcPath);
-
-    Import::MetaFile meta;
-    if (fs::exists(metaPath)) {
-        Import::MetaFile::Load(metaPath, meta);
-    } else {
-        meta.uuid = AssetID::Generate();
-        meta.type = type;
-        if (type == "Texture") {
-            const bool isHdr = srcPath.extension().string() == ".hdr";
-            meta.settings["srgb"]    = isHdr ? "0" : "1";
-            meta.settings["mipmaps"] = "1";
-        } else if (type == "Mesh") {
-            meta.settings["merge_submeshes"] = "0";
-        }
-        Import::MetaFile::Save(metaPath, meta);
-    }
-    return Import::AssetEntry{ srcPath, metaPath, meta };
 }
 
 static void CopyGltfCompanions(const fs::path& gltfSrc, const fs::path& destDir) {
@@ -255,8 +220,8 @@ bool AssetsPresenter::RunImportFile(const fs::path& srcPath, const fs::path& des
         if (!ec) {
             const auto mismatch = std::mismatch(root.begin(), root.end(), canonical.begin());
             if (mismatch.first == root.end()) {
-                const Import::AssetEntry entry = MakeAndSaveMeta(canonical, type);
-                CookEntry(entry, m_cookCacheDir);
+                const Import::AssetEntry entry = Import::EnsureMeta(canonical, type);
+                Import::CookAssetEntry(entry, m_cookCacheDir);
                 if (m_ctx.assetReg) m_ctx.assetReg->Scan(m_assetsRoot, {});
                 if (m_ctx.onAssetsImport) m_ctx.onAssetsImport();
                 m_filePaneDirty = true;
@@ -283,12 +248,12 @@ bool AssetsPresenter::RunImportFile(const fs::path& srcPath, const fs::path& des
             CopyGltfCompanions(srcPath, effectiveDest);
     }
 
-    const Import::AssetEntry entry = MakeAndSaveMeta(destPath, type);
+    const Import::AssetEntry entry = Import::EnsureMeta(destPath, type);
     if (!entry.meta.IsValid()) {
         SA_LOG_WARN("AssetsPresenter: could not write .sameta for '{}'", destPath.string());
         return false;
     }
-    CookEntry(entry, m_cookCacheDir);
+    Import::CookAssetEntry(entry, m_cookCacheDir);
 
     if (m_ctx.assetReg) m_ctx.assetReg->Scan(m_assetsRoot, {});
     if (m_ctx.onAssetsImport) m_ctx.onAssetsImport();

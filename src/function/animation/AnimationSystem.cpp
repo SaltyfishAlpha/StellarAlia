@@ -16,8 +16,10 @@ namespace StellarAlia {
 // Init / Shutdown
 // ─────────────────────────────────────────────────────────────────────────────
 void AnimationSystem::Init(RHI::IRHIDevice* /*device*/,
-                            RHI::RHIDescLayoutHandle skinDescLayout) {
-    m_skinDescLayout = skinDescLayout;
+                            RHI::RHIDescLayoutHandle skinDescLayout,
+                            RHI::RHIDescLayoutHandle velocityDescLayout) {
+    m_skinDescLayout     = skinDescLayout;
+    m_velocityDescLayout = velocityDescLayout;
 }
 
 void AnimationSystem::Shutdown(RHI::IRHIDevice* device, entt::registry& registry) {
@@ -26,11 +28,18 @@ void AnimationSystem::Shutdown(RHI::IRHIDevice* device, entt::registry& registry
         if (meshComp) {
             if (meshComp->skinDescSet.IsValid())
                 device->FreeDescriptorSet(meshComp->skinDescSet);
+            if (meshComp->velocityDescSet.IsValid())
+                device->FreeDescriptorSet(meshComp->velocityDescSet);
             if (meshComp->skinMatricesBuffer.IsValid())
                 device->DestroyBuffer(meshComp->skinMatricesBuffer);
-            meshComp->skinDescSet        = {};
-            meshComp->skinMatricesBuffer = {};
-            meshComp->ready              = false;
+            if (meshComp->skinMatricesBufferPrev.IsValid())
+                device->DestroyBuffer(meshComp->skinMatricesBufferPrev);
+            meshComp->skinDescSet            = {};
+            meshComp->velocityDescSet        = {};
+            meshComp->skinMatricesBuffer     = {};
+            meshComp->skinMatricesBufferPrev = {};
+            meshComp->ready                  = false;
+            meshComp->poseSeeded             = false;
         }
     }
     m_entries.clear();
@@ -74,7 +83,7 @@ void AnimationSystem::PrepareEntity(entt::entity entity,
 
     const uint32_t boneCount = static_cast<uint32_t>(skel->bones.size());
 
-    // ── Bone matrices buffer (updated each frame) ─────────────────────────────
+    // ── Bone matrices buffers — curr + prev double buffer (Issue #84) ─────────
     {
         const uint64_t matBufSize = static_cast<uint64_t>(boneCount) * sizeof(glm::mat4);
         RHI::RHIBufferDesc d{};
@@ -83,18 +92,26 @@ void AnimationSystem::PrepareEntity(entt::entity entity,
         d.cpuVisible = true;
         d.debugName  = "SkinMatricesBuffer";
         meshComp->skinMatricesBuffer = device->CreateBuffer(d);
-        if (!meshComp->skinMatricesBuffer.IsValid()) {
-            SA_LOG_ERROR("AnimationSystem: failed to allocate skinMatricesBuffer");
+        d.debugName  = "SkinMatricesBufferPrev";
+        meshComp->skinMatricesBufferPrev = device->CreateBuffer(d);
+        if (!meshComp->skinMatricesBuffer.IsValid() || !meshComp->skinMatricesBufferPrev.IsValid()) {
+            SA_LOG_ERROR("AnimationSystem: failed to allocate skinMatrices double buffer");
             return;
         }
         std::vector<glm::mat4> identity(boneCount, glm::mat4(1.f));
         device->UploadBufferData(meshComp->skinMatricesBuffer,
                                  identity.data(),
                                  static_cast<uint64_t>(boneCount) * sizeof(glm::mat4), 0);
+        device->UploadBufferData(meshComp->skinMatricesBufferPrev,
+                                 identity.data(),
+                                 static_cast<uint64_t>(boneCount) * sizeof(glm::mat4), 0);
     }
 
-    // ── Allocate descriptor set for set=2 ─────────────────────────────────────
-    // binding=0 → skinMatricesBuffer (per-entity), binding=1 → GPUMesh::skinDataBuffer (shared)
+    // ── Allocate descriptor sets ──────────────────────────────────────────────
+    // skinDescSet (set=3, bindings 0/1) — used by deferred geometry / shadow / mask
+    //   binding 0 = curr skinMatrices    binding 1 = GPUMesh::skinDataBuffer (shared)
+    // velocityDescSet (set=3, bindings 0/1/2) — Issue #84, used by VelocityPrepass
+    //   binding 2 = prev skinMatrices (additional slot)
     if (m_skinDescLayout.IsValid()) {
         meshComp->skinDescSet = device->AllocateDescriptorSet(m_skinDescLayout);
         if (!meshComp->skinDescSet.IsValid()) {
@@ -106,6 +123,15 @@ void AnimationSystem::PrepareEntity(entt::entity entity,
     } else {
         SA_LOG_WARN("AnimationSystem: no skinDescLayout — skinDescSet not allocated");
     }
+    if (m_velocityDescLayout.IsValid()) {
+        meshComp->velocityDescSet = device->AllocateDescriptorSet(m_velocityDescLayout);
+        if (meshComp->velocityDescSet.IsValid()) {
+            device->WriteDescriptorBuffer(meshComp->velocityDescSet, 0, meshComp->skinMatricesBuffer);
+            device->WriteDescriptorBuffer(meshComp->velocityDescSet, 1, gpuMesh->skinDataBuffer);
+            device->WriteDescriptorBuffer(meshComp->velocityDescSet, 2, meshComp->skinMatricesBufferPrev);
+        }
+    }
+    meshComp->poseSeeded = false;
 
     meshComp->boneCount = boneCount;
 
@@ -121,6 +147,7 @@ void AnimationSystem::PrepareEntity(entt::entity entity,
     entry.workSkinMats.resize(boneCount);
 
     if (animComp) entry.currentClipAsset = animComp->clipAsset;
+    if (animComp) meshComp->lastEvalClipId = animComp->clipAsset;
     meshComp->ready = true;
 
     const uint32_t entId = static_cast<uint32_t>(entt::to_integral(entity));
@@ -243,6 +270,24 @@ void AnimationSystem::Update(float dt,
         const float    t      = animComp.time;
         const uint32_t nBones = static_cast<uint32_t>(entry.skeleton.size());
 
+        // ── Issue #84: pose double-buffer swap ────────────────────────────────
+        // Normal frame → swap (prev ← last frame's curr) then write new curr.
+        // First write or clip swap → skip swap; after writing curr, also write
+        // it to prev (velocity = 0 that frame).
+        const bool firstWrite = !meshComp.poseSeeded;
+        const bool clipSwap   = !(animComp.clipAsset == meshComp.lastEvalClipId);
+        if (!firstWrite && !clipSwap) {
+            std::swap(meshComp.skinMatricesBuffer, meshComp.skinMatricesBufferPrev);
+            // Re-bind both desc sets to reflect the swapped handles
+            // (UPDATE_AFTER_BIND on all desc sets makes mid-frame writes safe).
+            if (meshComp.skinDescSet.IsValid())
+                device->WriteDescriptorBuffer(meshComp.skinDescSet, 0, meshComp.skinMatricesBuffer);
+            if (meshComp.velocityDescSet.IsValid()) {
+                device->WriteDescriptorBuffer(meshComp.velocityDescSet, 0, meshComp.skinMatricesBuffer);
+                device->WriteDescriptorBuffer(meshComp.velocityDescSet, 2, meshComp.skinMatricesBufferPrev);
+            }
+        }
+
         auto& localT     = entry.workLocalT;
         auto& localR     = entry.workLocalR;
         auto& localS     = entry.workLocalS;
@@ -278,6 +323,13 @@ void AnimationSystem::Update(float dt,
         device->UploadBufferData(meshComp.skinMatricesBuffer,
                                  skinMats.data(),
                                  static_cast<uint64_t>(nBones) * sizeof(glm::mat4), 0);
+        if (firstWrite || clipSwap) {
+            device->UploadBufferData(meshComp.skinMatricesBufferPrev,
+                                     skinMats.data(),
+                                     static_cast<uint64_t>(nBones) * sizeof(glm::mat4), 0);
+            meshComp.poseSeeded = true;
+        }
+        meshComp.lastEvalClipId = animComp.clipAsset;
     }
 }
 

@@ -12,6 +12,7 @@
 #include "importer/MeshImporter.hpp"
 #include "importer/TextureImporter.hpp"
 #include "importer/MaterialImporter.hpp"
+#include "importer/InputMapImporter.hpp"
 #include "function/material/MaterialManager.hpp"
 #include "resource/EntityTemplateRegistry.hpp"
 
@@ -21,6 +22,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <fstream>
 #include <vector>
@@ -63,7 +65,8 @@ static bool IsTextAsset(const fs::path& ext) {
     std::string e = ext.string();
     std::transform(e.begin(), e.end(), e.begin(), ::tolower);
     for (auto sv : { ".saglsl", ".glsl", ".vert", ".frag", ".comp", ".hlsl",
-                     ".cs", ".txt", ".md", ".json", ".lua", ".py", ".js", ".ts" })
+                     ".cs", ".txt", ".md", ".json", ".lua", ".py", ".js", ".ts",
+                     ".sainputmap" })
         if (e == sv) return true;
     return false;
 }
@@ -190,38 +193,6 @@ static SaglslMeta ParseSaglslMeta(const fs::path& path) {
     return out;
 }
 
-static void CookEntry(const Import::AssetEntry& entry, const std::string& cookCacheDir) {
-    if (cookCacheDir.empty()) return;
-    const fs::path outDir(cookCacheDir);
-    if (entry.meta.type == "Mesh")
-        Import::CookMesh(entry, outDir, /*force=*/false);
-    else if (entry.meta.type == "Texture")
-        Import::CookTexture(entry, outDir, /*force=*/false);
-    else if (entry.meta.type == "Material")
-        Import::CookStandaloneMaterial(entry.sourcePath, entry.meta.uuid, outDir, /*force=*/false);
-}
-
-static Import::AssetEntry MakeAndSaveMeta(const fs::path& srcPath, const std::string& type) {
-    const fs::path metaPath = Import::MetaFile::MetaPathFor(srcPath);
-
-    Import::MetaFile meta;
-    if (fs::exists(metaPath)) {
-        Import::MetaFile::Load(metaPath, meta);
-    } else {
-        meta.uuid = AssetID::Generate();
-        meta.type = type;
-        if (type == "Texture") {
-            const bool isHdr = srcPath.extension().string() == ".hdr";
-            meta.settings["srgb"]    = isHdr ? "0" : "1";
-            meta.settings["mipmaps"] = "1";
-        } else if (type == "Mesh") {
-            meta.settings["merge_submeshes"] = "0";
-        }
-        Import::MetaFile::Save(metaPath, meta);
-    }
-    return Import::AssetEntry{ srcPath, metaPath, meta };
-}
-
 // ─── AssetsPanel ──────────────────────────────────────────────────────────────
 
 AssetsPanel::AssetsPanel(EditorContext& ctx, AssetsPresenter& presenter)
@@ -229,6 +200,7 @@ AssetsPanel::AssetsPanel(EditorContext& ctx, AssetsPresenter& presenter)
     , m_assetsRoot(ctx.projectDir.empty() ? fs::path{} : ctx.projectDir / "assets")
     , m_projectDir(ctx.projectDir.string())
     , m_cookCacheDir(ctx.app->GetDesc().cookCacheDir)
+    , m_app(ctx.app)
     , m_registry(ctx.assetReg)
     , m_matMgr(ctx.matMgr)
     , m_diagnostics(ctx.diagnostics)
@@ -265,7 +237,7 @@ void AssetsPanel::RunInitialScan() {
         return;
     const auto entries = Import::ScanAndImport(m_assetsRoot);
     for (const auto& ae : entries)
-        CookEntry(ae, m_cookCacheDir);
+        Import::CookAssetEntry(ae, m_cookCacheDir);
     // Use the ImportCallback for the registry rescan so it includes engine assets.
     // Fall back to a project-only rescan if the callback hasn't been wired yet.
     if (m_onImport)
@@ -312,16 +284,28 @@ void AssetsPanel::RequestReimportAll() {
 
 // ── Create new asset file ─────────────────────────────────────────────────────
 
+void AssetsPanel::RenderCreateMenuContents(const fs::path& dir) {
+    if (ImGui::MenuItem("Folder"))                 CreateNewDir(dir);
+    ImGui::Separator();
+    if (ImGui::MenuItem("Scene (.sascene)"))       CreateNewFile(CreateKind::Scene,    dir);
+    if (ImGui::MenuItem("Material (.samat)"))      CreateNewFile(CreateKind::Mat,      dir);
+    if (ImGui::MenuItem("Shader (.saglsl)"))       CreateNewFile(CreateKind::Saglsl,   dir);
+    if (ImGui::MenuItem("Script (.cs)"))           CreateNewFile(CreateKind::Script,   dir);
+    if (ImGui::MenuItem("InputMap (.sainputmap)")) CreateNewFile(CreateKind::InputMap, dir);
+}
+
 void AssetsPanel::CreateNewFile(CreateKind kind, const fs::path& dir)
 {
-    const std::string ext         = (kind == CreateKind::Saglsl) ? ".saglsl"
-                                  : (kind == CreateKind::Scene)  ? ".sascene"
-                                  : (kind == CreateKind::Script) ? ".cs"
-                                  :                                ".samat";
-    const std::string defaultStem = (kind == CreateKind::Saglsl) ? "New Shader"
-                                  : (kind == CreateKind::Scene)  ? "New Scene"
-                                  : (kind == CreateKind::Script) ? "NewScript"
-                                  :                                "New Material";
+    const std::string ext         = (kind == CreateKind::Saglsl)   ? ".saglsl"
+                                  : (kind == CreateKind::Scene)    ? ".sascene"
+                                  : (kind == CreateKind::Script)   ? ".cs"
+                                  : (kind == CreateKind::InputMap) ? ".sainputmap"
+                                  :                                  ".samat";
+    const std::string defaultStem = (kind == CreateKind::Saglsl)   ? "New Shader"
+                                  : (kind == CreateKind::Scene)    ? "New Scene"
+                                  : (kind == CreateKind::Script)   ? "NewScript"
+                                  : (kind == CreateKind::InputMap) ? "New InputMap"
+                                  :                                  "New Material";
 
     // Pick a unique filename. Scripts use no space before the number ("NewScript1.cs")
     // so the stem remains a valid C# identifier.
@@ -402,6 +386,34 @@ void AssetsPanel::CreateNewFile(CreateKind kind, const fs::path& dir)
             SA_LOG_WARN("AssetsPanel: could not copy material template: {}", ec.message());
             return;
         }
+    } else if (kind == CreateKind::InputMap) {
+        f.close();
+        const std::string mapName = destPath.stem().string();
+        const fs::path    tmpl    = m_templateReg ? m_templateReg->InputMapTemplatePath() : fs::path{};
+        bool wrote = false;
+        if (!tmpl.empty() && fs::exists(tmpl)) {
+            // Read template, patch "name" field to match file stem, write to dest.
+            // Template's baked-in "name": "Gameplay" would otherwise collide with
+            // every other map created from this template (RegisterMaps replaces
+            // by name → only the last one would survive).
+            std::ifstream tsrc(tmpl);
+            std::stringstream ss; ss << tsrc.rdbuf();
+            try {
+                auto j = nlohmann::json::parse(ss.str());
+                j["name"] = mapName;
+                std::ofstream fdst(destPath);
+                if (fdst) { fdst << j.dump(2); wrote = true; }
+            } catch (const std::exception& e) {
+                SA_LOG_WARN("AssetsPanel: inputmap template not valid JSON: {}", e.what());
+            }
+        }
+        if (!wrote) {
+            // Fallback: minimal valid map with the file stem as map name.
+            std::ofstream fb(destPath);
+            fb << "{\n  \"name\": \"" << mapName << "\",\n"
+               << "  \"passthrough\": false,\n"
+               << "  \"actions\": []\n}\n";
+        }
     } else {
         // kind == CreateKind::Saglsl
         const std::string shaderName = destPath.stem().string();
@@ -432,20 +444,34 @@ void AssetsPanel::CreateNewFile(CreateKind kind, const fs::path& dir)
     f.close();
     SA_LOG_INFO("AssetsPanel: created '{}'", destPath.string());
 
-    // Generate .sameta and cook (scripts need neither).
-    if (kind != CreateKind::Script) {
-        const std::string type = (kind == CreateKind::Saglsl) ? "Shader"
-                               : (kind == CreateKind::Scene)  ? "Scene"
-                               :                                "Material";
-        const Import::AssetEntry entry = MakeAndSaveMeta(destPath, type);
-        if (kind == CreateKind::Mat)
-            CookEntry(entry, m_cookCacheDir);
-    }
+    // Register the new asset: every kind gets a .sameta (so it has a UUID and
+    // shows up in the AssetRegistry). CookAssetEntry no-ops for kinds without
+    // a cooked output (Script, Scene, Shader), so we don't need to branch here.
+    const std::string type = (kind == CreateKind::Saglsl)   ? "Shader"
+                           : (kind == CreateKind::Scene)    ? "Scene"
+                           : (kind == CreateKind::Script)   ? "Script"
+                           : (kind == CreateKind::InputMap) ? "InputMap"
+                           :                                  "Material";
+    const Import::AssetEntry entry = Import::EnsureMeta(destPath, type);
+    Import::CookAssetEntry(entry, m_cookCacheDir);
 
     if (m_onImport)
         m_onImport();
     else if (m_registry)
         m_registry->Scan(m_assetsRoot, {});
+
+    // New scripts: recompile so the ScriptClassSchema is available immediately
+    // for the Inspector and the ScriptComponent picker. Without this the user
+    // would have to manually "Reimport All Assets" to see the new class.
+    if (kind == CreateKind::Script)
+        m_presenter.RequestRecompileScripts();
+
+    // New inputmaps: re-run InputMapLoader so the new ActionMapDef enters the
+    // InputSystem registry immediately. Without this the map is invisible until
+    // editor restart, and InputAction.ReadVec2("Move") silently returns zero
+    // (Issue #71 — inputmap/script loading chains are otherwise decoupled).
+    if (kind == CreateKind::InputMap && m_app)
+        m_app->ReloadInputMaps();
 
     m_filePaneDirty = true;
     // Enter inline rename with the default stem pre-filled.
@@ -503,8 +529,8 @@ void AssetsPanel::CreateMatFromShader(const std::string& typeName,
     f.close();
     SA_LOG_INFO("AssetsPanel: created '{}' (type={})", destPath.string(), typeName);
 
-    const Import::AssetEntry entry = MakeAndSaveMeta(destPath, "Material");
-    CookEntry(entry, m_cookCacheDir);
+    const Import::AssetEntry entry = Import::EnsureMeta(destPath, "Material");
+    Import::CookAssetEntry(entry, m_cookCacheDir);
 
     if (m_onImport)
         m_onImport();
@@ -553,6 +579,92 @@ void AssetsPanel::CommitRename() {
 
     SA_LOG_INFO("AssetsPanel: renamed '{}' → '{}'",
                 m_renamingPath.filename().string(), newPath.filename().string());
+
+    // For .cs files: keep the C# class declaration in sync with the new
+    // filename when it still matches the old stem. We rewrite `class <old>`
+    // only — never `<old>` appearing elsewhere, so user-added references to
+    // unrelated types aren't clobbered. Skip when the new stem is not a
+    // valid C# identifier (the file would not compile anyway).
+    const bool isScript = newPath.extension() == ".cs";
+    if (isScript) {
+        const std::string oldStem = m_renamingPath.stem().string();
+        const std::string newStem = newPath.stem().string();
+        auto isValidIdent = [](const std::string& s) {
+            if (s.empty()) return false;
+            const auto c0 = static_cast<unsigned char>(s[0]);
+            if (!std::isalpha(c0) && c0 != '_') return false;
+            for (char c : s) {
+                const auto u = static_cast<unsigned char>(c);
+                if (!std::isalnum(u) && u != '_') return false;
+            }
+            return true;
+        };
+        if (oldStem != newStem && isValidIdent(newStem)) {
+            std::ifstream in(newPath);
+            if (in) {
+                std::string content((std::istreambuf_iterator<char>(in)),
+                                     std::istreambuf_iterator<char>());
+                in.close();
+                const std::string pattern = "class " + oldStem;
+                const std::string replacement = "class " + newStem;
+                bool modified = false;
+                std::string::size_type pos = 0;
+                while ((pos = content.find(pattern, pos)) != std::string::npos) {
+                    // Word-boundary check: the next char must not extend the identifier.
+                    const std::string::size_type end = pos + pattern.size();
+                    const char next = end < content.size() ? content[end] : '\0';
+                    if (!std::isalnum(static_cast<unsigned char>(next)) && next != '_') {
+                        content.replace(pos, pattern.size(), replacement);
+                        pos += replacement.size();
+                        modified = true;
+                    } else {
+                        pos += pattern.size();
+                    }
+                }
+                if (modified) {
+                    std::ofstream out(newPath);
+                    out << content;
+                    out.close();
+                    SA_LOG_INFO("AssetsPanel: renamed C# class '{}' → '{}' inside '{}'",
+                                oldStem, newStem, newPath.filename().string());
+                }
+            }
+        } else if (oldStem != newStem) {
+            SA_LOG_WARN("AssetsPanel: '{}' is not a valid C# identifier — "
+                        "class declaration left untouched, file will not compile.",
+                        newStem);
+        }
+    }
+
+    // For .sainputmap: sync the JSON "name" field to the new filename when it
+    // still matches the old stem. InputSystem keys ActionMapDefs by this name
+    // (RegisterMaps replaces by name) — if it drifts away from the filename
+    // two maps from the same template would collide.
+    const bool isInputMap = newPath.extension() == ".sainputmap";
+    if (isInputMap) {
+        const std::string oldStem = m_renamingPath.stem().string();
+        const std::string newStem = newPath.stem().string();
+        if (oldStem != newStem) {
+            try {
+                std::ifstream in(newPath);
+                nlohmann::json j = nlohmann::json::parse(in);
+                in.close();
+                if (j.contains("name") && j["name"].is_string()
+                    && j["name"].get<std::string>() == oldStem) {
+                    j["name"] = newStem;
+                    std::ofstream out(newPath);
+                    out << j.dump(2) << '\n';
+                    out.close();
+                    SA_LOG_INFO("AssetsPanel: renamed InputMap name '{}' → '{}' inside '{}'",
+                                oldStem, newStem, newPath.filename().string());
+                }
+            } catch (const std::exception& ex) {
+                SA_LOG_WARN("AssetsPanel: could not patch inputmap name in '{}': {}",
+                            newPath.filename().string(), ex.what());
+            }
+        }
+    }
+
     m_filePaneDirty    = true;
     m_renamingFromTree = false;
     SetSelectedPath(newPath);
@@ -562,6 +674,21 @@ void AssetsPanel::CommitRename() {
         m_onImport();
     else if (m_registry)
         m_registry->Scan(m_assetsRoot, {});
+
+    // Scripts: recompile so the ScriptClassSchema reflects the renamed class
+    // before the user opens the Inspector. The FileWatcher would eventually
+    // pick this up too, but we want the picker / Inspector to be ready now.
+    if (isScript)
+        m_presenter.RequestRecompileScripts();
+
+    // InputMaps: re-cook the renamed source (cook_cache is UUID-keyed, so the
+    // output path is stable across renames) and reload InputSystem so
+    // InputAction lookups see the new name immediately.
+    if (isInputMap) {
+        const Import::AssetEntry e = Import::EnsureMeta(newPath, "InputMap");
+        Import::CookAssetEntry(e, m_cookCacheDir);
+        if (m_app) m_app->ReloadInputMaps();
+    }
 }
 
 // ── CreateNewDir / DeletePath / MoveAsset ────────────────────────────────────
@@ -697,12 +824,7 @@ void AssetsPanel::OnDraw() {
             m_selectedDir = m_assetsRoot;
         if (ImGui::BeginPopupContextItem("##root_dir_ctx")) {
             if (ImGui::BeginMenu("Create")) {
-                if (ImGui::MenuItem("Folder"))             CreateNewDir(m_assetsRoot);
-                ImGui::Separator();
-                if (ImGui::MenuItem("Scene (.sascene)"))   CreateNewFile(CreateKind::Scene,  m_assetsRoot);
-                if (ImGui::MenuItem("Material (.samat)"))  CreateNewFile(CreateKind::Mat,    m_assetsRoot);
-                if (ImGui::MenuItem("Shader (.saglsl)"))   CreateNewFile(CreateKind::Saglsl, m_assetsRoot);
-                if (ImGui::MenuItem("Script (.cs)"))       CreateNewFile(CreateKind::Script, m_assetsRoot);
+                RenderCreateMenuContents(m_assetsRoot);
                 ImGui::EndMenu();
             }
             ImGui::Separator();
@@ -868,6 +990,7 @@ static const char* GlyphForExt(const std::string& ext) {
     if (ext == ".sanim")                                   return FA_ICON_ANIMATION;
     if (ext == ".saskel")                                  return FA_ICON_SKELETON;
     if (ext == ".saglsl" || ext == ".cs")                   return FA_ICON_SCRIPT;
+    if (ext == ".sainputmap")                              return FA_ICON_INPUTMAP;
     if (ext == ".json"  || ext == ".jsonc")                return FA_ICON_CONFIG;
     return nullptr;
 }
@@ -921,12 +1044,7 @@ void AssetsPanel::DrawDirPane(const fs::path& dir) {
 
             if (ImGui::BeginPopupContextItem("##dir_ctx")) {
                 if (ImGui::BeginMenu("Create")) {
-                    if (ImGui::MenuItem("Folder"))            CreateNewDir(entry.path());
-                    ImGui::Separator();
-                    if (ImGui::MenuItem("Scene (.sascene)"))  CreateNewFile(CreateKind::Scene,  entry.path());
-                    if (ImGui::MenuItem("Material (.samat)")) CreateNewFile(CreateKind::Mat,    entry.path());
-                    if (ImGui::MenuItem("Shader (.saglsl)"))  CreateNewFile(CreateKind::Saglsl, entry.path());
-                    if (ImGui::MenuItem("Script (.cs)"))      CreateNewFile(CreateKind::Script, entry.path());
+                    RenderCreateMenuContents(entry.path());
                     ImGui::EndMenu();
                 }
                 ImGui::Separator();
@@ -1027,12 +1145,7 @@ void AssetsPanel::DrawFilePane() {
         // Still offer create menu on empty directory
         if (ImGui::BeginPopupContextWindow("##filepane_bg_ctx")) {
             if (ImGui::BeginMenu("Create")) {
-                if (ImGui::MenuItem("Folder"))             CreateNewDir(m_selectedDir);
-                ImGui::Separator();
-                if (ImGui::MenuItem("Scene (.sascene)"))   CreateNewFile(CreateKind::Scene,  m_selectedDir);
-                if (ImGui::MenuItem("Material (.samat)"))  CreateNewFile(CreateKind::Mat,    m_selectedDir);
-                if (ImGui::MenuItem("Shader (.saglsl)"))   CreateNewFile(CreateKind::Saglsl, m_selectedDir);
-                if (ImGui::MenuItem("Script (.cs)"))       CreateNewFile(CreateKind::Script, m_selectedDir);
+                RenderCreateMenuContents(m_selectedDir);
                 ImGui::EndMenu();
             }
             ImGui::Separator();
@@ -1163,12 +1276,7 @@ void AssetsPanel::DrawFilePane() {
         if (isDir) {
             if (ImGui::BeginPopupContextItem("##dir_ctx")) {
                 if (ImGui::BeginMenu("Create")) {
-                    if (ImGui::MenuItem("Folder"))            CreateNewDir(p);
-                    ImGui::Separator();
-                    if (ImGui::MenuItem("Scene (.sascene)"))  CreateNewFile(CreateKind::Scene,  p);
-                    if (ImGui::MenuItem("Material (.samat)")) CreateNewFile(CreateKind::Mat,    p);
-                    if (ImGui::MenuItem("Shader (.saglsl)"))  CreateNewFile(CreateKind::Saglsl, p);
-                    if (ImGui::MenuItem("Script (.cs)"))      CreateNewFile(CreateKind::Script, p);
+                    RenderCreateMenuContents(p);
                     ImGui::EndMenu();
                 }
                 ImGui::Separator();
@@ -1423,12 +1531,7 @@ void AssetsPanel::DrawFilePane() {
     if (ImGui::BeginPopupContextWindow("##filepane_bg_ctx",
             ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
         if (ImGui::BeginMenu("Create")) {
-            if (ImGui::MenuItem("Folder"))             CreateNewDir(m_selectedDir);
-            ImGui::Separator();
-            if (ImGui::MenuItem("Scene (.sascene)"))   CreateNewFile(CreateKind::Scene,  m_selectedDir);
-            if (ImGui::MenuItem("Material (.samat)"))  CreateNewFile(CreateKind::Mat,    m_selectedDir);
-            if (ImGui::MenuItem("Shader (.saglsl)"))   CreateNewFile(CreateKind::Saglsl, m_selectedDir);
-            if (ImGui::MenuItem("Script (.cs)"))       CreateNewFile(CreateKind::Script, m_selectedDir);
+            RenderCreateMenuContents(m_selectedDir);
             ImGui::EndMenu();
         }
         ImGui::Separator();

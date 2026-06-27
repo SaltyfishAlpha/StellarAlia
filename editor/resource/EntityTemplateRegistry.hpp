@@ -47,6 +47,8 @@ public:
     const std::filesystem::path& MatTemplatePath()    const { return m_matTemplate; }
     // Absolute path to templates/shaders/NewShader.saglsl, or empty if not found.
     const std::filesystem::path& ShaderTemplatePath() const { return m_shaderTemplate; }
+    // Absolute path to templates/inputmaps/Controls.sainputmap, or empty if not found.
+    const std::filesystem::path& InputMapTemplatePath() const { return m_inputMapTemplate; }
 
 private:
     std::vector<TemplateEntry> m_entries;
@@ -54,6 +56,7 @@ private:
     std::filesystem::path      m_scriptTemplate;
     std::filesystem::path      m_matTemplate;
     std::filesystem::path      m_shaderTemplate;
+    std::filesystem::path      m_inputMapTemplate;
 };
 
 } // namespace StellarAlia::Editor

@@ -28,11 +28,12 @@ layout(set = 1, binding = 0) uniform FrameData {
     // Evaluation: irradiance(N) ≈ sum_i(irrSH[i].rgb * Y_i(N))
     // w component unused (std140 vec3 → vec4 padding).
     vec4  irrSH[9];
-    mat4  lightSpaceMatrix;  // orthographic light view-projection for shadow pass
-    // TAA temporal data
-    mat4  prevViewProj;      // previous frame unjittered viewProj for reprojection
-    vec2  jitter;            // current Halton jitter in pixel space [-0.5, 0.5]
-    uint  frameIndex;        // frame counter mod 256
+    mat4  lightSpaceMatrix;       // orthographic light view-projection for shadow pass
+    // TAA / motion blur temporal data
+    mat4  prevViewProj;           // previous frame unjittered viewProj
+    mat4  currUnjitteredViewProj; // Issue #85: unjittered current viewProj for VelocityPrepass
+    vec2  jitter;                 // current Halton jitter in pixel space [-0.5, 0.5]
+    uint  frameIndex;             // frame counter mod 256
     float _fpad;
 } u_Frame;
 

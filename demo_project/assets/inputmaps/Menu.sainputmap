@@ -1,0 +1,16 @@
+{
+  "name": "Menu",
+  "passthrough": false,
+  "actions": [
+    {
+      "name": "Cancel",
+      "type": "Button",
+      "userConfigurable": false,
+      "activationThreshold": 0.5,
+      "bindings": [
+        { "kind": "Direct", "path": "Keyboard/Escape" },
+        { "kind": "Direct", "path": "Gamepad/Start" }
+      ]
+    }
+  ]
+}

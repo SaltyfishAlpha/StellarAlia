@@ -22,6 +22,17 @@ struct AssetEntry {
 // Returns "" for unrecognised or sidecar-only extensions (.sanim, .saskel).
 std::string AssetTypeFromExtension(const fs::path& ext);
 
+// Idempotent: returns the AssetEntry for `srcPath` with an existing or newly-
+// generated .sameta. Per-type defaults (srgb/mipmaps for Texture,
+// merge_submeshes for Mesh, class_name for Script) are applied only on the
+// freshly-created sideacar — existing UUIDs and settings are never overwritten.
+AssetEntry EnsureMeta(const fs::path& srcPath, const std::string& type);
+
+// Dispatches the appropriate cooker based on `entry.meta.type`. A no-op for
+// types that have no cooked output (Script, Scene, Shader). Empty
+// cookCacheDir is a no-op as well.
+void CookAssetEntry(const AssetEntry& entry, const fs::path& cookCacheDir);
+
 // Recursively scans dir, generates a .sameta for every cookable primary asset
 // that does not already have one, and returns all discovered entries.
 // Existing .sameta files are never modified — UUIDs are stable.

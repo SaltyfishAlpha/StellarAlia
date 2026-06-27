@@ -52,9 +52,17 @@ public:
     std::span<const glm::mat4>           GetBoneGlobalPoses(entt::entity entity) const;
     std::span<const Resource::BoneInfo>  GetBoneSkeleton   (entt::entity entity) const;
 
-    // Must be called once before PrepareEntity; stores the set=2 layout used to allocate
-    // per-entity skinDescSets.  Obtain layout from SceneRenderer::GetSkinDescLayout().
-    void Init(RHI::IRHIDevice* device, RHI::RHIDescLayoutHandle skinDescLayout);
+    // Must be called once before PrepareEntity; stores the set=3 layouts used
+    // to allocate per-entity descriptor sets.
+    //   skinDescLayout      — bindings 0/1 (curr matrices + skinData); from
+    //                         SceneRenderer::GetSkinDescLayout().
+    //   velocityDescLayout  — bindings 0/1/2 (curr + skinData + prev); from
+    //                         SceneRenderer::GetVelocityDescLayout() (Issue #84).
+    //                         May be invalid if VelocityPrepass shader unavailable;
+    //                         in that case velocityDescSet stays {} per entity.
+    void Init(RHI::IRHIDevice* device,
+              RHI::RHIDescLayoutHandle skinDescLayout,
+              RHI::RHIDescLayoutHandle velocityDescLayout = {});
 
     // Releases all per-entity GPU resources (skinMatricesBuffer, skinDescSet).
     // skinDataBuffer and vertexBuffer are owned by ResourceManager and not freed here.
@@ -79,6 +87,7 @@ private:
     };
 
     RHI::RHIDescLayoutHandle                 m_skinDescLayout;
+    RHI::RHIDescLayoutHandle                 m_velocityDescLayout;   // Issue #84
     std::unordered_map<uint32_t, SkinEntry>  m_entries;
 
     static void SampleChannel(const Resource::AnimChannel& ch, float t,

@@ -1,21 +1,71 @@
-﻿## 待办issue
+﻿# StellarAlia Issue 文档
 
-24. **[低优先级] 长耗时操作进度反馈**
-    - **启动进度条**（难度高）：`OnAttach` 在渲染循环前同步执行，ImGui 无法渲染。需重构为两阶段延迟初始化或独立 splash screen 渲染通道，暂不做。
-    - **Reimport All 进度条**（难度中，最有实际价值）：`ReimportDir` 同步阻塞 UI。改法：将其拆成逐帧 N 个文件的状态机，`OnDraw` 期间推进并用 `ImGui::ProgressBar` + modal 显示；或移入工作线程 + 原子进度计数器。
-    - 前置条件：依赖 `AssetsPanel` 暴露异步迭代接口；待项目素材量增大后再做。
-27. 美化编辑器：骨骼改用球+锥绘制而不是线
-31. animator编辑器 imguizmo
-32. 材质可视化编程 imguizmo
-33. 场景物体：贝塞尔曲线与相机移动 imguizmo 脚本issue完成后
-36. **[极低优先级] RHI VkMemory 级别别名（Approach A）**
-23. 帧率优化
-24. 透明材质面片（植物等）
-54. **[低优先级，待复现] Reimport 后内存缓存未失效导致 mesh 显示异常** — Reimport 更新 cook cache 磁盘数据后，`ResourceManager` 按 UUID 缓存的 GPU mesh handle 未刷新，渲染仍用旧数据；重启后缓存清空才恢复正常。根因：`ReimportDir` 完成后未调用 `ClearProjectAssets()`。修复方向：reimport 完成时触发 `ResourceManager::ClearProjectAssets()`（同 Issue #38 逻辑，触发时机改为 reimport 后）。现象：曾在 BoomBox.glb（带动画）上观察到固定面片破碎，无法稳定复现。
-23. 程序化天空盒，选择一个物体作为光源方向
-22. 调试渲染：面片id着色，lod着色，随机着色，depth着色...
-73. **[低优先级] .saglsl shading model 迁移到 SSBO+bindless 路径** — #72 后内置 PBR 走 SSBO+bindless 零 per-entity desc set 分配，但项目 `.saglsl` shading models（如 SimpleAlbedo / SimpleRoughness）cook 出来的 `*.gbuffer.frag` 仍声明 `set=2 uniform MaterialParams`（UBO 路径）。`MaterialOverrideComponent` 用在这些 type 上时仍走 `CloneInstance` legacy 路径——比改前好（延迟销毁队列兜底），但还是有 per-entity desc set 分配。改法：更新 `ShaderCookLib` / `NewShader.saglsl` 模板把声明改成 `std430 readonly buffer MaterialParams` + `t_*_Idx` uint 索引；reflection 触发 `usesMaterialParamsSSBO=true`，自动复用 ring + bindless 通道。
-74. **[低优先级] 编辑器全局 NOMINMAX** — editor 目标在某些 cpp（含 user WIP 的 drawers）经过 Windows.h 后 `std::numeric_limits<uint32_t>::max()` 被宏污染编译失败。修法：editor PCH 或 CMakeLists 加 `target_compile_definitions(... PRIVATE NOMINMAX)` 全局生效。
+> **最近一次整理**：2026-06-25
+> **状态来源**：源码核验（详见底部"已完成 issue 索引"段）
+
+---
+
+## 完成情况总览
+
+| 状态 | 数量 | 列表 |
+|---|---|---|
+| ✅ 已完成 | 29 | #29 #45 #46 #47 #58 #62-#67 #69 #72 #73 #74 #75 #78 #81 #82 #84 **#85** #56b（旧#71热编译）#71 Phase 2 #71 Phase 3a/3b + Vulkan D/E/F/G/H + Cross-dir Vtx Shader + UI Bug 5 项 |
+| ❌ 未完成（带设计） | 15 | #36 #48 #49 #55 #56 #57 #60 #61 #68 #70 #76 #77 #79 #80 #83 |
+| ❌ 未完成（短条目） | 12 | X-1 ~ X-8 + #54 + #73-A + #74-A + #23 帧率优化伞 |
+
+**关键指标**：`ScriptApiFunctionTable::version = 7` — 表明脚本 API 已经过 v2→v3（Phase 2）→v4→v5（Phase 3a InputMap）→v6（#81 Transform 重命名）→v7（#47 PostProcess）共五轮扩展。
+
+---
+
+## 待办issue（按优先级分组）
+
+> **图例**：本节为 issue 概览索引；带详细设计的 issue 在下方独立小节展开（搜索 `## Issue #N`）。
+> 顶部"待办issue"段曾有 #23 / #24 编号重复，已重排为唯一编号；原序号在末尾括注，便于追溯。
+
+### 🔴 中优先级 — 渲染与帧率
+- **#23 帧率优化（伞 issue）** — 子任务覆盖 #55 LOD / #56 Stencil / #57 Meshlet / #61 ShaderVariant
+- **#55 LOD 系统**（详细设计见下）
+- **#61 ShaderVariantCache**（详细设计见下）
+- **#68 ComponentSchema**（详细设计见下）
+
+### 🔴 高优先级 — 动画系统（启动时机：#46-#49 后）
+- **#83 Skinning 工业级补全（伞 issue / 7 phase roadmap）**（详细设计见下）— 总工程量 ~9.5 周；启动前置：#46 Phase 1 done + 后处理系列稳定
+
+### 🟡 低优先级 — 渲染/工具
+- **#36 RHI VkMemory 级别别名**（极低，依赖 #16）
+- **#48 SSR**（依赖 #42 TAA）
+- **#49 Volumetric Fog**（极低）
+- **#56 Stencil Masking for Deferred Lighting**（详细设计见下）
+- **#57 GPU-Driven Meshlet Cluster Culling**（详细设计见下）
+- **#60 Mesh Split/Merge Cook 工具**（详细设计见下）
+- **#70 GameMode + 项目导出**（详细设计见下）
+- **#76 Cook 工具对 Script 类型静默 skip**（详细设计见下）
+
+### 🟡 中优先级 — 脚本系统延伸
+- **#80 Script Field 复合类型（List<T> + 嵌套 struct）**（依赖 #75，详细设计见下）
+
+### 🟢 极低优先级 / cleanup
+- **#77 `m_pendingDeselectOtherPath` 死代码清理**
+- **#79 `ScriptSystem::CaptureFieldValues` 接口空挂**
+
+### 📋 杂项短条目（暂未独立 issue 编号；标 X-* 临时编号去重）
+
+- **X-1 长耗时操作进度反馈**（低优先级，原序号 #24-a）
+  - 启动进度条（高难度）：`OnAttach` 在渲染循环前同步执行，ImGui 无法渲染；需重构为两阶段延迟初始化或独立 splash screen 通道
+  - Reimport All 进度条（中难度，最有实际价值）：`ReimportDir` 同步阻塞 UI；改法：拆成逐帧 N 个文件的状态机 + ProgressBar modal，或工作线程 + 原子进度计数器
+  - 前置：`AssetsPanel` 暴露异步迭代接口
+- **X-2 骨骼可视化美化**（原序号 #27）：骨骼改用球+锥绘制取代线
+- **X-3 Animator 编辑器 imguizmo**（原序号 #31）
+- **X-4 材质可视化编程 imguizmo**（原序号 #32）
+- **X-5 贝塞尔曲线相机移动**（原序号 #33；依赖 #71 Phase 2 脚本侧 InputAction）
+- **X-6 透明材质面片（植物等）**（原序号 #24-b）
+- **X-7 程序化天空盒 + 物体作为光源方向**（原序号 #23-b）
+- **X-8 调试渲染**（原序号 #22）：面片 id / lod / 随机 / depth 着色
+- **#54 Reimport 后内存缓存未失效**（低优先级，待复现）— `ReimportDir` 完成后未调 `ClearProjectAssets()` 导致 GPU mesh handle 残留旧数据；曾在 BoomBox.glb 观察到面片破碎，无法稳定复现。修法：reimport 完成触发 `ResourceManager::ClearProjectAssets()`
+- **#73-A `.saglsl` shading model 迁移到 SSBO+bindless 路径**（低优先级）— #72 后内置 PBR 走 SSBO+bindless 零 per-entity desc set 分配，但 `.saglsl` shading models cook 出 `*.gbuffer.frag` 仍声明 `set=2 uniform MaterialParams`（UBO 路径），`MaterialOverrideComponent` 走 `CloneInstance` legacy 路径。改法：更新 `ShaderCookLib` / `NewShader.saglsl` 模板把声明改成 `std430 readonly buffer MaterialParams` + `t_*_Idx` uint 索引，reflection 触发 `usesMaterialParamsSSBO=true`
+- **#74-A 编辑器全局 NOMINMAX**（低优先级）— editor 目标某些 cpp 经过 Windows.h 后 `std::numeric_limits<uint32_t>::max()` 被宏污染。修法：editor PCH 或 CMakeLists 加 `target_compile_definitions(... PRIVATE NOMINMAX)` 全局生效
+
+> 注：原序号 #73 / #74 与下方独立 issue 编号 #73 / #74（Script Inspector 三连）冲突；为避免歧义此处加 -A 后缀。下方"Issue #73 Script Inspector 前置"是已完成的另一 issue。
 
 ---
 
@@ -44,62 +94,13 @@
 
 ---
 
-## Issue #46 — Motion Blur（运动模糊）
-
-**优先级：中（依赖 #42 velocity buffer）**
-
-### 目标
-
-利用 TAA velocity buffer 实现 per-object tile-based 运动模糊。
-
-### 设计
-
-- 依赖 #42 已有的 velocity buffer（RG16F）
-- **TileMax pass**：downscale velocity 到 tile（16×16）取最大速度
-- **NeighborMax pass**：3×3 tile 扩散
-- **Reconstruct pass**：按速度方向采样 hdrTex，写回（Tonemap 之前）
-- 仅相机运动或高速物体触发，静止场景无开销
-
-### 参数
-
-```cpp
-bool  motionBlurEnabled  = false;
-float motionBlurStrength = 0.5f;
-int   motionBlurSamples  = 8;   // 重建采样数
-float motionBlurMaxSpeed = 0.1f; // 屏幕空间速度截止（比例）
-```
+## Issue #46 — Motion Blur（Camera Mode, Phase 1）✅ DONE
+<!-- handles.velocity (RG16F viewport) 升格为公开 RG 接口 — Phase 2 接管点；MotionBlurFeature 插在 DoF 之后/Tonemap 之前，4 fullscreen pass：velocity (depth + prevViewProj 推导) → TileMax 16× → NeighborMax 3×3 dilate → McGuire 2012 reconstruct (jittered samples + soft depth + cone weight)，原地 redirect handles.hdr 仿 DoF Composite；strength/maxSpeed 仅在 reconstruct 应用，velocity buffer 保持物理 semantics 兼容 Phase 2 per-object writes；PostProcessSettings 4 字段 + SceneSerializer + PostProcessPanel UI；first-frame guard：ApplyCameraToUniforms 检测 m_prevUnjitteredViewProj == identity 时 seed prev=curr 避免 garbage velocity -->
 
 ---
 
-## Issue #47 — 屏幕修饰效果（Vignette / Chromatic Aberration / Film Grain）
-
-**优先级：低（依赖 #40，LDR pass，与 Tonemap 合并或独立一次 pass）**
-
-### 目标
-
-Tonemap 之后的低开销 LDR 修饰，全部合并进一个 fullscreen pass（或 LUT bake 中）。
-
-### 设计
-
-- 单个 `PostFX` pass（或合并进 Tonemap pass），读 swapchain，写 swapchain
-- Vignette：屏幕边缘距离 → 暗化，椭圆形
-- Chromatic Aberration：中心向外 UV 偏移，R/G/B 通道分别采样
-- Film Grain：per-frame 随机种子 + 高频噪声叠加（强度随亮度衰减）
-
-### 参数
-
-```cpp
-bool  vignetteEnabled    = false;
-float vignetteIntensity  = 0.4f;
-float vignetteSmoothness = 0.6f;
-
-bool  caEnabled          = false;  // Chromatic Aberration
-float caStrength         = 0.5f;
-
-bool  filmGrainEnabled   = false;
-float filmGrainIntensity = 0.1f;
-float filmGrainSize      = 1.6f;
-```
+## Issue #47 — 屏幕修饰效果（Vignette / Chromatic Aberration / Film Grain）✅ DONE
+<!-- 新增 RGTextureHandle ldr 公开接口 + LDR_Color 瞬态（swapchain format）；Tonemap/LutTonemap 重定向到 handles.ldr；PostFXFeature 单 fullscreen pass 跑在 Tonemap 之后/SelectionOutline 之前（reverse-insert 模式），uniform-control-flow 切换 vignette/CA/film grain，全 disable 时退化为 LDR→swapchain 拷贝；PostProcessSettings +8 字段 + SceneSerializer 双向；PostProcessPanel 三个 CollapsingHeader；Script API：ScriptApiFunctionTable v6→v7，新增 16 entries + SceneRenderer* 接入 ScriptApiContext，managed PostProcess.Vignette/.ChromaticAberration/.FilmGrain Unity 风格嵌套静态类，setter 调用 ApplyWorldSettings(ws,false) 实时生效；demo_project 加 PostProcessTest.cs 验证 -->
 
 ---
 
@@ -906,8 +907,9 @@ editor/ui/drawers/
 
 ---
 
-## Issue #71 — Script 热编译（Editor 内无需重启即可重新编译脚本）✅ DONE
-<!-- FileWatcher(ReadDirectoryChangesW后台线程) + IWindow::IsFocused() + ScriptSystem::RecompileEditing + EditorMode 轮询；失焦积压 m_pendingRecompile，重获焦点触发；Playing 状态不重编；诊断自动路由 Diagnostics tab -->
+## Issue #56b — Script 热编译（Editor 内无需重启即可重新编译脚本）✅ DONE
+<!-- 注：原文档误标 #71，与下方 "Issue #71 脚本库扩展 Phase 2" 编号冲突；按 project memory 记录此 issue 编号为 #56 hot-recompile。
+FileWatcher(ReadDirectoryChangesW后台线程) + IWindow::IsFocused() + ScriptSystem::RecompileEditing + EditorMode 轮询；失焦积压 m_pendingRecompile，重获焦点触发；Playing 状态不重编；诊断自动路由 Diagnostics tab -->
 
 ---
 
@@ -1077,7 +1079,11 @@ output/{ProjectName}/
 
 ---
 
-## Issue #71 — 脚本库扩展 Phase 2：InputMap 资产 + Mesh / Material 组件代理
+## Issue #71 Phase 2 — 脚本库扩展：InputMap 资产 + Mesh / Material 组件代理 ✅ DONE
+<!-- .sainputmap 资产 + .sameta + ImportScanner/InputMapImporter cook 流程；ActionMapJsonParser Parse+Serialize 双向（src/function/input/）；InputMapLoader::LoadAll Application::UpdateProjectPaths() 调用；ScriptApiFunctionTable version 2→3 加 Block 3（InputAction 5槽 + StaticMesh 1槽 + MeshRenderer 6槽 + MaterialOverride 6槽）；managed AssetRef.cs / MeshProxy.cs / MaterialOverrideProxy.cs；Input.cs 追加 InputAction 静态类；Entity.cs 加 GetMesh()/GetMaterialOverride()；Step 9 builtin editor map 资产化（Viewport/EditorGlobal.sainputmap）+ EditorShortcutConfig 改用 .sainputmap 存储（~/.stellar_alia/editor_shortcuts.sainputmap），MakeViewportMaps 标 fallback-only -->
+
+<details>
+<summary>原设计（保留）</summary>
 
 **优先级：中（依赖 #69 已完成；#29 脚本系统基础稳定）**
 
@@ -1337,6 +1343,39 @@ public static class InputAction {
   - `Entity.cs`：追加 `GetMaterialOverride()`
   - 验证：`Self.GetMaterialOverride().SetColor("albedo", new Vector4(1,0,0,1))` 运行时变色
 
+- [ ] **Step 8 — AssetsPanel / Inspector 对 .sainputmap 资产的最小支持**
+  - `editor/ui/panels/AssetsPanel.cpp::IsTextAsset()`：扩展名表加 `.sainputmap`（双击走外部文本编辑器打开）
+  - `editor/ui/panels/InspectorPanel.cpp::RegisterAssetDrawers()`：不新增专用 drawer，让 `.sainputmap` 落到 `m_defaultAssetDrawer`（DefaultAssetInspector 已支持显示文本/JSON 内容 + sameta 元信息）
+  - 验证：项目里放一份 `controls.sainputmap` + `.sameta`，AssetsPanel 双击能在外部编辑器打开；选中后 Inspector 显示 JSON 内容
+  - 范围控制：可视化 InputMap 编辑器（节点式 binding UI、绑定捕获）不在本 issue，留 #79+ 独立 issue
+
+- [ ] **Step 9 — Editor builtin + user-override inputmap 全面迁移到 .sainputmap（统一存储格式）**
+  - **9a — Builtin defaults 资产化**
+    - 新建 `engine/assets/editor/Viewport.sainputmap` + `EditorGlobal.sainputmap`：把 `editor/input/EditorInputMaps.hpp::MakeViewportMaps()` 的两个 `ActionMapDef` 序列化为 JSON
+      - `Viewport.sainputmap`：Look / Move / Sprint（PIE Pop 时配套 pop）
+      - `EditorGlobal.sainputmap`：SaveScene / NewScene / Undo / Redo / EntityDelete / EntityDuplicate / SelectAll / GizmoTranslate/Rotate/Scale / TogglePanels（始终保留）
+    - `EditorMode::OnAttach`：改成调 `ActionMapJsonParser::Parse` 读这两份 builtin 资产 → `RegisterMaps`；不再直接调 `MakeViewportMaps()`
+    - Fallback：builtin asset 加载失败时仍回退 hardcoded `MakeViewportMaps()`（保证 editor 可启动）
+  - **9b — ActionMapJsonParser 补齐反向 Serialize（round-trip codec）**
+    - `ActionMapJsonParser::Serialize(const ActionMapDef& def, std::string& outJson)`：与 `Parse` 对称的反序列化，所有 `BindingDef::Kind` 及 processor 字段（scale / deadZone / invert / normalize）必须 round-trip 等价
+    - 配套单元/手测：Parse → Serialize → Parse 二次解析得到结构等价
+  - **9c — EditorShortcutConfig 存储格式由自定义 JSON 切换到 `.sainputmap`**
+    - **保留** override-layer 语义（in-memory `m_overrides: unordered_map<string, BindingDef>` 不变，`ApplyTo(defaults)` 不变）
+    - **改写**`Load/Save/ExportTo/ImportFrom`：从 `{version, overrides:{name:{modifiers,key}}}` 自定义 schema 切换到 `.sainputmap`（即 ActionMapDef JSON，只列出被覆盖的 action）
+      - 在内存中以一个 `ActionMapDef{name="EditorOverrides", actions=[…]}` 形式持久化；保存时调 `ActionMapJsonParser::Serialize`，加载时调 `Parse` 再把 `actions[].bindings[0]` 抽进 `m_overrides`
+      - 配置文件落地路径同步：`~/.stellar_alia/editor_shortcuts.sainputmap`（旧 `~/.stellar_alia/shortcuts.json` 不做迁移，#71 之前用户极少改 — 加载失败时静默 fall back 到默认）
+    - 旧 `nlohmann::json` 直读 / SerializeOverrides 代码删除；EditorShortcutConfig.cpp 只依赖 `ActionMapJsonParser`
+  - **9d — 调用点收尾**
+    - `EditorInputMaps.hpp`：`MakeViewportMaps()` 标注「fallback-only；正式路径走 builtin `.sainputmap`」
+    - `EditorMode::OnAttach` 顺序：load builtin `.sainputmap` → `EditorShortcutConfig::Load(~/.stellar_alia/editor_shortcuts.sainputmap)` → `ApplyTo(builtin)` → `RegisterMaps`（顺序保持现状）
+  - 验证：
+    - 删掉 builtin `.sainputmap` 时 editor 仍可启动（fallback 生效）
+    - 修改 `Viewport.sainputmap` 里的 Move 绑定（如 WASD → 方向键），重启 editor 后 viewport 相机响应改变
+    - 调用 `EditorShortcutConfig::SetOverride("SaveScene", Composite({"Ctrl","Shift"},"S"))` 后 Save → 文件内容是合法的 `.sainputmap`（用 `ActionMapJsonParser::Parse` 能解析回 `ActionMapDef`）
+    - Reload 后 override 仍生效；Ctrl+S 不再触发 SaveScene，Ctrl+Shift+S 触发
+    - `AssetsPanel` 中（项目内放置）和 user dir 中的 `.sainputmap` 走同一 parser（统一可视性）
+  - 范围控制：file watcher 触发 InputSystem re-register（hot-reload）不在本 issue，editor 自身 inputmap 修改需重启生效
+
 ### 边界情况与约束
 
 | 约束 | 说明 |
@@ -1351,12 +1390,281 @@ public static class InputAction {
 | 不做：AssetRef::FromPath() | 需 AssetRegistry 查询，留后续 issue |
 | 不做：StaticMesh_SetAssetUUID | 运行时换 mesh 需重新上传 GPU buffer，复杂度高 |
 | ~~不做：MaterialOverride 纹理槽~~ → **已通过 #72 解锁** | 渲染侧：bindless heap 索引在 ring blob 里（PBR SSBO 路径）或 `clone->SetTexture` 写 desc set（legacy 路径）。脚本 API `MaterialOverrideProxy.SetTexture(slot, AssetRef)` 待 #71 实现层补完 |
+| Editor builtin inputmap 路径 | Step 9 把 `MakeViewportMaps()` 拆 builtin `.sainputmap`，与 game 项目级 `.sainputmap`（Step 3 LoadAll 扫描）走相同 `ActionMapJsonParser`；builtin 路径直接 `Parse + RegisterMaps`，不进 cook cache（engine 内置，无 .sameta 流程） |
+| EditorShortcutConfig 持久化格式统一 | 现有 `EditorShortcutConfig` 的自定义 JSON（`{overrides:{actionName:{modifiers,key}}}`）正是 `.sainputmap` ActionMapDef 的镜像 — Step 9c 把存储层切到 `.sainputmap`（落地为 `~/.stellar_alia/editor_shortcuts.sainputmap`，只列被覆盖的 action），in-memory override-layer 语义与 `ApplyTo()` 不变；旧 JSON 文件不做迁移，加载失败 fall back 到默认 |
+| ActionMapJsonParser 必须双向 | 原设计仅 `Parse`；Step 9b 补 `Serialize` 完成 round-trip，理由是 EditorShortcutConfig.Save 需要写 `.sainputmap` 格式；BindingDef 所有 Kind + processor 字段必须等价 round-trip |
+| InputMap hot-reload | 不做：editor builtin / game `.sainputmap` 修改后需重启 editor 或重新进入 PIE；FileWatcher → InputSystem re-register 留独立 issue（与 #29 脚本热编译类似但解耦） |
+| InputMap 可视化编辑器 | 不做：本 issue 仅让 `.sainputmap` 在 AssetsPanel/Inspector 可见可外部编辑；节点式 binding UI / 绑定捕获 / processor 编辑 留 #79+ |
 
 ### 受益 issues
 
 - **#33**（贝塞尔曲线相机）：`InputAction.ReadVec2("Look")` + MeshProxy 是脚本驱动相机和换材质的基础工具
 - **#69**（脚本库）：AssetRef 类型可回头补充 AnimatorProxy 的 clip 换用功能
 - **#70**（游戏发布）：`.sainputmap` 随项目资产打包，GameMode 无需内置硬编码的 input map 定义
+- **Editor 自身**（Step 8/9）：viewport 相机与全部编辑器热键改由 builtin `.sainputmap` 驱动，user override 也落地为 `.sainputmap`（EditorShortcutConfig 自定义 JSON 退役），整个 editor 输入栈统一收敛到 `ActionMapJsonParser` 一套 codec
+
+</details>
+
+---
+
+## Issue #71 Phase 3 — 多 InputMap 切换与 Editor 全局热键持久化 ✅ DONE
+<!-- Phase 3a: InputSystem::TryPushMap/TryReplaceMap/GetTopMapName/IsMapInStack fail-soft API；ScriptApiFunctionTable version 4→5 加 InputMap_Push/Pop/Replace/IsActive/GetActive 5 槽；managed InputMap.cs 静态类；Phase 3b: EditorInputMaps.hpp MakeViewportMaps 重命名为 MakeBuiltinEditorMaps，拆出 EditorGlobal/Viewport/TextInput/UI 四份 def；Viewport.passthrough=true 让 EditorGlobal 栈底持续可见；EditorMode OnAttach 改 Push EditorGlobal 然后 Push Viewport；OnPlayStateChanged 仅 Pop Viewport 保留 EditorGlobal；ShortcutsPanel/Presenter 同步切换调用点 -->
+
+<details>
+<summary>原设计（保留）</summary>
+
+#### 追加规划
+
+Phase 1 (#69) 和 Phase 2 (#71 Step 1–9) 完成后还剩两块未做的工作。本节按依赖关系把它们规划为两个子阶段：
+
+- **Phase 3a — 脚本侧 InputMap 切换 API**（先做，独立可落地）
+- **Phase 3b — Editor builtin map 拆分 Viewport / EditorGlobal**（后做，依赖 3a 暴露的 `GetActive()` 便于调试）
+
+两者**不合并**：3a 是脚本运行时能力扩展（managed + 函数表），3b 是编辑器 PIE 输入栈语义改造（C++ + builtin 资产），范围、风险、受影响代码路径完全不同。强行合并会让单次实现的 diff 过大，难以独立验证。
+
+---
+
+### Phase 3a — 脚本侧 InputMap 切换 API
+
+**优先级：高（解锁暂停菜单 / 载具切换 / 关卡专属输入集等所有 PIE 多 map 用例）**
+
+#### 目标
+
+让 C# 脚本通过 `InputMap.Push("PauseMenu") / Pop() / Replace(…) / IsActive(…) / GetActive()` 在运行时切换 InputSystem 的 map 栈；命名不存在时 fail-soft（Log warn + 返回 false / 空串），不再 assert 崩溃。
+
+#### 设计
+
+##### A — InputSystem 公共 API 扩展
+
+`src/function/input/InputSystem.hpp` 现有 `PushMap / PopMap / ReplaceMap` 行为：
+- `PushMap(unknown)` → `assert + return` —— **必须改为 return-false fail-soft 路径**
+- 缺 `GetTopMapName()` —— 新增
+- 缺 `IsMapInStack(name)` —— 新增（用于脚本 `IsActive()` 语义；只判栈顶还是判整栈见下文边界讨论）
+
+签名修订：
+```cpp
+class InputSystem {
+public:
+    // 返回 true 表示成功 push（map 名已注册）；false 仅记录 warn 不 push。
+    [[nodiscard]] bool TryPushMap   (std::string_view name);
+    [[nodiscard]] bool TryReplaceMap(std::string_view name);
+    // 兼容旧调用点（editor 内部已知 map 名一定存在），保留 void 版本但内部走 TryPushMap，
+    // 失败时 SA_LOG_ERROR 而非 assert（脱掉 assert 让 fuzz / 失败状态下不崩 editor）。
+    void PushMap   (std::string_view name);
+    void ReplaceMap(std::string_view name);
+
+    // ── 新增查询 ──
+    std::string_view GetTopMapName() const;          // 栈空时返回 ""
+    bool             IsMapInStack(std::string_view name) const;
+};
+```
+
+##### B — 函数表 Block 3 v4 → v5（新增 5 槽）
+
+```cpp
+// ScriptApiExports.hpp
+struct ScriptApiFunctionTable {
+    uint32_t version = 5;        // 4 → 5
+    // ... 现有 60 槽 ...
+
+    // ── v5 — InputMap stack control (Phase 3a) ────────────────────────────
+    int32_t (*InputMap_Push)     (const char* name);     // 1=ok, 0=unknown
+    void    (*InputMap_Pop)      ();
+    int32_t (*InputMap_Replace)  (const char* name);     // 1=ok, 0=unknown
+    int32_t (*InputMap_IsActive) (const char* name);     // 1=在栈中, 0=不在
+    void    (*InputMap_GetActive)(char* buf, int32_t bufLen);  // 栈空时 buf[0]='\0'
+};
+```
+
+`SA_InputMap_*` 实现遵循 `ScriptApiExports.cpp` 现有风格：`g_ctx.input == nullptr` 时返回 0/空串。
+
+##### C — C# 托管层
+
+新建 `managed/StellarAlia.Runtime/InputMap.cs`：
+
+```csharp
+namespace StellarAlia;
+
+public static class InputMap {
+    /// Push named map on top of the InputSystem stack. Returns false (with a
+    /// warning log on the engine side) when the name is not registered.
+    public static bool Push(string name)    => NativeApi.SA_InputMap_Push(name) != 0;
+    public static void Pop()                 => NativeApi.SA_InputMap_Pop();
+    public static bool Replace(string name) => NativeApi.SA_InputMap_Replace(name) != 0;
+    public static bool IsActive(string name) => NativeApi.SA_InputMap_IsActive(name) != 0;
+    public static string GetActive() { /* fixed buf 64 → string */ }
+}
+```
+
+`NativeApi.cs` 同步 5 个 wrapper + 5 个函数指针字段，`ExpectedTableVersion = 5`。
+
+#### 实施步骤
+
+- [ ] **Step 1 — InputSystem 公共 API 扩展**
+  - `InputSystem.hpp`：声明 `TryPushMap / TryReplaceMap / GetTopMapName / IsMapInStack`
+  - `InputSystem.cpp`：`TryPushMap` 走 `FindMap` 未命中 → `SA_LOG_WARN` + 返回 false；命中走原逻辑 + 返回 true
+  - 旧 `PushMap/ReplaceMap` 重写为转发到 Try 版本，断言改为 `SA_LOG_ERROR`（不崩 editor）
+  - 验证：手动 `input.TryPushMap("NoSuchMap")` 返回 false、editor 不崩、log 有 warn
+
+- [ ] **Step 2 — Block 3 v5 函数表（C++ 端）**
+  - `ScriptApiExports.hpp`：version 4→5，追加 5 个槽位 + extern "C" 声明
+  - `ScriptApiExports.cpp`：5 个 `SA_InputMap_*` 实现 + 函数表绑定
+  - `SA_InputMap_GetActive` 用 `strncpy` 写入 buf，截断到 `bufLen-1`、保证 null 结尾
+  - 验证：61 槽两端一致
+
+- [ ] **Step 3 — C# wrapper + InputMap 静态类**
+  - `NativeApi.cs`：`ExpectedTableVersion = 5`，5 个 wrapper、5 个 `delegate*unmanaged` 字段
+  - 新建 `managed/StellarAlia.Runtime/InputMap.cs`：5 个静态方法
+  - 验证：Hello-world 脚本 `InputMap.Push("Gameplay"); Debug.Log(InputMap.GetActive())` 打印 "Gameplay"
+
+- [ ] **Step 4 — Demo 脚本扩展**
+  - `demo_project/assets/scripts/PauseToggle.cs`（新建）：按 Escape 在 "Gameplay" 与项目里新增的 "Menu" 之间 toggle，用 `InputMap.Push/Pop` 演示
+  - `demo_project/assets/inputmaps/Menu.sainputmap`（新建，简单 Cancel 一条 action）
+  - 验证：PIE 中 Esc 来回切，`GetActive()` 反映栈顶变化
+
+#### 边界情况与约束
+
+| 约束 | 说明 |
+|------|------|
+| `IsActive(name)` 语义 | 当前实现选"是否在栈上任意位置"，匹配 InputSystem::Poll 的 passthrough 链下传语义。脚本想知道"是否栈顶"应改用 `GetActive() == name` |
+| `Push` 重复同名 | 不去重，允许 push 同一 map 多次（Pop 也对称地一次只弹一个）。脚本若想防重复，自己用 `IsActive` 检查 |
+| 栈空时 Pop | 现有 InputSystem::PopMap 已是 no-op，不变 |
+| Editor 侧调用点不改 | EditorMode 内部仍调 `PushMap`（旧 void 版本）。改成 `SA_LOG_ERROR`-on-miss 不影响正常路径 |
+| 不做：map 优先级 / 排他锁 | 脚本想做"暂停菜单期间禁用游戏输入" → 让 Menu.sainputmap 的 passthrough=false 即可，无需引入新概念 |
+| 不做：脚本 RegisterMap | 运行时动态注册新 map（不从 .sainputmap）超出本 phase；要做该走 #79+（InputMap 编辑器）|
+| ScriptApiFunctionTable 版本号 | v4 → v5；managed dll 必须重新 publish，否则 `ExpectedTableVersion` 检查会拦截 |
+
+#### 受益 issues
+
+- **#33**（贝塞尔曲线相机）：相机进入手动飞行模式时 `InputMap.Replace("CinematicCamera")`，退出 `Replace("Gameplay")`
+- **#70**（游戏发布）：GameMode 启动时只需保证项目里有一个默认 map，脚本可自行切换；不再硬编码 startup map name
+- **Phase 3b** 调试：拆分 Viewport/EditorGlobal 后用 `InputMap.GetActive()` + Debug Console 看 PIE 期间栈顶是哪个 map，省下加 C++ log 的来回
+
+---
+
+### Phase 3b — Editor builtin map 拆分 Viewport / EditorGlobal
+
+**优先级：中（编辑器体验改善；用户期望 PIE 期间 Ctrl+S 仍能保存场景）**
+
+#### 目标
+
+把当前塞在单一 "Viewport" map 里的 17 个 action 拆成两份 builtin `.sainputmap`：
+
+- **Viewport.sainputmap** — 视口操作（Move / Look / Sprint / MouseLook / ToggleUI）：PIE 入口 Pop，PIE 出口 Push
+- **EditorGlobal.sainputmap** — 编辑器全局热键（SaveScene / NewScene / Undo / Redo / EntityDelete / EntityDuplicate / EntityRename / SelectAll / GizmoTranslate/Rotate/Scale / TogglePanels）：**始终保留**在栈底，PIE 期间仍可触发
+
+要求：行为变化对项目脚本透明（不破坏现有 Gameplay map）；ImGui 文本输入时 TextInput 仍硬阻断；现有 `EditorShortcutConfig` user override 继续工作。
+
+#### 现状（已验证的好消息 — 改动比预想小）
+
+读过 `InputSystem::Poll / ComputeBlockedPaths / DetectActiveFamily` 后确认：**这三个函数都已是 passthrough-aware 跨 map 实现**（`InputSystem.cpp:94-108, 173-201, 232-249`）：
+- Poll 从栈顶向下遍历，遇到 `!passthrough` 停止；同名 action 高层胜（line 98）
+- ComputeBlockedPaths 跨 map 收集所有 Composite 的 keyPath
+- DetectActiveFamily 跨 map 检查 binding 活跃度
+
+⇒ **不需要重写这三个函数**，也**不需要给 ActionDef 加 priority 字段**。直接给 Viewport 设 `passthrough=true`，让 EditorGlobal 在栈底持续可见即可。
+
+#### 设计
+
+##### A — builtin 资产拆分
+
+| 文件 | 包含 actions | passthrough |
+|------|------------|------|
+| `assets/editor/EditorGlobal.sainputmap` | SaveScene, NewScene, Undo, Redo, EntityDelete, EntityDuplicate, EntityRename, SelectAll, GizmoTranslate, GizmoRotate, GizmoScale, TogglePanels | `false`（栈底无需穿透） |
+| `assets/editor/Viewport.sainputmap` | Move, Look, Sprint, MouseLook, ToggleUI | `true`（PIE 前 viewport 同时还要让 EditorGlobal 可达）|
+| `assets/editor/TextInput.sainputmap` | 空 | `false`（不变）|
+| `assets/editor/UI.sainputmap` | Navigate, Submit, Cancel | `false`（不变；当前未实际 push）|
+
+##### B — EditorMode 栈管理改造
+
+`editor/EditorMode.cpp::OnAttach`（Step 9d 已经做的位置）：
+```cpp
+// 旧：input.RegisterMaps(... 三份 ...) ; input.PushMap("Viewport");
+// 新：四份 + 两 push
+input.RegisterMaps(...);  // 读 EditorGlobal/Viewport/TextInput/UI
+input.PushMap("EditorGlobal");   // 栈底
+input.PushMap("Viewport");        // 栈顶（passthrough=true）
+m_editorGlobalPushed = m_viewportActive = true;
+```
+
+`OnPlayStateChanged`：
+- **进入 PIE**：`input.PopMap()`（Viewport），保留 EditorGlobal 在栈底；按现有 #71 逻辑 push 项目 Gameplay 在 EditorGlobal 之上
+  - 若 Gameplay.passthrough=false（默认）→ EditorGlobal 被遮蔽，PIE 期间 Ctrl+S **不**触发 SaveScene
+  - 若 Gameplay.passthrough=true → PIE 期间 Ctrl+S **会**触发 SaveScene
+  - **决策**：默认让项目方决定，文档化 trade-off；本 phase 不强制
+- **退出 PIE**：Pop Gameplay → Push Viewport（不动 EditorGlobal）
+
+`OnDetach`：Pop Viewport + Pop EditorGlobal（按现有清理风格）。
+
+##### C — `MakeViewportMaps()` fallback 同步拆分
+
+`editor/input/EditorInputMaps.hpp` 重命名为 `MakeBuiltinEditorMaps()` 并返回 4 份 def（EditorGlobal + Viewport + TextInput + UI），保持与 builtin `.sainputmap` 同构（顶部注释已标注 fallback-only 现状）。
+
+##### D — `ShortcutsPanel::BuildEntries` 适配
+
+当前实现遍历 `MakeViewportMaps()` 收集 `userConfigurable && Button` action。新版同样遍历 `MakeBuiltinEditorMaps()` —— Viewport 拆出去的 5 个 action 都不是 `userConfigurable`，所以面板内容自动等价（验证：SaveScene、Undo 等保持可重绑）。
+
+##### E — `EditorShortcutConfig::ApplyTo` 不变
+
+ApplyTo 已是"对 defaults 列表内每个 ActionMapDef 的 actions 逐个 patch bindings[0]"，4 个 def 进来还是同样的逻辑。
+
+#### 实施步骤
+
+- [ ] **Step 1 — 拆分 builtin `.sainputmap` 资产**
+  - 编辑 `assets/editor/Viewport.sainputmap`：删除 12 个非 viewport 的 action，仅保留 Move/Look/Sprint/MouseLook/ToggleUI；**顶层加 `"passthrough": true`**
+  - 新建 `assets/editor/EditorGlobal.sainputmap`：含 12 个 user-configurable 全局热键，passthrough=false
+  - 验证：JSON 通过 `ActionMapJsonParser::Parse` 解析无错
+
+- [ ] **Step 2 — `MakeBuiltinEditorMaps()` 同步**
+  - `editor/input/EditorInputMaps.hpp` 重命名 `MakeViewportMaps` → `MakeBuiltinEditorMaps`，按上述 4 份 def 重组
+  - Viewport def 的 `passthrough = true`
+  - 顶部注释更新
+
+- [ ] **Step 3 — EditorMode `OnAttach` push 顺序**
+  - 在加载循环里加 EditorGlobal 文件
+  - OnAttach 末尾 `PushMap("EditorGlobal")` then `PushMap("Viewport")`
+  - 引入 `bool m_editorGlobalPushed`（仿 `m_viewportActive`）
+  - 验证：editor 启动后 Ctrl+S 正常保存，Gizmo T/R/S 正常切换，相机 WASD 正常
+
+- [ ] **Step 4 — `OnPlayStateChanged` 改造**
+  - 进 PIE：仅 Pop Viewport（保留 EditorGlobal）
+  - 出 PIE：Push Viewport（保留 EditorGlobal）
+  - OnDetach：补 Pop EditorGlobal
+  - 验证：PIE 期间 Gameplay map 的 Move 仍生效；Gameplay.passthrough=false 时 Ctrl+S 不触发（符合预期）；切回编辑器后 Ctrl+S 恢复
+
+- [ ] **Step 5 — `ShortcutsPanel` / `ShortcutsPresenter` 调用点同步**
+  - `ShortcutsPanel.cpp::BuildEntries` 引用 `MakeBuiltinEditorMaps()`
+  - `ShortcutsPresenter.cpp::RunRegisterMaps` 同步
+  - 验证：Shortcuts 面板正常列出 12 个全局热键 + 1 个 ToggleUI
+
+- [ ] **Step 6 — Phase 3a 调试钩子**
+  - 用 `InputMap.GetActive()`（Phase 3a 已落地）在 demo 脚本里打印 PIE 各阶段栈顶名，验证 stack 顺序符合预期
+  - 不写专用诊断代码；仅靠 demo 脚本日志确认
+
+- [ ] **Step 7 — 跨 map Composite 抢占回归测试**
+  - 手测：编辑场景中按 `S`（GizmoScale，在 EditorGlobal）和 `Ctrl+S`（SaveScene，在 EditorGlobal）—— 前者仅触发 GizmoScale，后者仅触发 SaveScene
+  - 手测：PIE 期间按 WASD —— Move（Viewport 路径替换为 Gameplay）触发；EditorGlobal 的 Composite Ctrl+S 是否能抢占 Gameplay 的 Direct S 取决于 Gameplay 配置（passthrough 决策点）
+
+#### 边界情况与约束
+
+| 约束 | 说明 |
+|------|------|
+| 同名 action 跨 map | InputSystem::Poll line 98 是"高层胜"。拆分后 Viewport 与 EditorGlobal 不应有同名 action；CI / 启动时可加 assertion 验证 4 份 def 的 action name 集合不相交 |
+| Viewport `passthrough=true` | 让 EditorGlobal 在栈底持续评估的必要条件；否则 PIE 之前 EditorGlobal 完全被遮蔽，Ctrl+S 都用不了 |
+| Gameplay 的 passthrough 决策 | 项目方在 `.sainputmap` 里自行决定。**默认 false**（PIE 期间游戏占用全部输入，Ctrl+S 不触发 SaveScene）— 这是更符合"游戏模式"的语义；用户想要"PIE 中仍可保存"就把 Gameplay.passthrough 改 true |
+| TextInput 不变 | 仍 passthrough=false 硬阻断；push 在栈最顶时连 Viewport+EditorGlobal 一起阻断，符合"文本输入不应触发热键"语义 |
+| 不做：ActionDef priority | UE5 风格的 per-action priority/consume 更细粒度但改造范围大；当前 passthrough+top-wins 足够覆盖 PIE 用例。留 #79+ 真正需要时再做 |
+| 不做：跨 map 单元测试套件 | 当前 InputSystem 无独立测试基础设施；建立测试 framework 是独立 issue。本 phase 靠手测 + Phase 3a 的 `GetActive()` 验证 |
+| EditorShortcutConfig override 兼容 | `m_overrides` 是 `unordered_map<actionName, BindingDef>`，跨 map 自动匹配；ApplyTo 遍历 4 份 def 各自 patch，无需改 EditorShortcutConfig.cpp |
+| 旧用户配置文件迁移 | `editor_shortcuts.sainputmap` 现存 actions 一定属于 Viewport 或 EditorGlobal 之一；拆分后 ApplyTo 找到对应 ActionDef 仍 patch 成功，无需迁移 |
+
+#### 受益 issues
+
+- **用户体验**：PIE 期间 Ctrl+Z / Ctrl+Shift+Z 撤销编辑器场景修改（如果切回编辑模式做错操作）— Gameplay.passthrough=true 时直接可用
+- **#79+ InputMap 可视化编辑器**：拆分后 EditorGlobal 与 Viewport 概念清晰，未来可视化编辑器分页展示更自然
+- **#70 游戏发布**：GameMode 不需要关心 EditorGlobal —— 它就是 editor-only builtin，不参与项目打包
+
+</details>
 
 ---
 
@@ -1375,49 +1683,7 @@ public static class InputAction {
 ---
 
 ## Vulkan Error D — vkUpdateDescriptorSets on in-flight descriptor set ✅ DONE
-
-**修复方案：`VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT`**
-
-### 背景与分析
-
-`FlushBindings()` 在 `AllocateSlots` 后、`Execute` 前调用 `vkUpdateDescriptorSets`，此时上一帧的 command buffer 可能仍在 GPU 执行（双帧槽中另一槽的 fence 未等待）。Vulkan spec 默认禁止更新 pending command buffer 引用的 descriptor set。
-
-深入分析后确认：RenderGraph 的瞬态资源走 **greedy interval slot coloring**——非重叠生命周期的逻辑纹理复用同一 `RGPhysicalSlot`（同一 VkImage/VkImageView）。Slot 的物理 handle 由 `AllocateSlots` 的 `if (!slot.handle.IsValid())` 保证仅创建一次，跨帧持久。因此 FlushBindings 实际上每帧写入的是**相同的 VkImageView**——无真实数据竞争，仅 spec 合规问题。Issue #36 的 VkDeviceMemory 级别别名也不改变 VkImageView 稳定性。
-
-**正确修法**：为 descriptor layout 和 pool 加 `UPDATE_AFTER_BIND` flag，让 spec 明确允许 pending 时更新（只需在 GPU 执行该 draw 前完成，RG 调用顺序已保证）。无需双缓冲任何 descriptor set。
-
-### 实施
-
-三处改动，均在 `VulkanDevice.cpp`：
-
-1. `CreateDescriptorSetLayout` — layout binding flags + layout create flag
-2. `InitDescriptorPool` — pool create flag
-3. `AllocateDescriptorSet` — pool 分配时对应 flag（`VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT` 已覆盖）
-  - 验证：DoF 效果不变，Validation 无报错
-
-- [ ] **Step 7 — TonemapFeature / SelectionOutlineFeature / 其余 Feature**
-  - 同上模式逐一处理
-  - `AutoExposureFeature`：先确认 AddPasses 是否有 BindTexture 调用，再决定是否需要双缓冲
-
-- [ ] **Step 8 — 最终 Validation 扫描**
-  - 开启 Vulkan Validation Layer，运行 3~5 帧
-  - 目标：`vkUpdateDescriptorSets` 相关 Error 归零
-  - 检查 `DebugOverlayFeature` 是否仍有报错（若有则补 Step 2 类处理）
-
-### 边界情况与约束
-
-| 约束 | 说明 |
-|------|------|
-| `kMaxBloomMips` 是编译期常量 | `m_downsampleDescSet[N][2]` 是栈上数组，无需额外分配，但改声明时注意行列顺序（`[mip][frame]` vs `[frame][mip]`） |
-| TAAFeature history 对应关系 | `m_resolveSet[i]` 的 binding 要与 `m_historyTex[i]` 保持一致，否则 TAA 读错 history 导致拖影 |
-| DebugOverlayFeature 特殊性 | 该 feature 的 descSet 绑定的是持久 SSBO（m_lineBuffer），每帧不调用 BindTexture/BindBuffer，FlushBindings 不写该 set，理论上暂时安全；若 Validation 仍报错则统一改 |
-| FreeDescriptorSet 幂等性 | `IRHIDevice::FreeDescriptorSet` 接受 invalid handle 时应 no-op；OnDestroy 前先检查 IsValid() |
-| 不做：push descriptor | 使用 `VK_KHR_push_descriptor` 可完全绕开 update 问题，但需 pipeline layout 改动及 ImGui/DebugOverlay 兼容验证，范围超出此 fix |
-
-### 受益 issues
-
-- **Error E**（未使用顶点属性）：独立于此 fix，但同一 Vulkan Validation 扫描运行可一并确认
-- **#42 TAA**：Step 4 完成后 TAA descriptor update 路径更稳定，为后续 velocity buffer 扩展打基础
+<!-- VulkanDevice descriptor layout/pool 加 VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT + VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT，让 RG greedy interval slot coloring 复用同一 VkImageView 时仍 spec 合规；无需双缓冲 descSet -->
 
 ---
 
@@ -1492,15 +1758,8 @@ public static class InputAction {
 
 ---
 
-## Issue #78 — EditorMode `OnAttach` 缺 shader cook 步骤
-
-**优先级：低**（仅当 demo / 用户项目包含 `.saglsl` 时暴露）
-
-`EditorMode::LoadProject` 切换项目时会先 `ShaderCook::CookDirectory(assets, cookCache/shaders, ...)` 处理项目 `.saglsl` shading models，再 `ApplyProjectShaderTypes`。但**启动**加载项目走 `OnAttach`（line 78-191），其调用的 `LoadProjectFiles` helper 没包含这步——意味着启动时如果项目目录里有 `.saglsl`，cook cache 不会被填、`SceneRenderer.ApplyProjectShaderTypes` 不会被调，自定义 shading model 在 startup scene 中拿不到。
-
-demo project 目前不用 `.saglsl`，因此没暴露。但为对称，`LoadProjectFiles` 应该把"shader cook + apply"也吸收进去，让 OnAttach / LoadProject 完全等价；或者由 `OnAttach` 在调用 `LoadProjectFiles` 前后显式补做这两步。
-
-**改法**：把 shader cook + `ApplyProjectShaderTypes` 包进 `LoadProjectFiles`，删 `LoadProject` 内的 `cookedShaderDir` 局部状态。注意 OnAttach 早期 GPU/Renderer 是否就绪——若有时序问题，可让 `LoadProjectFiles` 接 bool gpuReady 跳过 GPU 部分。
+## Issue #78 — EditorMode `OnAttach` 缺 shader cook 步骤 ✅ DONE
+<!-- LoadProjectFiles helper 现已包含 ShaderCook::CookDirectory + ApplyProjectShaderTypes 调用，OnAttach / LoadProject 路径等价；启动时 .saglsl shading model 能正确进入 cook cache 并在 startup scene 生效 -->
 
 ---
 
@@ -1553,3 +1812,461 @@ demo project 目前不用 `.saglsl`，因此没暴露。但为对称，`LoadProj
 ### 改动量估计
 
 约 250 行 native + 150 行 managed + 100 行 ScriptDrawer UI。
+
+---
+
+## Issue #81 — Unity 风格 Local/World Transform 脚本 API ✅ DONE
+<!-- Scene::EnsureWorldUpToDate 沿父链懒刷新 dirty 节点；ScriptApiExports rename Position→LocalPosition 八件套 + 新增 6 个 World 导出（GetWorldPosition/Set/GetWorldRotationQuat/Set/GetLossyWorldScale/GetWorldMatrix）；ScriptApiFunctionTable version=6（4→5→6）；managed Entity.cs 完全重写 transform 段（LocalPosition/WorldPosition/LocalRotation/WorldRotation/WorldRotationEuler/LossyWorldScale/WorldMatrix 属性 + Translate/Rotate/TransformPoint/InverseTransformPoint/TransformDirection 家族纯 C# 实现）；Forward/Right/Up 修为从 WorldRotation 推；新增 Space.cs (enum Self/World)；demo 三脚本迁移完成 -->
+
+<details>
+<summary>原设计（保留）</summary>
+
+原优先级：高（解锁 Issue #71 Phase 4 相机跟随 / 角色朝向脚本，并为 #70 AOT 导出冻结公开 API）
+
+当前 `Entity.GetPosition` / `SetPosition` / `GetRotationEuler` / `GetRotationQuat` / `GetScale` 全部读写 `TransformComponent`，**含义是 local（父级相对）但命名无前缀**。`Forward / Right / Up` 也用 local rotation 推导。`PlayerController.cs` demo 只能正常运行是因为 cube 没有父级（local == world）。一旦挂到旋转过的父节点下，方向向量与坐标都会错。Unity 的解决方式是显式 `localPosition` vs `position`、`transform.forward` 永远是 world、`TransformPoint` / `Translate(Space.Self|World)` 等。本 issue 全量对齐这套语义，**不保留无前缀的旧 alias**——硬切换，三个 demo 脚本一起改。
+
+### 关键问题：脚本与 UpdateTransforms 的时序
+
+[Application::Run](src/engine/Application.cpp#L138) 单帧顺序：
+1. `Physics.SyncOut` → 把 Dynamic body 写入 TransformComponent + `MarkDirty`
+2. `ScriptSystem.FixedUpdate`（物理子步内）
+3. `Mode.OnUpdate`（编辑器逻辑）
+4. `AnimationSystem.Update` → 写 `AnimatedTransformComponent`
+5. **`ScriptSystem.Update + LateUpdate`** ← 用户脚本在这里跑
+6. `active.UpdateTransforms()` ← 整棵树重算 WorldTransformComponent
+7. Render
+
+所以脚本读 `WorldTransformComponent.matrix` 时，矩阵反映的是**上一帧末尾**的状态加本帧物理 SyncOut 标脏的位置；动画或先前脚本刚改过的 entity 的世界矩阵尚未刷新。需要**懒刷新**：脚本读 world 时，沿父链向下重算所有 dirty 节点。
+
+### 目标
+
+1. C# `Entity` 公开 API 全部带 `Local*` / `World*` 前缀，**消除歧义**
+2. 新增 `WorldPosition` / `WorldRotation` 读写、`LossyWorldScale` 只读（Unity lossyScale 模式，set world scale 在父级非均匀缩放下无解，不暴露）
+3. `Forward / Right / Up` 改用 **world** rotation
+4. 新增空间转换：`TransformPoint` / `InverseTransformPoint` / `TransformDirection` / `InverseTransformDirection`
+5. 新增 `Translate(Vector3, Space)` / `Rotate(Quaternion, Space)` 便利方法
+6. 引入 `enum Space { Self, World }`
+7. **TransformDirection 家族、Translate/Rotate 是纯 C# 算术**，构建在 `WorldMatrix` getter（这一项需要 native）+ `System.Numerics` 之上，**不要新增 native 导出**
+
+### 设计
+
+#### 命名约定（Unity 风格但带 Local 前缀强制显式）
+
+| C# 旧 | C# 新 | 行为 |
+|---|---|---|
+| `GetPosition()` | `LocalPosition` 属性 | parent-relative，TransformComponent 直读直写（同旧）|
+| `SetPosition(v)` | `LocalPosition = v` | 同上 |
+| `GetRotationEuler()` | `LocalRotationEuler` | local 欧拉（度）|
+| `GetRotation()` | `LocalRotation` | local 四元数 |
+| `GetScale()` | `LocalScale` | local 缩放 |
+| —（新增） | `WorldPosition` | 走 WorldTransform，懒刷新 |
+| —（新增） | `WorldRotation` | 同上，四元数从 WorldMatrix 提取 |
+| —（新增） | `WorldRotationEuler` | 同上，转欧拉 |
+| —（新增） | `LossyWorldScale` | 只读，从 WorldMatrix 分解 |
+| —（新增） | `WorldMatrix` | `Matrix4x4`，为纯 C# 转换函数提供原料 |
+| `Forward / Right / Up` | （保留名字）| **从 `WorldRotation` 算**，修 bug |
+| —（新增） | `Translate(v, Space)` | Self = local 增量；World = 世界增量 |
+| —（新增） | `Rotate(q, Space)` | 同上语义，左乘 |
+| —（新增） | `TransformPoint(p)` | local → world，纯 C# = `Vector3.Transform(p, WorldMatrix)` |
+| —（新增） | `InverseTransformPoint(p)` | world → local，纯 C# = `Vector3.Transform(p, inv(WorldMatrix))` |
+| —（新增） | `TransformDirection(v)` | local → world（只旋转），纯 C# = `Vector3.TransformNormal` 后再忽略缩放 |
+| —（新增） | `InverseTransformDirection(v)` | 同上反向 |
+
+不保留无前缀 `Position` / `Rotation` 别名 —— 一律编译期报错，迫使迁移。Demo 三脚本一并修。
+
+#### 新 native 导出（最小集）
+
+只暴露 **C# 拿不到** 的东西，其余在 managed 侧算。
+
+```cpp
+// src/function/script/ScriptApiExports.hpp/.cpp
+// All operate via Scene::EnsureWorldUpToDate(entity) before read.
+
+// Local — 旧 API 重命名（行为不变，名字加 Local 前缀）
+void SA_Entity_GetLocalPosition     (uint64_t, float*, float*, float*);
+void SA_Entity_SetLocalPosition     (uint64_t, float,  float,  float);
+void SA_Entity_GetLocalRotationEuler(uint64_t, float*, float*, float*);
+void SA_Entity_SetLocalRotationEuler(uint64_t, float,  float,  float);
+void SA_Entity_GetLocalRotationQuat (uint64_t, float*, float*, float*, float*);
+void SA_Entity_SetLocalRotationQuat (uint64_t, float,  float,  float,  float);
+void SA_Entity_GetLocalScale        (uint64_t, float*, float*, float*);
+void SA_Entity_SetLocalScale        (uint64_t, float,  float,  float);
+
+// World — 新增
+void SA_Entity_GetWorldPosition     (uint64_t, float*, float*, float*);
+void SA_Entity_SetWorldPosition     (uint64_t, float,  float,  float);
+void SA_Entity_GetWorldRotationQuat (uint64_t, float*, float*, float*, float*);
+void SA_Entity_SetWorldRotationQuat (uint64_t, float,  float,  float,  float);
+void SA_Entity_GetLossyWorldScale   (uint64_t, float*, float*, float*);
+void SA_Entity_GetWorldMatrix       (uint64_t, float[16] out);  // glm column-major
+```
+
+WorldRotationEuler 在 C# 侧用 `QuaternionExt.ToEulerDegrees(WorldRotation)` 推；不为它单独建一个 native。
+
+#### 函数表版本：4 → 5
+
+`ScriptApiFunctionTable::version` bump，`NativeApi.ExpectedTableVersion` 同步。新字段**追加到末尾**，保持序列化稳定，旧字段位置不动（其实是 rename Position → LocalPosition，C++ 函数实体也 rename，但表中槽位 0..7 仍是 transform 八件套，只是名字改了）。
+
+> 关键决策：让旧 `Entity_GetPosition` 槽位重命名为 `Entity_GetLocalPosition`，不留废弃槽位。Managed DLL 必须 rebuild（per project memory note "ScriptApiFunctionTable versioning"）。
+
+#### Scene::EnsureWorldUpToDate（核心）
+
+```cpp
+// src/function/scene/Scene.hpp/.cpp
+class Scene {
+public:
+    // Walks parent chain from `entity` up to root; recomputes WorldTransform
+    // for any node whose dirty flag is true, top-down. After return, the entity
+    // and all its ancestors have fresh WorldTransformComponent.matrix.
+    // Cost: O(depth) — typically <5 for game scenes.
+    void EnsureWorldUpToDate(entt::entity entity);
+};
+```
+
+实现：
+1. 沿 `HierarchyComponent::parent` 收集祖先链到 root（`std::array<entt::entity, 32>` stack-alloc，超出 fallback heap）
+2. 反向（root→leaf）扫描，遇到 dirty 节点用 `UpdateTransforms` 同一段逻辑重算（含 AnimatedTransformComponent 优先级）
+3. 不更新 entity 的子树 —— 只走"读自己 world"路径
+
+调用点：所有 `SA_Entity_GetWorld*` 进入时先调一次。
+
+#### SetWorldPosition 实现要点
+
+```cpp
+void SA_Entity_SetWorldPosition(uint64_t id, float wx, float wy, float wz) {
+    auto e = static_cast<entt::entity>(id);
+    auto& reg = g_ctx.scene->Registry();
+    if (!reg.valid(e)) return;
+    auto* t = reg.try_get<TransformComponent>(e);
+    if (!t) return;
+
+    glm::mat4 parentInv(1.f);
+    if (auto* h = reg.try_get<HierarchyComponent>(e); h && h->parent != entt::null) {
+        g_ctx.scene->EnsureWorldUpToDate(h->parent);
+        const auto& pw = reg.get<WorldTransformComponent>(h->parent).matrix;
+        parentInv = glm::inverse(pw);
+    }
+    const glm::vec4 localPos = parentInv * glm::vec4(wx, wy, wz, 1.f);
+    t->position = glm::vec3(localPos);
+    g_ctx.scene->MarkDirty(e);
+}
+```
+
+SetWorldRotation 类似：`newLocalQuat = inverse(parentWorldQuat) * worldQuat`，其中 `parentWorldQuat = glm::quat_cast(extractRotation(parentWorld))`，extractRotation 用 `glm::decompose` 或自定义除以 scale。
+
+#### Translate / Rotate 在 C# 侧
+
+```csharp
+public void Translate(Vector3 delta, Space space = Space.Self) {
+    if (space == Space.World) {
+        WorldPosition += delta;
+    } else {
+        // Self-space: rotate delta by current local rotation, add to LocalPosition
+        var rotated = Vector3.Transform(delta, LocalRotation);
+        LocalPosition += rotated;
+    }
+}
+
+public void Rotate(Quaternion delta, Space space = Space.Self) {
+    if (space == Space.World) {
+        WorldRotation = delta * WorldRotation;
+    } else {
+        LocalRotation = LocalRotation * delta;
+    }
+}
+```
+
+#### TransformPoint 家族（纯 C#）
+
+```csharp
+public Vector3 TransformPoint(Vector3 localPoint) {
+    Matrix4x4 m = WorldMatrix;
+    return Vector3.Transform(localPoint, m);
+}
+public Vector3 InverseTransformPoint(Vector3 worldPoint) {
+    if (!Matrix4x4.Invert(WorldMatrix, out var inv)) return worldPoint;
+    return Vector3.Transform(worldPoint, inv);
+}
+public Vector3 TransformDirection(Vector3 localDir) {
+    // 用 WorldRotation 而不是 WorldMatrix 来避免父级缩放污染方向向量
+    return Vector3.Transform(localDir, WorldRotation);
+}
+public Vector3 InverseTransformDirection(Vector3 worldDir) {
+    return Vector3.Transform(worldDir, Quaternion.Conjugate(WorldRotation));
+}
+```
+
+回答用户问题：**对，TransformPoint / TransformDirection / InverseTransform* / Translate / Rotate 全部纯 C# 实现**，只靠 `WorldMatrix` getter + `LocalPosition`/`LocalRotation`/`WorldRotation` 这几个原子 native 调用。每次只一次跨界 + System.Numerics 矩阵代数。
+
+### 文件清单
+
+```
+src/function/scene/Scene.hpp                — +EnsureWorldUpToDate decl
+src/function/scene/Scene.cpp                — +EnsureWorldUpToDate impl
+src/function/script/ScriptApiExports.hpp    — rename Entity_Get/SetPosition→Local; +6 World 导出; version 4→5
+src/function/script/ScriptApiExports.cpp    — rename impl; +6 World impl; update SA_Script_BuildFunctionTable
+managed/StellarAlia.Runtime/NativeApi.cs    — bump ExpectedTableVersion; rename + 新增 SA_* wrappers; 更新 ScriptApiFunctionTable 字段顺序
+managed/StellarAlia.Runtime/Entity.cs       — 完全重写 transform 段；删旧 GetPosition 等；新增 Local*/World* properties + Translate/Rotate/TransformPoint 家族
+managed/StellarAlia.Runtime/Space.cs        — 新文件，enum Space { Self, World }
+demo_project/assets/scripts/BouncingRotator.cs   — GetPosition()→LocalPosition; GetRotationEuler()→LocalRotationEuler 等
+demo_project/assets/scripts/RotatingObstacle.cs  — 同上
+demo_project/assets/scripts/PlayerController.cs  — 无需改动（只用 RigidBody，不碰 Transform）
+docs/architecture.md                        — 在 "Transform Hierarchy" 段后追加 "Script Transform API" 小节
+```
+
+### 实施步骤
+
+- [ ] **Step 1** — `Scene::EnsureWorldUpToDate` 实现 + 单测（建议在 `tests/` 加一个 fixture：3 层父子链，root dirty → 调 EnsureWorldUpToDate(grandchild) → 三个 world 都新鲜）
+  - 验证：编辑器现有功能（gizmo、TransformDrawer）行为不变
+- [ ] **Step 2** — `ScriptApiExports` rename + 6 个 World 导出 + bump version + 更新 build table
+  - 验证：C++ 编译通过；旧 `SA_Entity_GetPosition` 完全不存在（grep 0 命中）
+- [ ] **Step 3** — `NativeApi.cs` 镜像调整：`ExpectedTableVersion = 5`；`ScriptApiFunctionTable` 结构字段对齐；wrapper 方法 rename + 新增
+  - 验证：managed DLL 编译通过；ScriptBridgeEntry 启动时版本校验不报警
+- [ ] **Step 4** — `Space.cs` 新文件 + `Entity.cs` transform 段完全重写
+  - 验证：managed DLL 编译通过；XML doc 注释齐全（避免 CS1591）
+- [ ] **Step 5** — 迁移三个 demo 脚本到新 API
+  - 验证：进 Play mode，BouncingRotator 仍然上下浮动 + 自转；RotatingObstacle 仍然旋转；PlayerController WASD 移动正常
+- [ ] **Step 6** — 父子链回归测试：把一个 demo entity 挂到一个旋转 60° 的父节点下，验证：
+  - `LocalPosition` 不变
+  - `WorldPosition` 反映父级旋转
+  - `Forward` 指向世界 −Z 经过父级旋转后的方向
+  - `TransformPoint((0,0,0))` 返回父级原点
+- [ ] **Step 7** — `architecture.md` 补充 "Script Transform API" 小节，记录 Local/World 语义 + 帧序时序 + EnsureWorldUpToDate 懒刷新策略
+
+### 边界与约束
+
+| 场景 | 处理 |
+|---|---|
+| Entity 无 parent | `parentWorld = identity`，World ≡ Local，set 直接写 LocalPosition |
+| 父级非均匀缩放下设 WorldRotation | 只提取父级 rotation 分量做 inverse；结果矩阵可能视觉上歪斜，是 Unity 同款限制，文档说明 |
+| World scale setter | **不暴露**。用户需手动调整 LocalScale 和父级 scale 链 |
+| FixedUpdate 中读 world | 同样调 EnsureWorldUpToDate；物理 SyncOut 已 MarkDirty，刷新逻辑一致 |
+| AnimatedTransformComponent 存在 | EnsureWorldUpToDate 走和 `Scene::UpdateTransforms` 同一段逻辑（Animated 优先）|
+| Entity 无 TransformComponent | World 读返回 (0,0,0)/identity；set 静默 no-op（保留现有错误兜底约定）|
+| 旧脚本编译 | 硬切，编译错误。迁移路径明确：`GetPosition()` → `LocalPosition`；只动 3 个 demo 文件 |
+| `Forward / Right / Up` 行为变化 | **如果用户已依赖错误的 local 推导**，会破坏旧行为。Demo 里没人用这三个，社区脚本（如果有）需迁移到 `LocalRotation` 自己算 |
+| ScriptApiFunctionTable 字段顺序 | 严格 append-only，C# 镜像跟着改；版本号 bump 强制双端同步 |
+| 中间运行的 native exe | 函数表 rename + 新增字段，bin/StellarAlia.exe 必须重链；managed DLL 必须 rebuild（per memory note）|
+
+### 受益 issues
+
+- **Issue #71 Phase 4 / 后续脚本 demo**：相机跟随 (`camera.WorldPosition = target.WorldPosition + offset`)、character look-at (`Self.WorldRotation = LookRotation(target - Self.WorldPosition)`) 现在可写
+- **Issue #70 游戏发布 + AOT**：公开 script API 命名冻结点。AOT 编译前定下 Local/World 语义，避免发布后破坏性改名
+- **Issue #80 嵌套字段**：序列化层无关，但 transform 字段属性的可见性约定（Inspector 显示 local）由本 issue 文档化后清晰
+
+### 不做
+
+- `transform.parent` 读写（hierarchy mutation 由 SceneHierarchy 命令系统负责，脚本侧暂不开）
+- `LossyWorldScale` 可写（Unity 也不行）
+- `Quaternion.LookRotation` / `Quaternion.FromToRotation` —— 纯 C# 扩展，可作为 `QuaternionExt` 后续追加，不阻塞本 issue
+- 性能优化（如把 EnsureWorldUpToDate 改成基于 dirty-bit 跳过未脏链）—— 等真有 profile 数据再做
+
+### 改动量估计
+
+约 130 行 native（Scene::EnsureWorldUpToDate ~30 + 6 个 World 导出 ~80 + 函数表 ~20）+ 180 行 managed（NativeApi 同步 + Entity.cs 重写 ~120 + Space.cs ~10 + Translate/Rotate/TransformPoint 家族 ~50）+ 30 行 demo 脚本迁移 + 50 行 architecture.md 文档。
+
+</details>
+
+---
+
+## Issue #82 — 脚本项目 managed 链接库本地化 ✅ DONE
+<!-- Application::GenerateIdeProjectFiles 新增 CopyManagedLibsToProject helper（复制 StellarAlia.Runtime.{dll,pdb,xml} 到 {projectDir}/Library/managed/）+ LoadGitignoreTemplate helper；Directory.Build.props 改用 $(MSBuildThisFileDirectory)Library\managed 相对路径，可提交；新增末尾 WriteFileIfMissing(.gitignore) 写入；ProjectManager::CreateProject 同步复制 .gitignore.template；assets/templates/project/.gitignore.template 内容更新（删 Directory.Build.props，加 Library/ + bin/）；demo_project 修复 .gitignore + Directory.Build.props。运行时仍走 BIN_DIR/managed 不变 -->
+
+---
+
+## Issue #83 — Skinning 工业级补全（伞 issue / Roadmap）
+
+**优先级：高（启动时机：#46-#49 后处理系列全部完成后；预计总工程量 9-11 周）**
+
+### 背景
+
+调研发现 StellarAlia 当前 skinning 仅覆盖"vertex shader LBS + 单 clip 播放"基础路径，距离 UE5 / Unity / Frostbite 现代角色动画系统差距较大。本 issue 把工业级补全拆成 7 个 phase，每个 phase 单独成一个落地 issue（编号待分配，姑且记为 #83.P1–#83.P7）。**本 #83 是路线图与依赖图，不包含实施细节**；每个 phase 真正动手时再单独 `/plan`。
+
+### 启动前置
+
+- **必须**：#46 Phase 1（Motion Blur Camera Mode）落地 — 给后面 Phase 1 一个 motion blur Phase 2 的明确消费方
+- **必须**：#47-#49 计划状态明确（不一定全做完，但不能与 skinning 工程同时抢渲染器改动窗口）
+- **建议**：#19 拆出的 ".saskel / .sanim source asset + 三级解析" 跑通到能 cook（如果 #19 一直没动，归并到本路线 Phase 1）
+
+### 关键架构原则
+
+整个路线遵循三条不可妥协的设计约束：
+
+1. **AnimationSystem CPU evaluate + GPU LBS 仍是主路径**——不重写到 compute skinning，除非 Phase 7 性能压力出现
+2. **每一个 phase 都要在结束时跑通 demo_project 现有角色动画**（不引入回归）
+3. **PrevBonePose double-buffer（Phase 1 落地）是后续所有 phase 的公共基础设施**——一旦定下 layout，所有后续 phase 共用
+
+### 路线
+
+#### Phase 1 — 基础设施（残余 ~3-4 天）
+
+**目标**：搭好后续 6 个 phase 的公共基础设施。本 phase 不产生用户可见效果（除了渲染稳定性提升），但所有后续 phase 都依赖它。
+
+- ~~**PrevBonePose double-buffer**~~ — ✅ **已在 #84 完成**（吸收路径）。`SkinnedMeshComponent` 已含 `skinMatricesBufferPrev` + `velocityDescSet`；`AnimationSystem::Update` swap + force-reseed 已落地
+- **mat4 → mat3x4 压缩**：bone matrix 在 SSBO 里改成 3 行 4 列存储，省 25% 带宽（double-buffer 后实际省 50% 因为乘 2）；skin_deform.glsl + skin_deform_dual.glsl 同步加 helper
+- **Static Pose Skip**：AnimationSystem 检测 clip 已 paused 或 evaluate 后 pose 与上帧字节相同 → 不重新上传 SSBO（标记 `lastUploadedHash`）。Idle 角色 SSBO 上传降为 0
+- **SkeletonAsset 一级化**：`.saskel` 资产格式定稿（脱离 DeriveSkinID 推导），cook tool 输出独立 `<uuid>.saskel`，SkinnedMeshComponent 可显式覆盖 skeleton（吸收 #19 Section F）
+
+**关键交付物（残余）**：skin_deform.glsl 用 mat3x4 + .saskel 资产格式 + AnimationSystem upload 静态 pose 短路
+
+**受益**：~~#46 Phase 2~~（已 unlock）、TAA 升级、cloth/hair 未来集成；其他 phase 的隐式依赖底座
+
+#### Phase 2 — 动画运行时基础（~1.5 周）
+
+**目标**：单 clip 播放 → "可以做完整动作游戏前 70% 需求"的混合播放层。
+
+- **Clip Crossfade**：`AnimatorComponent` 加 `fromClip / toClip / blendTime / blendProgress`；EvaluateAll 在 blend 期间对两 clip 各 evaluate 一次然后 Lerp pose（position lerp / rotation slerp / scale lerp）。**0.15s 默认 crossfade 是工业基线**
+- **Animation Events / Notify**：`.sanim` 加 events 数组（time, name, payload string）；AnimationSystem 跨帧扫描 [lastTime, currTime] 内 events，推到一个 `g_ctx.scene.PendingAnimEvents` 队列；ScriptSystem 拉取并按 entity 派发 `OnAnimEvent(name, payload)` 给 C# 脚本
+- **Root Motion**：`.sanim` 可标记 root bone（root motion extraction target）；evaluate 时把 root bone 的 translation/rotation **从 pose 拿出来**写到 entity Transform（而不是写入 bone matrix），bone 自身保留为相对静止。Editor 控件选 "Apply Root Motion / Keep In Place"
+- **ACL 集成**：第三方库 [Animation Compression Library](https://github.com/nfrechette/acl)（MIT）；MeshImporter 把 raw keyframe 通过 acl_compressor 编码成 ACL stream；运行时 `acl_decompress` 在 EvaluateAll 内替换原 SampleKeyframes。资源体积 ~95% 缩减
+
+**关键交付物**：crossfade 体验立竿见影；ACL 让 demo_project 资源 -90%；root motion 解锁攻击位移
+
+**受益**：脚本侧立即可以做"按 W 跑步动画 + 释放 W 渐回 idle"；攻击动作位移和音效同步打通
+
+#### Phase 3 — Blend Tree 与 Layered Animation（~1 周）
+
+**目标**：让动画"参数驱动"——locomotion blend、上下半身分离。
+
+- **1D Blend Tree**：`Blend1DNode { float param; clip[] children; threshold[] }`；运行时按 param 在 threshold 段间 lerp。典型用例：walk_speed 0→3 m/s 在 idle/walk/run 三 clip 间插值
+- **2D Blend Tree**（Cartesian / FreeformDirectional 两种）：8 方向 strafe locomotion 经典用例
+- **Animation Mask + Layered Playback**：`AnimatorComponent.layers[]`，每层有 weight + bone mask（bitset 标记哪些 bone 此层覆盖）；EvaluateAll 按 layer 顺序 over-write 或 additive 混合。Upper body Layer 用 spine_01 之上 bone mask 可以独立播射击动画
+
+**关键交付物**：Locomotion 流畅过渡；射击/挥剑 upper body 与跑动 lower body 解耦
+
+**前置**：Phase 1 PrevBonePose 已就绪；Phase 2 Crossfade 已就绪（layer 内部仍用 crossfade）
+
+#### Phase 4 — State Machine + Animator Editor（~2 周）
+
+**目标**：从"代码驱动 PlayClip"过渡到"数据驱动状态切换"，对齐 UE AnimGraph / Unity Animator Controller。
+
+- **AnimGraph 运行时**：状态图序列化到 `.saanimator` 资产（节点 = State，边 = Transition with condition）；条件支持 `param > value` / `bool param` / `trigger`；运行时按事件驱动状态切换
+- **Animator Editor**（吸收 X-3 / 旧 #31）：ImNodes 节点图 + ImGuizmo 状态盒摆放 + transition 连线 + parameters panel
+- **集成 Phase 2 / Phase 3**：State 内部可以是单 clip / blend tree / 子 state machine；transition 期间走 Crossfade
+
+**关键交付物**：完整 AnimGraph 数据流；编辑器可视化设计角色行为
+
+**前置**：Phase 2 + Phase 3 全部就绪；ImNodes 库引入
+
+#### Phase 5 — IK Solvers（~1 周）
+
+**目标**：让角色"对环境响应"——脚踩地面、眼睛追物体、武器握把对齐。
+
+- **Two-Bone IK**：解 elbow / knee 一对骨头朝 target；闭式解，~30 行代码
+- **Look-at IK**：单 bone 朝 target 的 rotation 修正，with constraints (cone limit)
+- **Foot IK Pipeline**：raycast 检测脚下地面 → 调整 IK target 抬升脚 → two-bone IK solve 膝盖 → root rotation 修正
+- **CCD / FABRIK**：不做 v1（应用面窄）；如果未来需要"长链 IK（绳/触手）"再补
+
+**关键交付物**：`IKConstraintComponent`（target bone + chain length + weight）；AnimationSystem 在 EvaluateAll 末尾、上传前跑 IK pass
+
+**前置**：Phase 1 PrevBonePose 已就绪（IK 修改 currPose，prevPose 反映上帧的 IK 结果，motion blur 才连贯）
+
+#### Phase 6 — Morph Target + Retargeting（~2 周）
+
+**目标**：脸部动画 + 跨骨架动画复用。
+
+- **Morph Target / Blend Shape**：
+  - `.samesh` 格式扩展：附加 N 个 morph delta（每个 ~vertex delta + normal delta）
+  - SkinnedMeshComponent 加 `morphWeights[N]`
+  - vertex shader 在 skin 之前先按 weights 应用 deltas（额外 SSBO + 顶点端循环）
+  - Editor 拖 weight slider 实时变形 + 序列化到 .sascene
+- **Retargeting**：UE5 IK Rig 思路简化版
+  - 定义 "BoneAlias"（Head / Spine / LeftUpperArm / ...）映射两套 skeleton 的对应 bone
+  - 运行时把 source clip 的 bone-by-name 改成按 alias 找 target skeleton 的对应 bone，复用 pose
+  - 编辑器配置 `.saretarget` 资产（source skeleton + target skeleton + alias map）
+
+**关键交付物**：脸部表情动画跑通；UE 角色资源可在 StellarAlia 自定义骨骼角色上复用
+
+#### Phase 7 — 性能优化 + 渲染集成（~1 周）
+
+**目标**：解决"100 个 NPC 时的 CPU/GPU 瓶颈"+ "其他 feature 想读 skinned 顶点位置"。
+
+- **Skinned Mesh LOD**：远处 NPC 跳到简化骨架（mesh LOD 切换时同步骨架级别）+ 动画更新率降频（远处每 2-4 帧 evaluate 一次，pose 插值过渡）
+- **GPU Compute Skinning Prepass**（可选）：把 vertex shader 内联 LBS 移到 compute pass，输出 skinned vertex buffer 到 RG handle `handles.skinnedVertices`；下游 cloth / hair / accurate shadow caster / future ray-traced features 都可读
+- **Bone Gizmo 可视化**（吸收 X-2）：球 + 锥绘制骨架；EditorMode debug overlay 可开
+- **Profile + 优化 hot path**：1000 bone 角色 evaluate 时间目标 < 0.5ms/frame
+
+**关键交付物**：百级角色场景性能稳定；skinned vertex 数据可被其他 feature 消费
+
+### 依赖图
+
+```
+Phase 1 (基础设施) ───┬──→ Phase 2 (Crossfade/Events/Root/ACL)
+                     │         │
+                     │         ├──→ Phase 3 (Blend Tree/Layers)
+                     │         │         │
+                     │         │         └──→ Phase 4 (State Machine + Editor)
+                     │         │
+                     │         └──→ Phase 5 (IK Solvers)
+                     │
+                     ├──→ Phase 6 (Morph + Retargeting)  ← 独立分支
+                     │
+                     └──→ Phase 7 (Perf + Compute Skinning)  ← 独立分支
+                                  │
+                                  └──→ unlock: cloth / hair / ray-traced shadow
+```
+
+Phase 1 必须先做。Phase 2-7 中 P6 / P7 可与 P3-P5 并行（只要 Phase 1 done）。
+
+### 总工程量估算
+
+| Phase | 估时 | C++ 代码量 | GLSL/Shader | 资产格式改动 | 第三方依赖 |
+|---|---|---|---|---|---|
+| P1 基础设施 | ~1 周 | ~400 行 | ~30 行 | .saskel 资产格式 | — |
+| P2 运行时基础 | ~1.5 周 | ~700 行 | — | .sanim events + ACL stream | **ACL** (header-only) |
+| P3 Blend Tree + Layers | ~1 周 | ~500 行 | — | AnimatorComponent 扩展 | — |
+| P4 State Machine + Editor | ~2 周 | ~1200 行 | — | .saanimator 资产 | **ImNodes** |
+| P5 IK Solvers | ~1 周 | ~400 行 | — | IKConstraintComponent | — |
+| P6 Morph + Retargeting | ~2 周 | ~800 行 | ~40 行 | .samesh v6 morph data + .saretarget | — |
+| P7 Perf + Compute Skin | ~1 周 | ~600 行 | ~80 行 | mesh LOD bone map | — |
+| **总计** | **~9.5 周** | **~4600 行** | **~150 行** | 4 个新格式 / 1 个升级 | ACL + ImNodes |
+
+### 与 todo 现有条目的吸收
+
+启动本路线时一并 close 以下既有短条目：
+
+- **X-2**（原 #27 骨骼球+锥绘制）→ 并入 P7 Bone Gizmo
+- **X-3**（原 #31 animator 编辑器 imguizmo）→ 并入 P4 Animator Editor
+- **#19 拆出的"Animation 运行时三级解析"**：如未独立落地，并入 P1 SkeletonAsset 一级化
+
+### 不做（明确 out-of-scope，留更远 issue 或不做）
+
+- **Animation Streaming**（动画从磁盘按需 stream，不全部驻留内存）— 项目规模未达
+- **Motion Matching**（数据驱动找 best-fit 动画帧）— 工程量极大，需要专用动画师 + 算法支持，留作 v3.0 远期
+- **Procedural Animation / Inverse Dynamics**（rag-doll 模拟）— 不属于动画系统，归 Jolt 物理范畴
+- **Animation Authoring Tools**（在 editor 里编辑 .sanim）— StellarAlia 定位是 runtime + 美术管线消费 DCC（Blender/Maya）产出，不重做 DCC
+
+### 受益（整个路线全部完成后）
+
+- **#46 Phase 2 Motion Blur per-object velocity**：P1 PrevBonePose 直接 unlock
+- **#42 TAA per-object velocity 修复**：同上
+- **#48 SSR per-pixel velocity 不脱影**：P1 unlock
+- **#33 贝塞尔曲线相机**：P4 State Machine 思路可移植到 camera spline animator
+- **#23 帧率优化伞**：P7 Skinned LOD + 静态 pose skip + mat3x4 综合提速
+- **未来 cloth / hair simulation**：P7 GPU Compute Skinning Prepass 是输入源
+- **未来动作游戏 demo**：P2-P5 完整覆盖动作游戏 90% 动画需求
+
+### 时间安排建议
+
+| 月份相对位置 | Phase | 备注 |
+|---|---|---|
+| #49 完成 + 0 周 | P1 启动 | 立即给 #46 Phase 2 / TAA 升级做基础设施 |
+| +1 周 | P2 启动（P1 done） | ACL 集成可能稍慢；并行做 #46 Phase 2 落地 |
+| +3 周 | P3 启动 | |
+| +4 周 | P4 + P5 并行启动 | P5 较小可塞缝 |
+| +6 周 | P4 完成；P6 启动 | |
+| +9 周 | P7 收尾 | 全部完成约 10 周 |
+
+---
+
+
+## Issue #85 — TAA 读 handles.velocity（unjittered velocity 接口统一）✅ DONE
+<!-- FrameUniforms +mat4 currUnjitteredViewProj（size 640→704），ApplyCameraToUniforms 写入；VelocityPrepass shaders rasterize 仍用 jittered viewProj（matches GBuffer depth），velocity 输出改用 currUnjitteredViewProj × prevViewProj → handles.velocity 接口语义冻结为 unjittered NDC velocity（对齐 UE5 nonJitteredProjMatrix / HDRP nonJitteredVP）；taa_resolve.frag 加 set=2 binding=3 t_Velocity，删 WorldPos+jitter 反偏移函数，prevUV = v_TexCoord - texture(t_Velocity).rg 直接 reproject → TAA 移动 rigid body / skinned mesh 不再 ghosting；VelocityPrepassFeature::AddPasses 门控扩展为 motionBlur OR TAA enabled（未来 #48 SSR 加 OR 条件即可） -->
+
+---
+
+## Issue #84 — Motion Blur Phase 2（Per-Object Velocity Writes）✅ DONE
+<!-- VelocityPrepassFeature 独立 prepass 跑在 GBuffer 后、SSAO 前，仅当 motion blur enabled 时 AddPass（disabled 时 RG 不分配 velocity 物理槽）；per-draw push currModel+prevModel = 128B；skinned 路径走 set=3 (curr/skinData/prev) 通过 velocity_prepass_skinned.vert + skin_deform_dual.glsl 双 pose 采样；MotionBlurFeature 删除 MB_Velocity pass（被 prepass 取代）+ 删除 motion_blur_velocity.frag；SkinnedMeshComponent 加 skinMatricesBufferPrev + velocityDescSet + poseSeeded + lastEvalClipId 实现 PrevBonePose double-buffer；AnimationSystem::Update 内 pointer swap + 三个 force-reseed（first-write/mesh swap/clip swap）+ UPDATE_AFTER_BIND-safe 的 re-bind；EvaluateAll (scrubbing) 不动 prev；PrevTransformComponent auto-emplaced by Scene::CreateEntity，UpdateTransforms 顶部 snapshot + 末尾 first-frame seed → 静态物体也走 prepass 自动产生 camera velocity。吸收 #83 P1 的 PrevBonePose 子项（mat3x4/static skip/saskel 仍留 P1 残余）-->
+
+---
+

@@ -7,6 +7,7 @@
 #include "function/renderer/SceneRenderer.hpp"
 #include "function/scene/Components.hpp"
 #include "input/EditorInputMaps.hpp"
+#include "function/input/ActionMapJsonParser.hpp"
 #include "platform/input/GLFWInputProvider.hpp"
 #include "platform/rhi/vulkan/VulkanDevice.hpp"
 #include "platform/rhi/vulkan/VulkanCommandList.hpp"
@@ -58,6 +59,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
@@ -79,11 +81,47 @@ void EditorMode::OnAttach(Application& app) {
     m_app = &app;
 
     // ── Input maps ────────────────────────────────────────────────────────────
+    // Builtin defaults live as .sainputmap assets under engine/assets/editor/ so
+    // user-side .sainputmap and editor-side share a single ActionMapJsonParser
+    // codec (Issue #71). MakeViewportMaps() remains as fallback when builtin
+    // files are missing or malformed (e.g. corrupted install).
     InputSystem& input = app.GetInputSystem();
-    m_shortcutConfig.Load(fs::path(StellarAliaApp::BIN_DIR) / "editor_shortcuts.json");
-    input.RegisterMaps(m_shortcutConfig.ApplyTo(MakeViewportMaps()));
+    {
+        std::vector<ActionMapDef> defaults;
+        const fs::path editorAssets = fs::path(app.GetDesc().engineAssetsDir) / "editor";
+        bool loadedAll = true;
+        for (const char* fileName : {"EditorGlobal.sainputmap",
+                                     "Viewport.sainputmap",
+                                     "TextInput.sainputmap",
+                                     "UI.sainputmap"}) {
+            std::ifstream f(editorAssets / fileName, std::ios::binary);
+            if (!f) { loadedAll = false; break; }
+            std::stringstream ss; ss << f.rdbuf();
+            ActionMapDef def;
+            if (!ActionMapJsonParser::Parse(ss.str(), def)) { loadedAll = false; break; }
+            defaults.push_back(std::move(def));
+        }
+        if (!loadedAll) {
+            SA_LOG_WARN("EditorMode: builtin .sainputmap missing/invalid — falling back to hardcoded MakeBuiltinEditorMaps()");
+            defaults = MakeBuiltinEditorMaps();
+        }
+        m_shortcutConfig.Load(fs::path(StellarAliaApp::BIN_DIR) / "editor_shortcuts.sainputmap");
+        input.RegisterMaps(m_shortcutConfig.ApplyTo(defaults));
+    }
+    // Push order: EditorGlobal first (stays in stack across PIE — Ctrl+S etc.
+    // remain reachable via Viewport's passthrough=true). Viewport on top is
+    // popped on PIE entry so the player's game inputmap takes over WASD.
+    input.PushMap("EditorGlobal");
     input.PushMap("Viewport");
-    m_viewportActive = true;
+    m_editorGlobalPushed = true;
+    m_viewportActive     = true;
+    // Diagnostic: stack must be [EditorGlobal, Viewport(passthrough=true)] for
+    // Ctrl+S/F8 to fire during PIE. If "Viewport on top of EditorGlobal" is
+    // missing here, Phase 3b builtin files weren't loaded — check that
+    // <engineAssetsDir>/editor/{EditorGlobal,Viewport}.sainputmap exist and
+    // that Viewport's "passthrough" field is true.
+    SA_LOG_INFO("InputSystem: stack-top='{}'  (expected 'Viewport' on top of 'EditorGlobal')",
+                std::string(input.GetTopMapName()));
 
     // ── Bind asset-registry pointer + scan engine-side templates once ───────
     m_assetRegistry = &app.GetAssetRegistry();
@@ -343,7 +381,7 @@ void EditorMode::OnDetach() {
         auto* glfwWin = static_cast<GLFWwindow*>(m_app->GetNativeWindow());
         if (glfwWin) glfwSetDropCallback(glfwWin, nullptr);
     }
-    const fs::path defaultPath = fs::path(StellarAliaApp::BIN_DIR) / "editor_shortcuts.json";
+    const fs::path defaultPath = fs::path(StellarAliaApp::BIN_DIR) / "editor_shortcuts.sainputmap";
     if (m_shortcutConfig.IsDirty() && m_shortcutConfig.GetConfigPath() != defaultPath)
         m_shortcutConfig.Save();
     if (m_iconCache) { m_iconCache->Shutdown(); m_iconCache.reset(); }
@@ -454,9 +492,11 @@ void EditorMode::OnUpdate(float dt) {
     if (wantKeys && !m_textInputMapPushed) {
         input.PushMap("TextInput");
         m_textInputMapPushed = true;
+        SA_LOG_INFO("InputSystem: TextInput PUSHed (ImGui wants keys) — global hotkeys suspended");
     } else if (!wantKeys && m_textInputMapPushed) {
         input.PopMap();
         m_textInputMapPushed = false;
+        SA_LOG_INFO("InputSystem: TextInput POPped — global hotkeys resumed");
     }
 
     // Release cursor capture while the transform gizmo is being dragged so the
@@ -728,6 +768,16 @@ void EditorMode::OnPlayStateChanged(EnginePlayState newState) {
             input.PopMap();
             m_viewportActive = false;
         }
+        // Activate the project's default game inputmap (first registered .sainputmap)
+        // so scripts see named actions immediately on PIE entry (Issue #71).
+        const std::string& gameMap = input.GetDefaultGameMapName();
+        if (!gameMap.empty()) {
+            input.PushMap(gameMap);
+            m_gameMapPushed = true;
+        }
+        SA_LOG_INFO("InputSystem (PIE entry): stack-top='{}' — for Ctrl+S to fire, "
+                    "project .sainputmap must have passthrough=true",
+                    std::string(input.GetTopMapName()));
         m_commandManager.PushPlayBoundary();
         // Clear pending on Play start — OnPlayStart already compiles the scripts.
         // Keep pending through Paused so changes accumulate until Stop.
@@ -743,6 +793,11 @@ void EditorMode::OnPlayStateChanged(EnginePlayState newState) {
         m_ctx.scene    = &m_app->GetEditorScene();
         m_ctx.registry = &m_ctx.scene->Registry();
 
+        // Pop the game inputmap pushed on PIE entry (if any) before restoring Viewport.
+        if (m_gameMapPushed) {
+            input.PopMap();
+            m_gameMapPushed = false;
+        }
         if (!m_viewportActive) {
             input.PushMap("Viewport");
             m_viewportActive = true;
@@ -1038,12 +1093,15 @@ void EditorMode::CookProjectShaders() {
 
 CameraData EditorMode::GetCameraData(float aspectRatio) const {
     if (m_app->GetPlayState() != EnginePlayState::Editing) {
-        // Game / Paused: use the scene's active camera entity.
+        // Game / Paused: use the scene's active camera entity. Must read the
+        // *active* scene (PIE snapshot during Play, editor scene when Paused
+        // pre-Play). GetScene() always returns the editor scene, so any
+        // script-driven camera move on the game-scene camera would be invisible.
         const uint32_t refW = 1920;
         const uint32_t refH = (aspectRatio > 0.f)
             ? static_cast<uint32_t>(static_cast<float>(refW) / aspectRatio)
             : refW;
-        return SceneRenderer::ExtractCamera(m_app->GetScene(), refW, refH);
+        return SceneRenderer::ExtractCamera(m_app->GetActiveScene(), refW, refH);
     }
     return m_camera.GetCameraData(aspectRatio);
 }

@@ -167,6 +167,18 @@ nlohmann::json SceneSerializer::SerializeToJson(const Scene& scene) {
             ppj["focalLength"]      = pp.focalLength;
             ppj["dofSamples"]       = pp.dofSamples;
             ppj["maxCocPx"]         = pp.maxCocPx;
+            ppj["motionBlurEnabled"]  = pp.motionBlurEnabled;
+            ppj["motionBlurStrength"] = pp.motionBlurStrength;
+            ppj["motionBlurSamples"]  = pp.motionBlurSamples;
+            ppj["motionBlurMaxSpeed"] = pp.motionBlurMaxSpeed;
+            ppj["vignetteEnabled"]    = pp.vignetteEnabled;
+            ppj["vignetteIntensity"]  = pp.vignetteIntensity;
+            ppj["vignetteSmoothness"] = pp.vignetteSmoothness;
+            ppj["caEnabled"]          = pp.caEnabled;
+            ppj["caStrength"]         = pp.caStrength;
+            ppj["filmGrainEnabled"]   = pp.filmGrainEnabled;
+            ppj["filmGrainIntensity"] = pp.filmGrainIntensity;
+            ppj["filmGrainSize"]      = pp.filmGrainSize;
             wj["postProcess"]       = std::move(ppj);
         }
         root["world"] = std::move(wj);
@@ -477,6 +489,18 @@ bool SceneSerializer::DeserializeFromJson(Scene& scene, const nlohmann::json& ro
             pp.focalLength      = ppj.value("focalLength",      pp.focalLength);
             pp.dofSamples       = ppj.value("dofSamples",       pp.dofSamples);
             pp.maxCocPx         = ppj.value("maxCocPx",         pp.maxCocPx);
+            pp.motionBlurEnabled  = ppj.value("motionBlurEnabled",  pp.motionBlurEnabled);
+            pp.motionBlurStrength = ppj.value("motionBlurStrength", pp.motionBlurStrength);
+            pp.motionBlurSamples  = ppj.value("motionBlurSamples",  pp.motionBlurSamples);
+            pp.motionBlurMaxSpeed = ppj.value("motionBlurMaxSpeed", pp.motionBlurMaxSpeed);
+            pp.vignetteEnabled    = ppj.value("vignetteEnabled",    pp.vignetteEnabled);
+            pp.vignetteIntensity  = ppj.value("vignetteIntensity",  pp.vignetteIntensity);
+            pp.vignetteSmoothness = ppj.value("vignetteSmoothness", pp.vignetteSmoothness);
+            pp.caEnabled          = ppj.value("caEnabled",          pp.caEnabled);
+            pp.caStrength         = ppj.value("caStrength",         pp.caStrength);
+            pp.filmGrainEnabled   = ppj.value("filmGrainEnabled",   pp.filmGrainEnabled);
+            pp.filmGrainIntensity = ppj.value("filmGrainIntensity", pp.filmGrainIntensity);
+            pp.filmGrainSize      = ppj.value("filmGrainSize",      pp.filmGrainSize);
         } else {
             // Backward compat: read old top-level tonemap keys from pre-#40 scenes.
             pp.tonemapMode = (wj.value("tonemapMode", "Builtin") == "LUT")

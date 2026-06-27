@@ -311,8 +311,8 @@ void PhysicsSystem::SyncOut(Scene& scene) {
         const glm::quat rot = FromJolt(bi.GetRotation(bid));
 
         // Preserve scale from TransformComponent
-        const auto* tr    = reg.try_get<TransformComponent>(e);
-        const glm::vec3 s = tr ? tr->scale : glm::vec3(1.f);
+        auto*           tc = reg.try_get<TransformComponent>(e);
+        const glm::vec3 s  = tc ? tc->scale : glm::vec3(1.f);
 
         auto* wt = reg.try_get<WorldTransformComponent>(e);
         if (!wt) wt = &reg.emplace<WorldTransformComponent>(e);
@@ -322,6 +322,38 @@ void PhysicsSystem::SyncOut(Scene& scene) {
             glm::mat4_cast(rot) *
             glm::scale(glm::mat4(1.f), s);
         wt->dirty = false;   // bypass UpdateTransforms for this entity
+
+        // Mirror the Jolt pose back into TransformComponent so any subsequent
+        // MarkDirty (script.Rotate, Inspector edit, gizmo) doesn't snap the
+        // entity back to its spawn pose. For parented bodies, convert via the
+        // parent's WorldTransform inverse (matches SA_Entity_SetWorldPosition).
+        if (tc) {
+            if (const auto* h = reg.try_get<HierarchyComponent>(e);
+                h && h->parent != entt::null)
+            {
+                scene.EnsureWorldUpToDate(h->parent);
+                if (const auto* pw = reg.try_get<WorldTransformComponent>(h->parent)) {
+                    const glm::mat4 parentInv = glm::inverse(pw->matrix);
+                    const glm::vec4 localPos  = parentInv * glm::vec4(pos, 1.f);
+                    tc->position = glm::vec3(localPos);
+
+                    glm::mat3 pr = glm::mat3(pw->matrix);
+                    const float pxL = glm::length(pr[0]);
+                    const float pyL = glm::length(pr[1]);
+                    const float pzL = glm::length(pr[2]);
+                    if (pxL > 1e-6f) pr[0] /= pxL;
+                    if (pyL > 1e-6f) pr[1] /= pyL;
+                    if (pzL > 1e-6f) pr[2] /= pzL;
+                    tc->rotation = glm::normalize(glm::inverse(glm::quat_cast(pr)) * rot);
+                } else {
+                    tc->position = pos;
+                    tc->rotation = rot;
+                }
+            } else {
+                tc->position = pos;
+                tc->rotation = rot;
+            }
+        }
     });
 }
 

@@ -447,7 +447,8 @@ storage. `Scene` wraps an `entt::registry` and exposes `View<C...>()`.
 | `StaticMeshComponent` | `meshAsset` (→ .samesh) — mesh identity only |
 | `MeshRendererComponent` | `materialSlots[]` (→ .samat per sub-mesh) + `castShadow` / `receiveShadow` — shared by static and skinned mesh entities |
 | `MaterialOverrideComponent` | Unified material override: optional `materialAsset` + named `scalars` + named `textures` |
-| `SkinnedMeshComponent` | Per-entity GPU skinning state: `meshAsset`, `skinMatricesBuffer`, `skinDescSet`, `boneCount`, `ready`; mesh geometry (`vertexBuffer`/`indexBuffer`/`skinDataBuffer`) lives in `GPUMesh` (ResourceManager) |
+| `SkinnedMeshComponent` | Per-entity GPU skinning state: `meshAsset`, `skinMatricesBuffer` (curr pose) + `skinMatricesBufferPrev` (prev pose, Issue #84), `skinDescSet` + `velocityDescSet`, `boneCount`, `ready`, `poseSeeded`, `lastEvalClipId`; mesh geometry (`vertexBuffer`/`indexBuffer`/`skinDataBuffer`) lives in `GPUMesh` (ResourceManager) |
+| `PrevTransformComponent` | Issue #84 — captures last-frame `WorldTransformComponent.matrix` for per-object motion vector reconstruction. Auto-emplaced by `Scene::CreateEntity`; `seeded` flag guards first-frame velocity to be zero |
 | `AnimatorComponent` | `clipAsset` (→ .saanim), `time`, `speed`, `looping`, `playing` |
 | `CameraComponent` | `fovY`, `nearPlane`, `farPlane`, `priority` (highest wins) |
 | `ActiveCameraTag` | _(legacy)_ marks the active camera; superseded by `CameraComponent::priority` |
@@ -480,8 +481,10 @@ Entity
   ├── TagComponent
   ├── TransformComponent
   ├── WorldTransformComponent
+  ├── PrevTransformComponent    { prevModel, seeded }    // Issue #84
   ├── AnimatorComponent         { clipAsset, time, speed, looping, playing }
-  ├── SkinnedMeshComponent      { meshAsset, skinMatricesBuffer, skinDescSet, boneCount, ready }
+  ├── SkinnedMeshComponent      { meshAsset, skinMatricesBuffer + Prev, skinDescSet + velocityDescSet,
+  │                                boneCount, ready, poseSeeded, lastEvalClipId }
   ├── MeshRendererComponent     { materialSlots[], castShadow, receiveShadow }
   └── MaterialOverrideComponent { … } (optional)
 ```
@@ -580,8 +583,22 @@ struct PostProcessSettings {
     bool  autoFocus     = false;  // Phase 2: GPU depth readback (not yet implemented)
     float maxCocPx      = 20.0f;  // max CoC radius in pixels
 
-    // Future-effect placeholder
-    bool motionBlurEnabled = false;
+    // Motion Blur (Camera Mode, Issue #46 Phase 1)
+    bool  motionBlurEnabled  = false;
+    float motionBlurStrength = 0.5f;
+    int   motionBlurSamples  = 8;
+    float motionBlurMaxSpeed = 0.1f;
+
+    // Screen modifications (Issue #47) — applied after Tonemap on LDR buffer.
+    // Each layer is independently toggleable; all disabled = single LDR→swapchain copy.
+    bool  vignetteEnabled    = false;
+    float vignetteIntensity  = 0.4f;   // [0..1] elliptical falloff start
+    float vignetteSmoothness = 0.6f;   // [0.01..1] falloff width
+    bool  caEnabled          = false;
+    float caStrength         = 0.5f;   // [0..5] radial RGB offset multiplier
+    bool  filmGrainEnabled   = false;
+    float filmGrainIntensity = 0.1f;   // [0..0.3] amplitude
+    float filmGrainSize      = 1.6f;   // [0.5..5] noise tile scale
 };
 ```
 
@@ -610,11 +627,11 @@ struct WorldSettings {
 SH L0 ambient term and writes it to a 1×1 solid-colour cubemap used as `t_PrefilteredEnv`.
 
 **PostProcess hot-swap:** `ApplyWorldSettings(ws, updateIBL=false)` updates `BloomFeature`
-runtime fields (`m_enabled/threshold/strength/radius`), SSAO/TAA/AutoExposure/DoF parameters,
-and tonemap parameters instantly from `ws.pp` without a device stall. `pp.tonemapMode` switching
-retains the WaitIdle feature-slot replacement for `LutTonemapFeature`. `pp.bloomMipLevels`
-change is **deferred** — set `m_pendingBloomMipCount`; actual GPU rebuild happens at the
-start of the next `RenderFrame` resize block (after `WaitIdle`).
+runtime fields (`m_enabled/threshold/strength/radius`), SSAO/TAA/AutoExposure/DoF/MotionBlur/PostFX
+parameters, and tonemap parameters instantly from `ws.pp` without a device stall.
+`pp.tonemapMode` switching retains the WaitIdle feature-slot replacement for `LutTonemapFeature`.
+`pp.bloomMipLevels` change is **deferred** — set `m_pendingBloomMipCount`; actual GPU rebuild
+happens at the start of the next `RenderFrame` resize block (after `WaitIdle`).
 
 ### Transform Hierarchy
 
@@ -628,6 +645,53 @@ start of the next `RenderFrame` resize block (after `WaitIdle`).
 
 `Scene::MarkDirty(entity)` recursively marks the entity and all descendants dirty.
 Called by the editor gizmo after any transform manipulation.
+
+`Scene::EnsureWorldUpToDate(entity)` (Issue #81) is the *lazy* counterpart used
+by the script API's world-space accessors. Single-frame ordering inside
+`Application::Run()` is:
+
+```
+Physics.SyncOut    — Dynamic body poses → TransformComponent, MarkDirty
+ScriptSystem.FixedUpdate
+Mode.OnUpdate
+AnimationSystem.Update
+ScriptSystem.Update + LateUpdate   ← user scripts run here
+Scene::UpdateTransforms()          ← whole-tree refresh
+RenderFrame
+```
+
+Scripts thus run *before* the per-frame `UpdateTransforms` sweep. If a script
+reads `WorldPosition` of an entity whose ancestor was marked dirty earlier in
+the frame (or in the prior tick), the cached `WorldTransformComponent.matrix`
+is stale. `EnsureWorldUpToDate(entity)` walks the parent chain top-down and
+recomputes any dirty link, mirroring the body of `UpdateTransforms` exactly
+(`AnimatedTransformComponent` priority preserved). Cost: O(depth) — typically
+< 5 levels. Stack-allocated up to depth 32, heap-fallback beyond.
+
+### Script Transform API (Issue #81)
+
+`Entity` (managed) exposes coordinate space explicitly:
+
+| Property                | Backed by                           | Behaviour |
+|-------------------------|-------------------------------------|-----------|
+| `LocalPosition` (set/get) | `TransformComponent.position`     | parent-relative; MarkDirty on set |
+| `LocalRotation*`        | `TransformComponent.rotation`       | quat / Euler variants |
+| `LocalScale`            | `TransformComponent.scale`          | parent-relative scale |
+| `WorldPosition`         | `WorldTransformComponent.matrix`    | reads call `EnsureWorldUpToDate` first; setters compute `parentInv × world` and write local |
+| `WorldRotation*`        | extracted rotation of world matrix  | setters do `inverse(parentWorldRot) * worldQ` |
+| `LossyWorldScale`       | basis-vector lengths of world matrix | **read-only** — Unity convention; non-uniform parent scale makes setter ill-defined |
+| `WorldMatrix`           | full 4×4 from world transform       | transposed from glm column-major to System.Numerics row-major in the C# wrapper |
+| `Forward / Right / Up`  | `WorldRotation` × unit axes         | always world (engine forward = −Z) |
+| `Translate(v, Space)`   | pure C# — `WorldPosition +=` …      | `Space.Self` rotates `v` by `WorldRotation` first |
+| `Rotate(q, Space)`      | pure C# — left/right multiply       | `Space.Self` = pre-mul on `LocalRotation`; `Space.World` = post-mul on `WorldRotation` |
+| `TransformPoint / TransformDirection` and inverses | pure C# — `Vector3.Transform` over `WorldMatrix` / `WorldRotation` | no extra native call beyond the matrix/quat getter |
+
+Native function table version was bumped 5 → 6
+(`ScriptApiFunctionTable::version` + `NativeApi.ExpectedTableVersion`); the
+old `Entity_GetPosition` slots were *renamed* to `Entity_GetLocalPosition`
+(same semantics, clearer name) and six `Entity_*World*` accessors appended.
+There is no compatibility shim for unqualified `GetPosition`/etc. — the
+old wrappers were removed outright; ports must touch every call site.
 
 ### Scene File — `.sascene`
 
@@ -680,39 +744,67 @@ Bone deformation runs entirely on the GPU vertex shader; only bone matrices (~3 
 
 ```cpp
 // Initialise once (after SceneRenderer is ready):
-animSystem.Init(device, sceneRenderer->GetSkinDescLayout());
+animSystem.Init(device,
+                sceneRenderer->GetSkinDescLayout(),       // set=3 bindings 0/1 (existing)
+                sceneRenderer->GetVelocityDescLayout());  // set=3 bindings 0/1/2 (Issue #84)
 
 // Per scene load (per animated entity):
 animSystem.PrepareEntity(entity, registry, resMgr, device);
-// → allocates skinMatricesBuffer (boneCount×64 B, CPU-visible)
-// → allocates skinDescSet (set=3: binding0=skinMats, binding1=gpuMesh.skinDataBuffer)
-// → sets SkinnedMeshComponent::ready = true
+// → allocates skinMatricesBuffer + skinMatricesBufferPrev (each boneCount×64 B, CPU-visible)
+// → allocates skinDescSet (set=3: binding0=currMats, binding1=gpuMesh.skinDataBuffer)
+// → allocates velocityDescSet (set=3: binding0=currMats, binding1=skinData, binding2=prevMats)  (#84)
+// → sets SkinnedMeshComponent::ready = true, poseSeeded = false
 
 // Every frame (Playing state):
 animSystem.Update(dt, registry, resMgr, device);
+// → detects clip swap via lastEvalClipId; pose-swap (curr ↔ prev) on normal frames,
+//   skips swap on first-write / clip-swap → velocity = 0 those frames
+// → re-binds skinDescSet binding 0 + velocityDescSet bindings 0/2 (UPDATE_AFTER_BIND-safe)
 // → advances AnimatorComponent::time, evaluates FK → workGlobalPose/workSkinMats
-// → uploads workSkinMats to skinMatricesBuffer (~3 KB); no vertex upload
+// → uploads workSkinMats to skinMatricesBuffer; on first-write/clip-swap also uploads to prev
 
 // When stopping (reset to rest pose):
 animSystem.EvaluateAll(0.f, registry, resMgr, device);
+// (scrubbing path does NOT touch prev buffer — velocity remains valid for next play)
 
 // On shutdown:
 animSystem.Shutdown(device);
-// → frees per-entity skinMatricesBuffer + skinDescSet; mesh buffers owned by ResourceManager
+// → frees per-entity skinMatricesBuffer + skinMatricesBufferPrev + skinDescSet + velocityDescSet
 ```
 
 ### GPU Skinning Data Flow
 
 ```
 PrepareEntity (once):
-  GPUMesh::skinDataBuffer  ← per-asset (joints+weights SSBO, uploaded by ResourceManager)
-  skinMatricesBuffer       ← per-entity (mat4[boneCount], CPU-visible)
-  skinDescSet (set=3)      ← binding0 = skinMatricesBuffer, binding1 = skinDataBuffer
+  GPUMesh::skinDataBuffer       ← per-asset (joints+weights SSBO, uploaded by ResourceManager)
+  skinMatricesBuffer            ← per-entity (mat4[boneCount], CPU-visible, curr pose)
+  skinMatricesBufferPrev        ← per-entity (mat4[boneCount], CPU-visible, prev pose; Issue #84)
+  skinDescSet     (set=3)       ← binding0 = currMats     binding1 = skinData
+  velocityDescSet (set=3, #84)  ← binding0 = currMats     binding1 = skinData     binding2 = prevMats
 
-Update (per frame):
-  FK → workSkinMats[]  →  UploadBufferData(skinMatricesBuffer, ~3 KB)
-  deferred_geometry_skinned.vert:  gl_VertexIndex → skinDataBuffer → 4-bone blend → clip space
+Update (per frame, Playing only):
+  if (!firstWrite && !clipSwap) {
+      swap(curr, prev)                   // pointer swap of RHIBufferHandle members
+      re-bind skinDescSet[0]  and  velocityDescSet[0/2]
+  }
+  FK → workSkinMats[]  →  UploadBufferData(skinMatricesBuffer, ~3 KB per skinned entity)
+  if (firstWrite || clipSwap) {
+      UploadBufferData(skinMatricesBufferPrev, same data)  // seed prev = curr → velocity = 0
+      poseSeeded = true
+  }
+  deferred_geometry_skinned.vert:  reads only set=3 bindings 0/1 (skin_deform.glsl)
+  velocity_prepass_skinned.vert :  reads all three bindings via skin_deform_dual.glsl (SkinMatrix + SkinMatrixPrev)
 ```
+
+### Pose Double-Buffer (Issue #84)
+
+`Update` keeps a logical "curr" and "prev" pair of bone-matrix SSBOs per entity. Three force-reseed triggers
+guard against velocity spikes: (a) first write after `PrepareEntity`, (b) `meshAsset` swap → `PrepareEntity`
+re-creates buffers with `poseSeeded = false`, (c) `AnimatorComponent::clipAsset` change → `lastEvalClipId`
+mismatch. In all three cases `prev = curr` is uploaded for that frame so per-vertex velocity is zero.
+
+`EvaluateAll` (scrubbing in Editing state) deliberately bypasses the swap — editor scrubbing has no
+"previous frame" concept and we don't want it to produce per-vertex motion vectors.
 
 ### Skeleton Resolution
 
@@ -782,7 +874,7 @@ directly from `ColliderComponent` ECS data (no Jolt debug callback needed). Togg
 **Locations:**
 - `src/function/script/ScriptSystem.hpp/.cpp` — C++ driver; owned by `Application`
 - `src/function/script/ScriptApiExports.hpp/.cpp` — flat C API + `ScriptApiFunctionTable`
-- `managed/StellarAlia.Runtime/` — C# engine API surface (`ScriptBase`, `Entity`, `Debug`, `Time`, `Input`, `Mathf`, `AnimatorProxy`, `RigidBodyProxy`, `PointLightProxy`, `Physics`, `QuaternionExt`, `NativeApi`)
+- `managed/StellarAlia.Runtime/` — C# engine API surface (`ScriptBase`, `Entity`, `Debug`, `Time`, `Input`, `InputMap`, `Mathf`, `AnimatorProxy`, `RigidBodyProxy`, `PointLightProxy`, `Physics`, `PostProcess`, `QuaternionExt`, `NativeApi`)
 - `managed/StellarAlia.ScriptBridge/` — Roslyn compiler (`ScriptCompiler`), collectible ALC loader (`ScriptLoader`), unmanaged entry points (`ScriptBridgeEntry`)
 - `demo_project/assets/scripts/` — user `.cs` scripts
 
@@ -797,7 +889,13 @@ Field reflection:    GetClassSchemaBlob | GetClassDefaultsBlob | ApplyFieldValue
 
 The field-reflection group is loaded the same way as the lifecycle entries but lives outside `ScriptApiFunctionTable` — they are managed→native pull endpoints (Inspector → ALC) rather than native→managed lifecycle drivers.
 
-`Initialize` receives a `ScriptApiFunctionTable*` — a plain struct of C function pointers (version 2) covering transforms, entity lifecycle, rigidbody physics, point light control, physics raycast, animator, input, debug draw, logging, and time. The first field is `uint32_t version` so both sides can detect layout mismatches at startup. `ScriptApiContext` carries `PhysicsSystem*` so rigidbody and raycast functions can access Jolt through the physics system's public API. The managed `NativeApi` class stores this table and calls through it; this avoids making `StellarAlia.Runtime` a native shared library.
+`Initialize` receives a `ScriptApiFunctionTable*` — a plain struct of C function pointers (currently **version 7**, see field table below) covering transforms (local + world), entity lifecycle, rigidbody physics, point light control, physics raycast, animator, input, debug draw, logging, time, InputAction/InputMap, MeshRenderer & MaterialOverride parameter access, and PostProcess screen modifications. The first field is `uint32_t version` so both sides can detect layout mismatches at startup. `ScriptApiContext` carries `Scene*`, `SceneRenderer*`, `InputSystem*`, `DebugDraw*`, and `PhysicsSystem*` so the C-side dispatchers can reach the live engine subsystems. The managed `NativeApi` class stores this table and calls through it; this avoids making `StellarAlia.Runtime` a native shared library.
+
+**Function table versioning rules:**
+- New entries are **appended to the end** of `ScriptApiFunctionTable` — never reordered. The managed-side `[StructLayout(LayoutKind.Sequential)]` struct must add fields in the same order.
+- Existing entries' positions never shift; this keeps ABI compatibility for in-flight builds during incremental development.
+- Bump `version` whenever fields are added or removed. Mismatch is a hard fail at `ScriptBridgeEntry.Initialize` (managed throws; ScriptSystem disables scripting).
+- Current versions: v3 added InputAction/Mesh/MaterialOverride; v4 RigidBody diagnostics; v5 InputMap stack control; v6 world-space transform accessors (Issue #81); v7 PostProcess screen modifications (Issue #47, 16 entries).
 
 **Key Runtime API classes (all in `StellarAlia` namespace):**
 
@@ -809,6 +907,7 @@ The field-reflection group is loaded the same way as the lifecycle entries but l
 | `RigidBodyProxy` | `LinearVelocity`/`AngularVelocity` (get/set), `AddForce`, `AddImpulse` |
 | `PointLightProxy` | `Color`, `Intensity`, `Range` (get/set) |
 | `Physics` | `Raycast(origin, direction, maxDist, out RaycastHit)` — wraps Jolt NarrowPhaseQuery |
+| `PostProcess` (Issue #47) | Unity-style static accessors for the active scene's screen modifications: `PostProcess.Vignette.{Enabled,Intensity,Smoothness}`, `PostProcess.ChromaticAberration.{Enabled,Strength}`, `PostProcess.FilmGrain.{Enabled,Intensity,Size}`. Setters mutate `WorldSettings::pp.*` then call `SceneRenderer::ApplyWorldSettings(ws, /*updateIBL=*/false)` for live-apply — same path the editor uses on slider drag. |
 | `QuaternionExt` | `FromEulerDegrees`, `FromEulerRadians`, `Slerp`, `RotateTowards`, `AngleDegrees`, `ToEulerDegrees` |
 
 ### Play Lifecycle
@@ -852,13 +951,25 @@ OnPlayStop(reg)
 
 ### IDE Project File Generation
 
-On every project open (`Application::UpdateProjectPaths`), the engine calls `GenerateIdeProjectFiles(projectDir)`:
+On every project open (`Application::UpdateProjectPaths`), the engine calls `GenerateIdeProjectFiles(projectDir)`. Issue #82 reworked this to be machine-independent:
 
-- **`Directory.Build.props`** — always overwritten; contains the absolute `managedDir` path as `$(StellarAliaManaged)`. Gitignored — machine-specific.
-- **`{stem}.csproj`** — written only if absent; references `$(StellarAliaManaged)/StellarAlia.Runtime.dll` via the MSBuild variable. Committed to git — no absolute paths.
-- **`{stem}.sln`** — written only if absent. Project GUID is deterministically derived from the stem via FNV-1a → UUID v5. Committed to git.
+1. **Library/managed/ refresh** — `CopyManagedLibsToProject` copies `StellarAlia.Runtime.{dll,pdb,xml}` from the engine's `BIN_DIR/managed` into `{projectDir}/Library/managed/`. `ScriptBridge` and `Microsoft.CodeAnalysis.*` are engine-internal and intentionally excluded. Missing source / copy failures log a warning but do not block project load.
+2. **`Directory.Build.props`** — always overwritten. Sets `<StellarAliaManaged>$(MSBuildThisFileDirectory)Library\managed</StellarAliaManaged>` — a relative path resolved at MSBuild time. Contains no machine-specific data, so it is safe to commit.
+3. **`{stem}.csproj`** — written only if absent. References `$(StellarAliaManaged)/StellarAlia.Runtime.dll`, which now resolves inside the project tree.
+4. **`{stem}.sln`** — written only if absent. Project GUID is deterministically derived from the stem via FNV-1a → UUID v5.
+5. **`.gitignore`** — written only if absent (preserves user-customised ignores). Content comes from `assets/templates/project/.gitignore.template`, with a hardcoded fallback when engine assets are unreachable. Ignores `Library/`, `bin/`, `obj/`, `.idea/`, `.vs/`, `cook_cache/`.
 
-MSBuild automatically discovers `Directory.Build.props` by searching parent directories, so `.csproj` needs no explicit import. `StellarAlia.Runtime.xml` (generated by the Runtime `.csproj` build) ships alongside `StellarAlia.Runtime.dll`, giving IDE IntelliSense tooltip documentation.
+`ProjectManager::CreateProject` additionally seeds `.gitignore` and the starter `Controls.sainputmap` up front so a freshly created project has a clean working tree before the editor first hands off to `GenerateIdeProjectFiles`.
+
+MSBuild automatically discovers `Directory.Build.props` by searching parent directories, so `.csproj` needs no explicit import. `StellarAlia.Runtime.xml` powers IDE IntelliSense tooltips; `StellarAlia.Runtime.pdb` powers script-side debugging.
+
+Runtime DLL loading is **not** affected by this localisation: `ScriptSystem` still loads `StellarAlia.Runtime` via `hostfxr` from the engine's `BIN_DIR/managed` (`ScriptSystem::Context::managedDir`). The project-local copy under `Library/managed/` serves IDE tooling only. Switching between Debug and Release engine builds therefore changes what gets cached under `Library/managed/`, but the API surface is identical so IDE compilation is unaffected.
+
+Workflow implications:
+
+- **Clone-and-open**: cloning a project on a fresh machine, then opening it in StellarAlia editor once, is sufficient to populate `Library/managed/`. After that, opening the `.sln` standalone in Rider/VS works without further setup.
+- **CI without engine**: running `dotnet build` on a script project outside the editor requires `Library/managed/` to already exist — either by opening the project in the editor first, or by some future build-pipeline step that mirrors `CopyManagedLibsToProject`. Out-of-scope for #82.
+- **Engine version drift**: a project's `Library/managed/` always reflects the last editor that opened it. Pinning to a specific engine version would require a separate `version.txt` mechanism (deferred).
 
 ### ECS Integration
 
@@ -1521,7 +1632,7 @@ collapsing header (imported + transient counts/MB, physical vs logical savings, 
 ### Frame Uniforms (set=1) Bindings
 
 ```
-binding=0  FrameData UBO    — camera matrices, time, resolution, SH9 irradiance, TAA jitter/prevViewProj (640 bytes)
+binding=0  FrameData UBO    — camera matrices, time, resolution, SH9 irradiance, TAA jitter / prevViewProj / currUnjitteredViewProj (704 bytes)
 binding=1  LightData UBO    — up to 8 lights (directional / point / spot / area)
 binding=2  sampler2D        — BRDF LUT
 binding=3  samplerCube      — prefiltered specular env (5 mips)
@@ -1619,6 +1730,7 @@ Normal encoding uses **Octahedral Normal Encoding** (OctEncode/OctDecode).
 | `ShadowFeature` | `config.shadowEnabled` | shadow map (D32, 2048²) | `shadow.vert/.frag` (+ `shadow_skinned.vert` for skinned) |
 | `SkyboxFeature` | always | HDR buffer (transient) | `skybox.vert/.frag` |
 | `GBufferFeature` | always | RT0/RT1/RT2 + depth | `deferred_geometry.vert/.frag` (+ `deferred_geometry_skinned.vert` for skinned) |
+| `VelocityPrepassFeature` (Issue #84) | enabled when `MotionBlurFeature::m_enabled` OR `TAAFeature::m_enabled` (Issue #85) | Per-object writes to `handles.velocity` (RG16F): each visible draw rasterises curr & prev clip-space positions. `gl_Position` uses jittered VP (matches GBuffer depth); the velocity output uses unjittered `currUnjitteredViewProj` × `prevViewProj` so TAA can reproject without jitter compensation. Skinned variant samples curr/prev bone matrices via set=3 bindings 0/2 (`velocityDescSet`) | `velocity_prepass.vert/.frag` (+ `velocity_prepass_skinned.vert` for skinned) |
 | `SSAOFeature` | always registered; disabled → fills ssaoTex with 1.0 | half-res R8 AO → blurred into `ssaoTex` | `ssao.frag` + `ssao_blur.frag` |
 | `DeferredLightingFeature` | always | HDR (transient RGBA16F) | `deferred_lighting.frag` |
 | `SelectionMaskFeature` | always | R8 silhouette mask | `selection_mask.vert/.frag` (+ `selection_mask_skinned.vert` for skinned) |
@@ -1626,14 +1738,16 @@ Normal encoding uses **Octahedral Normal Encoding** (OctEncode/OctDecode).
 | `AutoExposureFeature` | always registered; skips if `pp.autoExposureEnabled==false` | 256-bin log-lum histogram → weighted percentile EV → exponential-smoothing exposure; 1-frame CPU readback via staging; reads `handles.hdr` (pre-TAA content) | `postfx_histogram.comp`, `postfx_exposure_adapt.comp` |
 | `BloomFeature` | always registered; skips if `pp.bloomEnabled==false` | threshold reads `taaResolved`; composite writes back to `handles.hdr` | `bloom_*.frag` |
 | `DoFFeature` | always registered; skips if `pp.dofEnabled==false` | CoC from depth → separable near/far Gaussian blur (H+V × 2) → smoothstep composite; sets `handles.hdr` to DoF output | `dof_coc.frag`, `dof_blur.frag`, `dof_composite.frag` |
-| `TonemapFeature` | always registered; active when `pp.tonemapMode==Builtin` | swapchain LDR | `postfx_tonemap.frag` (ACES + optional parametric CG LUT via `sampler3D`); rebakes 32³ LUT via `ImmediateCompute` when `ColorGradingSettings` changes |
-| `LutTonemapFeature` | hot-swapped in when `pp.tonemapMode==LUT` | swapchain LDR | `postfx_lut_tonemap.frag` |
+| `MotionBlurFeature` | always registered; skips if `pp.motionBlurEnabled==false` | Per-object velocity (filled by `VelocityPrepassFeature`, Issue #84) → TileMax (16×) → NeighborMax (3×3 dilate) → McGuire 2012 reconstruct; sets `handles.hdr` to motion-blur output | `motion_blur_tile_max.frag`, `motion_blur_neighbor_max.frag`, `motion_blur_reconstruct.frag` |
+| `TonemapFeature` | always registered; active when `pp.tonemapMode==Builtin` | LDR (transient `handles.ldr`) | `postfx_tonemap.frag` (ACES + optional parametric CG LUT via `sampler3D`); rebakes 32³ LUT via `ImmediateCompute` when `ColorGradingSettings` changes |
+| `LutTonemapFeature` | hot-swapped in when `pp.tonemapMode==LUT` | LDR (transient `handles.ldr`) | `postfx_lut_tonemap.frag` |
+| `PostFXFeature` (Issue #47) | always registered; never skipped | reads `handles.ldr` → writes swapchain. Single fullscreen pass applies vignette / chromatic aberration / film grain (uniform-control-flow toggles). All three disabled = single `texture()` copy. | `postfx.frag` |
 | `SelectionOutlineFeature` | always | outline on swapchain | `selection_outline_dilate.frag` + composite |
 | `InfiniteGridFeature` | when enabled | XZ grid on swapchain | `infinite_grid.frag` |
 | `DebugOverlayFeature` | always | debug lines on swapchain | `debug_line.vert/.frag` |
 | user `RenderFeature`s | `AddFeature(...)` | custom | custom |
 
-`BloomFeature`, `TAAFeature`, and `DoFFeature` are always in the feature list; their `AddPasses` early-returns when disabled.
+`BloomFeature`, `TAAFeature`, `DoFFeature`, and `MotionBlurFeature` are always in the feature list; their `AddPasses` early-returns when disabled.
 `TonemapFeature` ↔ `LutTonemapFeature` hot-swapped at runtime by `ApplyWorldSettings` (WaitIdle + slot replace).
 
 ```cpp
@@ -1657,25 +1771,136 @@ struct RendererConfig {
 
 **Data flow:**
 ```
-GBuffer(jittered proj) → DeferredLighting → TAAFeature
-  TAA_Resolve: Read(handles.hdr, historyRead, depth) → Write(historyWrite)
+GBuffer(jittered proj) → VelocityPrepass (Issue #84; gated on MotionBlur OR TAA enabled, Issue #85)
+  Each visible DrawItem: gl_Position = jittered VP * model, varyings = unjittered VPs * model
+  Frag: out_velocity = (unjittered currUV − unjittered prevUV) → handles.velocity
+→ DeferredLighting → TAAFeature
+  TAA_Resolve: Read(handles.hdr, historyRead, depth, handles.velocity) → Write(historyWrite)
+  Reprojection uses handles.velocity directly (Issue #85) — no per-shader jitter compensation needed
   handles.taaResolved = rgHistoryWrite
 → BloomThreshold reads handles.taaResolved (anti-aliased pre-bloom)
 → BloomComposite writes handles.hdr
 → DoFFeature reads handles.hdr (bloom-composited) + handles.depth
   DoF_CoC / DoF_NearH / DoF_NearV / DoF_FarH / DoF_FarV / DoF_Composite
   handles.hdr = dofOutput (RGBA16F transient)
+→ MotionBlurFeature reads handles.hdr + handles.velocity + handles.depth
+  MB_TileMax / MB_NeighborMax / MB_Reconstruct (no MB_Velocity any more — Issue #84)
+  handles.hdr = mbOutput (RGBA16F transient)
 → Tonemap reads handles.hdr
 ```
 
-**Jitter:** Halton(2,3) sequence, 8-tap, written to `fu.jitter` (pixel space) and added to `proj[2][0/1]` (NDC offset). `fu.prevViewProj` stores last frame's unjittered view-projection for reprojection.
+**Jitter:** Halton(2,3) sequence, 8-tap, written to `fu.jitter` (pixel space) and added to `proj[2][0/1]` (NDC offset). `fu.viewProj` is jittered (drives rasterization); `fu.prevViewProj` and `fu.currUnjitteredViewProj` are both unjittered (drive velocity reconstruction).
+
+**Dual viewProj convention (Issues #46 + #85):** the engine maintains both jittered and unjittered current-frame VPs in `FrameUniforms` — mirroring UE5 `nonJitteredProjMatrix` / HDRP `nonJitteredVP`. Rasterization (GBuffer, VelocityPrepass `gl_Position`, SelectionMask, Shadow) uses `fu.viewProj` (jittered) so TAA's sub-pixel sampling works correctly. Velocity computation (VelocityPrepass `v_CurrClip` output) uses `fu.currUnjitteredViewProj`, producing `handles.velocity` free of per-frame jitter offsets. TAA, MotionBlur, and future SSR can therefore read `handles.velocity` directly without per-shader jitter compensation.
+
+**First-frame guard for `fu.prevViewProj`** (Issue #46): `m_prevUnjitteredViewProj` initialises to `mat4(1.f)`. TAA absorbs this via history weighting, but Motion Blur produces visible garbage from the resulting velocity. `ApplyCameraToUniforms` therefore seeds `m_prevUnjitteredViewProj = currViewProj` on the first call, so frame 0's velocity is exactly zero.
 
 **TAAFeature internals:**
 - Ping-pong `m_historyTex[2]` (persistent RGBA16F, full-res) — imported into RG each frame
-- TAA_Resolve: depth reprojection → prev UV → sample history → 3×3 YCoCg AABB neighborhood clamp → motion-adaptive blend
+- TAA_Resolve (Issue #85): samples `handles.velocity` directly for prev-UV reprojection — replaces the older depth + `WorldPos × prevViewProj` path. As a result TAA now sees per-object motion and no longer ghosts on moving rigid bodies / animated skinned meshes
+- 3×3 YCoCg AABB neighborhood clamp on history (anti-ghosting) → motion-adaptive blend (`velLen` → blendStatic ↔ blendMotion)
 - `m_historyValid = false` on first frame or resize → shader uses `historyValid = 0` push constant → outputs current unmodified
+- Binding layout (set=2): 0 = current HDR, 1 = history, 2 = depth (kept for layout stability), 3 = `handles.velocity` (Issue #85)
 
-**`handles.taaResolved`:** new field on `RendererHandles`; equals `handles.hdr` when TAA is disabled, set to `rgHistoryWrite` after `TAAFeature::AddPasses`. `BloomThreshold` reads this to avoid Bloom accumulating in TAA history (prevents progressive brightness).
+**`handles.taaResolved`:** field on `RendererHandles`; equals `handles.hdr` when TAA is disabled, set to `rgHistoryWrite` after `TAAFeature::AddPasses`. `BloomThreshold` reads this to avoid Bloom accumulating in TAA history (prevents progressive brightness).
+
+**VelocityPrepass gating** (Issue #85): the prepass writes `handles.velocity` whenever **either** `MotionBlurFeature::m_enabled` **or** `TAAFeature::m_enabled` is true. With both features disabled the pass returns immediately and the RG leaves `handles.velocity` unallocated (the greedy slot allocator skips transients with `firstWritePass < 0`).
+
+### Motion Blur (Per-Object, Issues #46 + #84)
+
+**Architecture:** one velocity buffer, written by a dedicated prepass, consumed by a three-pass reconstruction chain (and by TAA since Issue #85). Phase 1 (#46) introduced `handles.velocity` and the McGuire 2012 reconstruct chain with a depth-reprojection fill. Phase 2 (#84) replaced the fill with `VelocityPrepassFeature` — per-object draws that capture camera + rigid-body + skinned pose deformation in a single RG16F target. Issue #85 made the prepass write **unjittered** velocity (rasterization still uses jittered VP) so TAA can reproject without per-shader jitter compensation.
+
+**Placement:**
+- `VelocityPrepassFeature` runs immediately after `GBufferFeature` (depth populated, no consumers ahead).
+- `MotionBlurFeature` runs after DoF, before Tonemap.
+
+`VelocityPrepassFeature::AddPasses` early-returns unless `MotionBlurFeature` **or** `TAAFeature` is enabled (Issue #85). With both off, `handles.velocity` stays unallocated by the RG (greedy interval coloring skips transients with `firstWritePass < 0`).
+
+**Velocity RT contract** (`RendererHandles::velocity`):
+- Format: `RG16F`, viewport resolution, `RenderTarget | Sampled`.
+- Semantics: `(currUV - prevUV)` in NDC ratio, **no** artistic scaling. Strength + maxSpeed are applied later, at `MB_Reconstruct`.
+- Lifetime: RG transient — created in `SceneRenderer::RenderFrame`, valid for the current frame.
+- Writer: `VelocityPrepassFeature` — per-draw rasterization. Skybox / non-rasterized pixels stay at the `clearOnLoad=true` 0 vector.
+- Consumers today: `MotionBlurFeature`. Future consumers (TAA per-object velocity upgrade, SSR reprojection) will read the same RT without prepass changes.
+
+**Per-draw push constants** for the prepass: `{ mat4 currModel; mat4 prevModel; }` = 128 B, exactly the guaranteed push-constant limit. `currModel` comes from `WorldTransformComponent.matrix × DrawItem.subLocalTransform`; `prevModel` from `PrevTransformComponent.prevModel × subLocalTransform` (fall back to `currModel` when `PrevTransform` is missing or unseeded → velocity = 0). `viewProj` (jittered, for `gl_Position`), `currUnjitteredViewProj` (Issue #85, for `v_CurrClip`), and `prevViewProj` (unjittered, for `v_PrevClip`) are read from `u_Frame`.
+
+**Skinned variant** uses `velocity_prepass_skinned.vert`, which includes `skin_deform_dual.glsl` — a sibling of `skin_deform.glsl` declaring set=3 bindings 0/1/2 (curr/skinData/prev) and exposing `SkinMatrix()` + `SkinMatrixPrev()`. Per-entity `velocityDescSet` (allocated by `AnimationSystem::PrepareEntity` using `SceneRenderer::GetVelocityDescLayout()`) binds all three SSBOs; the existing `skinDescSet` (set=3 bindings 0/1) remains unchanged and is used by deferred geometry / shadow / selection mask.
+
+**Pipeline (4 passes; MB_Velocity from #46 removed in #84):**
+```
+0. VelocityPrepass (post-GBuffer)
+   For each visible DrawItem:
+     static    pipeline = velocity_prepass.vert + velocity_prepass.frag
+     skinned   pipeline = velocity_prepass_skinned.vert + velocity_prepass.frag
+   Push currModel + prevModel; bind set=3 velocityDescSet (skinned only).
+   Depth: LoadOp::Load, depthTest=true, depthWrite=false → only the closest surface writes.
+   Vert: gl_Position = u_Frame.viewProj (jittered) * currModel * pos     ← matches GBuffer rasterization
+         v_CurrClip  = u_Frame.currUnjitteredViewProj * currModel * pos  ← unjittered for velocity (#85)
+         v_PrevClip  = u_Frame.prevViewProj           * prevModel * pos  ← unjittered
+   Frag: out_velocity = (v_CurrClip.xy / w − v_PrevClip.xy / w) * 0.5    ← unjittered ΔUV
+   Writes handles.velocity (RG16F, viewport).
+
+1. MB_TileMax        handles.velocity → tileMax (RG16F, ⌈w/16⌉ × ⌈h/16⌉)
+                     Picks the longest velocity vector in each 16×16 tile.
+
+2. MB_NeighborMax    tileMax → neighborMax (RG16F, same resolution)
+                     3×3 dilate — dominant velocity across nine neighbour tiles.
+
+3. MB_Reconstruct    hdr + handles.velocity + neighborMax + depth → mbOutput (RGBA16F, viewport)
+                     McGuire 2012 stochastic sampling: jittered samples along neighborMax
+                     direction, weighted by soft depth compare + sample-velocity cone.
+                     Strength + maxSpeed applied here.
+                     SceneRenderer redirects handles.hdr to mbOutput.
+```
+
+**Pass-3 self-read trick:** writing to `mbOutput` then redirecting `handles.hdr` mirrors DoF Composite's pattern — avoids the read-and-write-same-RT race. The redirect happens immediately after `MotionBlurFeature::AddPasses` in `RenderFrame`, so Tonemap reads the motion-blurred result without RG aliasing concerns.
+
+**Parameters** (`PostProcessSettings`):
+- `motionBlurEnabled` (default false)
+- `motionBlurStrength` ∈ [0, 2], default 0.5 — 1.0 is roughly physically correct
+- `motionBlurSamples` ∈ [4, 32], default 8 — reconstruct sample count
+- `motionBlurMaxSpeed` ∈ [0.01, 0.3] NDC, default 0.1 — clamps catastrophic velocity near silhouettes
+
+**Coverage after #84:**
+- Stationary camera + moving rigid body → blurs (prepass picks up `currModel ≠ prevModel`)
+- Stationary camera + skinned mesh animation → blurs (skinned vert samples curr/prev bone matrices)
+- Camera motion + static geometry → blurs (currViewProj differs from prevViewProj inside the prepass even when prevModel == currModel)
+- Skybox / depth==1.0 → no blur (no draw covers those pixels; RT stays at clear value 0)
+
+**Resource cost when enabled** (1080p): velocity RT = 8 MB, MB intermediates (tileMax+neighborMax+mbOutput) ≈ 32 KB + 16 MB. When disabled: 0 — RG skips slot allocation for unused transients.
+
+### Screen Modifications (Issue #47)
+
+**Placement:** `PostFXFeature` runs after Tonemap on a transient LDR buffer (`handles.ldr`) and writes the swapchain. Insertion uses the reverse-insert pattern (PostFX is inserted just before Tonemap, so the final order ends `..., Tonemap, PostFX, SelectionOutline, ...`).
+
+**Why a separate pass instead of folding into Tonemap:** chromatic aberration samples three RGB shifts; folding it into Tonemap would multiply LUT evaluations 3× along both the Builtin and LUT tonemap paths. Splitting also keeps Tonemap unaware of the screen-modification toggles, so future LDR-domain effects (lens flare, dirt, bloom-dirt) can chain onto the same `handles.ldr` surface.
+
+**`RendererHandles::ldr` contract:**
+- Format: `IRHIDevice::GetSwapchainFormat()` (avoids pipeline cache churn vs. the previous direct-to-swapchain tonemap)
+- Lifetime: RG transient `"LDR_Color"`, created in `SceneRenderer::RenderFrame` next to `HDR_Color` and `Velocity`
+- Writer: `TonemapFeature` or `LutTonemapFeature`
+- Reader: `PostFXFeature`
+
+**Data flow:**
+```
+HDR → Tonemap (handles.hdr → handles.ldr)
+    → PostFX  (handles.ldr → handles.swapchain)
+    → SelectionOutline / InfiniteGrid / DebugOverlay (read+write swapchain)
+```
+
+**`postfx.frag` (single fullscreen pass):**
+1. Chromatic Aberration — radial RGB offset (`dir = uv - 0.5`), three `texture()` taps when enabled, one tap otherwise.
+2. Vignette — elliptical falloff using `aspectRatio` (`w/h`), `smoothstep(intensity, intensity+smoothness, length(d))`.
+3. Film Grain — `hash12(uv * grainSize * resolution + u_Frame.time) * 2 - 1`, attenuated in bright regions via `mix(1.0, 0.3, luminance)` to mimic film stock.
+
+All three effects use `if (enable > 0.5)` uniform-control-flow — the shader compiler eliminates branches per draw because the flag is a push constant. All disabled = pure LDR→swapchain copy.
+
+**Push constants** (48 B, `std430`-friendly): three groups of `(enable, params..., padding)` ×3 + `aspectRatio`. `caPxScale = 0.005f` fixed in feature code (NDC units; tunable but kept constant per the design).
+
+**Editor gizmo overlays unaffected:** SelectionOutline / InfiniteGrid / DebugOverlay run *after* PostFX on the swapchain — gizmos and debug lines do not pick up vignette / CA / grain, so editor visuals remain stable while artists tune the effects.
+
+**Script API (`StellarAlia.PostProcess`):** see [Scripting System → Script API Surface](#script-api-surface) for the `PostProcess.Vignette` / `.ChromaticAberration` / `.FilmGrain` Unity-style accessors.
 
 ### CPU Frustum Culling & BVH
 
@@ -1819,6 +2044,7 @@ Phase 2: GPU
    ShadowFeature::AddPasses()
    SkyboxFeature::AddPasses()
    GBufferFeature::AddPasses()        ← iterates m_visibleDrawItems
+   VelocityPrepassFeature::AddPasses()← per-DrawItem prepass writing handles.velocity; gated on MotionBlur enabled (Issue #84)
    SSAOFeature::AddPasses()           ← GTAO 3-pass; disabled → fill 1.0
    DeferredLightingFeature::AddPasses() ← reads ssaoTex binding=5
    SelectionMaskFeature::AddPasses()
@@ -1826,6 +2052,7 @@ Phase 2: GPU
    AutoExposureFeature::AddPasses()   ← histogram(hdr) + adapt; 1-frame readback feeds tonemap exposure
    BloomFeature::AddPasses()          ← threshold reads taaResolved; composite writes handles.hdr
    DoFFeature::AddPasses()            ← 6 passes (CoC+4×blur+composite); sets handles.hdr = dofOutput when enabled
+   MotionBlurFeature::AddPasses()     ← 3 passes (tileMax+neighborMax+reconstruct); reads handles.velocity from prepass
    TonemapFeature::AddPasses()
    SelectionOutlineFeature::AddPasses()
    InfiniteGridFeature::AddPasses()

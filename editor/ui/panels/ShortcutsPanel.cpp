@@ -103,14 +103,14 @@ std::string ShortcutsPanel::FormatBinding(const BindingDef& b) {
 ShortcutsPanel::ShortcutsPanel(EditorContext& ctx, ShortcutsPresenter& presenter)
     : m_presenter(presenter)
     , m_config(*ctx.shortcuts)
-    , m_defaultConfigPath(std::filesystem::path(StellarAliaApp::BIN_DIR) / "editor_shortcuts.json")
+    , m_defaultConfigPath(std::filesystem::path(StellarAliaApp::BIN_DIR) / "editor_shortcuts.sainputmap")
 {
     isOpen = false;
 }
 
 void ShortcutsPanel::BuildEntries() {
     if (!m_entries.empty()) return;
-    for (const auto& mapDef : MakeViewportMaps()) {
+    for (const auto& mapDef : MakeBuiltinEditorMaps()) {
         for (const auto& action : mapDef.actions) {
             if (!action.userConfigurable || action.type != ActionType::Button) continue;
             if (action.bindings.empty()) continue;

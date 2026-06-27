@@ -40,6 +40,7 @@
         "receiveShadow": false
       },
       "parent": -1,
+      "scene_local_id": 1,
       "staticMesh": {
         "mesh": "c0be0000-0000-4000-0000-000000000002"
       },
@@ -103,6 +104,7 @@
         "receiveShadow": false
       },
       "parent": -1,
+      "scene_local_id": 2,
       "staticMesh": {
         "mesh": "c0be0000-0000-4000-0000-000000000002"
       },
@@ -129,6 +131,7 @@
     {
       "id": 2,
       "parent": -1,
+      "scene_local_id": 3,
       "spotLight": {
         "color": [
           0.0,
@@ -172,6 +175,7 @@
       },
       "id": 3,
       "parent": -1,
+      "scene_local_id": 4,
       "tag": "Sun",
       "transform": {
         "position": [
@@ -204,6 +208,7 @@
         "intensity": 4.0,
         "range": 7.0
       },
+      "scene_local_id": 5,
       "tag": "PointBetween",
       "transform": {
         "position": [
@@ -225,6 +230,25 @@
       }
     },
     {
+      "collider": {
+        "extents": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "offset": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "shape": "box"
+      },
       "id": 5,
       "materialOverride": {
         "materialAsset": "d3f4abb0-0000-4000-0000-000000000001",
@@ -250,6 +274,13 @@
         "receiveShadow": true
       },
       "parent": -1,
+      "rigidBody": {
+        "friction": 0.5,
+        "mass": 1.0,
+        "restitution": 0.0,
+        "type": "dynamic"
+      },
+      "scene_local_id": 6,
       "staticMesh": {
         "mesh": "c0be0000-0000-4000-0000-000000000001"
       },
@@ -257,7 +288,7 @@
       "transform": {
         "position": [
           3.0,
-          0.5,
+          1.9746865034103394,
           0.0
         ],
         "rotation": [
@@ -274,6 +305,25 @@
       }
     },
     {
+      "collider": {
+        "extents": [
+          0.3400000035762787,
+          0.3199999928474426,
+          1.8899999856948853
+        ],
+        "offset": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "shape": "box"
+      },
       "id": 6,
       "materialOverride": {
         "materialAsset": "d3f4abb0-0000-4000-0000-000000000001",
@@ -295,9 +345,16 @@
         "receiveShadow": true
       },
       "parent": -1,
+      "rigidBody": {
+        "friction": 0.5,
+        "mass": 1.0,
+        "restitution": 0.0,
+        "type": "kinematic"
+      },
+      "scene_local_id": 7,
       "script": {
-        "asset_id": "6712dd19-287c-4858-a472-d7ac4f8c2c8b",
-        "class": "BouncingRotator"
+        "asset_id": "0cbc3a86-c180-414a-91e8-fd3dcbdff875",
+        "class": ""
       },
       "staticMesh": {
         "mesh": "c0be0000-0000-4000-0000-000000000001"
@@ -306,7 +363,7 @@
       "transform": {
         "position": [
           0.10870003700256348,
-          0.5,
+          0.9083003401756287,
           -0.13630110025405884
         ],
         "rotation": [
@@ -316,25 +373,39 @@
           0.0
         ],
         "scale": [
-          1.0,
-          1.0,
-          1.0
+          0.6120356321334839,
+          0.5917598605155945,
+          3.7320220470428467
         ]
       }
     },
     {
+      "collider": {
+        "extents": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "offset": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "shape": "box"
+      },
       "id": 7,
       "materialOverride": {
         "materialAsset": "2b32fe56-31ae-4af7-8304-461fa721c53b",
-        "scalars": {
-          "baseColorFactor": [
-            0.3835063874721527,
-            0.0,
-            0.686274528503418,
-            1.0
-          ]
-        },
-        "textures": {}
+        "scalars": {},
+        "textures": {
+          "t_BaseColor": "cf9897ab-cec1-4c7e-8587-a644a1db5e5f"
+        }
       },
       "meshRenderer": {
         "castShadow": true,
@@ -342,10 +413,21 @@
         "receiveShadow": true
       },
       "parent": -1,
+      "rigidBody": {
+        "friction": 0.5,
+        "mass": 1.0,
+        "restitution": 0.0,
+        "type": "dynamic"
+      },
+      "scene_local_id": 8,
+      "script": {
+        "asset_id": "290de924-fb70-47b3-82ed-19971583aa05",
+        "class": "CharacterController"
+      },
       "staticMesh": {
         "mesh": "c0be0000-0000-4000-0000-000000000001"
       },
-      "tag": "CubeGray",
+      "tag": "Player",
       "transform": {
         "position": [
           -3.0,
@@ -366,6 +448,25 @@
       }
     },
     {
+      "collider": {
+        "extents": [
+          5.0,
+          0.07100000232458115,
+          5.0
+        ],
+        "offset": [
+          0.0,
+          -0.03999999910593033,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "shape": "box"
+      },
       "id": 8,
       "materialOverride": {
         "materialAsset": "d3f4abb0-0000-4000-0000-000000000001",
@@ -387,6 +488,13 @@
         "receiveShadow": true
       },
       "parent": -1,
+      "rigidBody": {
+        "friction": 0.5,
+        "mass": 1.0,
+        "restitution": 0.0,
+        "type": "static"
+      },
+      "scene_local_id": 9,
       "staticGeometry": true,
       "staticMesh": {
         "mesh": "c0be0000-0000-4000-0000-000000000002"
@@ -420,6 +528,41 @@
       },
       "id": 9,
       "parent": -1,
+      "scene_local_id": 10,
+      "script": {
+        "asset_id": "612a4cb2-b801-43c2-8f88-f364efd17f6e",
+        "class": "",
+        "fields": [
+          {
+            "kind": "String",
+            "name": "targetName",
+            "value": "Player"
+          },
+          {
+            "kind": "Vec3",
+            "name": "offset",
+            "value": [
+              0.0,
+              3.0,
+              6.0
+            ]
+          },
+          {
+            "kind": "Vec3",
+            "name": "lookAtBias",
+            "value": [
+              0.0,
+              1.0,
+              0.0
+            ]
+          },
+          {
+            "kind": "Float",
+            "name": "smoothing",
+            "value": 8.0
+          }
+        ]
+      },
       "tag": "MainCamera",
       "transform": {
         "position": [

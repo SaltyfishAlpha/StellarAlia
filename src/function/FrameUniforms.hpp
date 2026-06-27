@@ -24,13 +24,17 @@ struct alignas(16) FrameUniforms {
     glm::vec4 irrSH[9];         // 352..495
     // Orthographic light view-projection for the directional shadow map.
     glm::mat4 lightSpaceMatrix; // 496..559
-    // TAA temporal data.
-    glm::mat4 prevViewProj;     // 560..623  previous frame unjittered viewProj for reprojection
-    glm::vec2 jitter;           // 624..631  current Halton jitter in pixel space [-0.5, 0.5]
-    uint32_t  frameIndex;       // 632..635  frame counter mod 256
-    float     _fpad;            // 636..639  alignment
+    // TAA / motion blur temporal data.
+    glm::mat4 prevViewProj;            // 560..623  previous frame unjittered viewProj for reprojection
+    // Issue #85: unjittered current viewProj for VelocityPrepass to compute
+    // jitter-free velocity (consumed by TAA / MotionBlur / future SSR). Aligns
+    // with UE5 `nonJitteredProjMatrix` / HDRP `nonJitteredVP` industry pattern.
+    glm::mat4 currUnjitteredViewProj;  // 624..687
+    glm::vec2 jitter;                  // 688..695  current Halton jitter in pixel space [-0.5, 0.5]
+    uint32_t  frameIndex;              // 696..699  frame counter mod 256
+    float     _fpad;                   // 700..703  alignment
 };
-static_assert(sizeof(FrameUniforms) == 640,
+static_assert(sizeof(FrameUniforms) == 704,
     "FrameUniforms size mismatch with frame_uniforms.glsl set=0 binding=0");
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -108,6 +108,11 @@ public:
     void UpdateProjectPaths(const std::filesystem::path& projectDir,
                              const std::filesystem::path& cookCacheDir);
 
+    // Re-run InputMapLoader on the current project directory. Call after
+    // creating/editing/deleting a .sainputmap so the new map is registered
+    // with InputSystem without an editor restart (Issue #71).
+    void ReloadInputMaps();
+
     // Writes Directory.Build.props (always) and {stem}.csproj / {stem}.sln (if absent).
     void GenerateIdeProjectFiles(const std::filesystem::path& projectDir);
 
