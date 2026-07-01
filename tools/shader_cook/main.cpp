@@ -74,6 +74,7 @@ int main(int argc, char** argv) {
     }
 
     ShaderCook::CookDirectory(scanDir, spvOutDir, dispatchOutDir, cfg);
+    ShaderCook::CookEffects(scanDir, spvOutDir, cfg);  // Issue #88 .saeffect
 
     Core::Log::Shutdown();
     return 0;

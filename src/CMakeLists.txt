@@ -98,6 +98,14 @@ elseif(EXISTS ${CMAKE_SOURCE_DIR}/third_party/VMA/include/vk_mem_alloc.h)
     message(STATUS "VMA: Using header from separate VMA directory")
 endif()
 
+# The runtime publicly exposes Vulkan headers (VulkanDevice.hpp → volk.h →
+# <windows.h>). Propagate NOMINMAX to every consumer so the windows.h max()/min()
+# macros don't clobber std::numeric_limits / Core::Handle. (The editor previously
+# set this PRIVATE for the same reason; that guard is now redundant but harmless.)
+if(MSVC)
+    target_compile_definitions(StellarAliaRuntime PUBLIC NOMINMAX)
+endif()
+
 # Link third-party dependencies
 target_link_libraries(StellarAliaRuntime
     PUBLIC

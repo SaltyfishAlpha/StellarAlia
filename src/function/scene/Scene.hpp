@@ -28,6 +28,20 @@ struct ColorGradingSettings {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ScreenEffectInstance (Issue #88) — one entry in the per-scene custom
+// post-process stack. Mirrors Unity's Volume Override / UE's Post-Process
+// Blendable: an effect runs only if it appears here. `name` references a cooked
+// ScreenEffectType (@Effect); `params` holds per-instance @Param overrides by
+// name (missing keys fall back to the type's defaults). Order within the list =
+// execution order inside each injection point.
+// ─────────────────────────────────────────────────────────────────────────────
+struct ScreenEffectInstance {
+    std::string                       name;
+    bool                              enabled = true;
+    std::map<std::string, ParamValue> params;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PostProcessSettings — runtime post-process parameters.
 //
 // Embedded in WorldSettings::pp.  All fields have sensible defaults.
@@ -103,6 +117,21 @@ struct PostProcessSettings {
     bool  filmGrainEnabled    = false;
     float filmGrainIntensity  = 0.1f;   // [0..0.3] amplitude
     float filmGrainSize       = 1.6f;   // [0.5..5] noise tile scale
+
+    // ── Screen Space Reflections (Issue #48) ─────────────────────────────────
+    // Compute pass after DeferredLighting, before TAA; replaces the IBL
+    // env-probe specular term with screen-traced colour where confident.
+    // Relies on TAA (#42) to denoise the single-bounce ray-march jitter.
+    bool  ssrEnabled      = false;
+    float ssrMaxRoughness = 0.4f;   // fade SSR out above this roughness (fall back to IBL)
+    int   ssrMaxSteps     = 64;     // [16..128] linear march sample count
+    float ssrThickness    = 0.1f;   // view-space depth tolerance for hit test
+    float ssrStrength     = 1.0f;   // [0..1] reflection blend weight
+
+    // ── Screen Effects (Issue #88) — ordered per-scene custom post-process stack ──
+    // Each entry references a cooked .saeffect; only listed effects run. Grouped
+    // by injection point at execution time (see EffectInject).
+    std::vector<ScreenEffectInstance> screenEffects;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

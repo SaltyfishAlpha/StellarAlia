@@ -52,8 +52,9 @@ class MaterialType {
 public:
     std::string           name;
 
-    // Shader (variant 0 = base; extension point for #defines later)
-    ShaderProgram         shader;
+    // Shader program — owned by ProgramCache (Issue #86), keyed by this type's
+    // name. MaterialType references it; does not own its lifetime.
+    ShaderProgram*        shader = nullptr;
 
     // UBO layout for set=1, binding=0 (MaterialParams)
     uint32_t              uboSize = 0;

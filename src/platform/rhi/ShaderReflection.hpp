@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "platform/rhi/RHITypes.hpp"
@@ -87,10 +88,25 @@ struct ShaderReflection {
     // VkVertexInputAttributeDescription per actually-used location.
     std::vector<ShaderVertexInputDesc> vertexInputs;
 
-    // Set by ShaderCookTool for .saglsl-compiled shaders; empty for builtin shaders.
-    // Used by MaterialManager::RegisterTypesFromShaderDir to auto-register types.
-    std::string shadingModel;  // e.g. "SimpleAlbedo"
-    std::string vertShader;    // e.g. "deferred_geometry"
+    // Generic shader-level metadata, written by the cook tool from @-annotations
+    // (Issue #86/#88 generalization — replaces the ad-hoc shadingModel/vertShader
+    // fields). Keys are tool-defined strings; consumers look up what they need:
+    //   material:     "shadingModel"="SimpleAlbedo", "vertShader"="deferred_geometry"
+    //   ScreenEffect: "stage", "inject", "in", "out"
+    std::vector<std::pair<std::string, std::string>> metadata;
+
+    // Look up a metadata value by key; returns empty string if absent.
+    [[nodiscard]] std::string GetMeta(std::string_view key) const {
+        for (const auto& [k, v] : metadata)
+            if (k == key) return v;
+        return {};
+    }
+    // Update-or-append a metadata key.
+    void SetMeta(std::string key, std::string value) {
+        for (auto& [k, v] : metadata)
+            if (k == key) { v = std::move(value); return; }
+        metadata.emplace_back(std::move(key), std::move(value));
+    }
 
     // Convenience: find a binding by variable name (e.g. "u_AlbedoMap")
     [[nodiscard]] std::optional<ShaderBindingDesc>

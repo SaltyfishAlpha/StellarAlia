@@ -1,39 +1,13 @@
 #include "resource/AssetRegistry.hpp"
+#include "resource/MetaFile.hpp"
 
 #include <algorithm>
-#include <fstream>
 #include <functional>
 #include <string>
 
 namespace StellarAlia::Resource {
 
 namespace fs = std::filesystem;
-
-// ─── .sameta parser ──────────────────────────────────────────────────────────
-// Mirrors tools/cook/MetaFile format — kept local here to avoid a link
-// dependency on the cook tools.
-
-static bool ParseSameta(const fs::path& metaPath, AssetID& outID, std::string& outType) {
-    std::ifstream f(metaPath);
-    if (!f) return false;
-
-    std::string line;
-    while (std::getline(f, line)) {
-        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
-            line.pop_back();
-        if (line.empty() || line[0] == '#') continue;
-
-        const auto eq = line.find('=');
-        if (eq == std::string::npos) continue;
-
-        const std::string key   = line.substr(0, eq);
-        const std::string value = line.substr(eq + 1);
-
-        if      (key == "uuid") outID   = AssetID::FromString(value);
-        else if (key == "type") outType = value;
-    }
-    return outID.IsValid() && !outType.empty();
-}
 
 // ─── AssetRegistry ────────────────────────────────────────────────────────────
 
@@ -71,11 +45,10 @@ void AssetRegistry::ScanDir(const fs::path& dir) {
         const fs::path srcPath(srcStr);
         if (!fs::exists(srcPath)) continue;
 
-        AssetID     id;
-        std::string type;
-        if (!ParseSameta(entry.path(), id, type)) continue;
+        Import::MetaFile meta;
+        if (!Import::MetaFile::Load(entry.path(), meta)) continue;
 
-        const uint64_t idKey = id.hi ^ id.lo;
+        const uint64_t idKey = meta.uuid.hi ^ meta.uuid.lo;
         if (m_idIndex.count(idKey)) continue; // deduplicate (project wins over engine)
 
         const std::size_t pathKey = std::hash<std::string>{}(
@@ -84,7 +57,7 @@ void AssetRegistry::ScanDir(const fs::path& dir) {
         const size_t idx = m_entries.size();
         m_idIndex[idKey]   = idx;
         m_pathIndex[pathKey] = idx;
-        m_entries.push_back({ id, srcPath.filename().string(), type, srcPath });
+        m_entries.push_back({ meta.uuid, srcPath.filename().string(), meta.type, srcPath });
     }
 }
 

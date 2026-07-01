@@ -14,6 +14,7 @@ namespace StellarAlia {
 
 class MaterialManager;
 class SceneRenderer;
+class ProgramCache;
 namespace Resource { class ResourceManager; }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -30,6 +31,7 @@ struct FeatureInitContext {
     RHI::RHIDescLayoutHandle   frameLayout;
     std::string                shaderDir;
     std::string                engineShaderDir; // fallback for cross-dir vert lookups
+    ProgramCache*              programs    = nullptr; // Issue #86: GPU program owner
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -117,6 +119,14 @@ struct FrameContext {
     void BindBuffer(RHI::RHIDescSetHandle set, uint32_t binding,
                     RGBufferHandle handle) const;
 
+    // ── Storage-image (UAV) binding for compute passes ────────────────────────
+    //
+    // Queues a storage-image descriptor write for a transient/imported RG texture,
+    // resolved after Execute() once slot handles are valid. The texture must be
+    // created with RHITextureUsage::UnorderedAccess. No-op if either handle invalid.
+    void BindStorageImage(RHI::RHIDescSetHandle set, uint32_t binding,
+                          RGTextureHandle handle) const;
+
 private:
     friend class SceneRenderer;
 
@@ -133,6 +143,7 @@ private:
     // mutable: Bind* methods are const so callers need not change const FrameContext& signatures.
     mutable std::vector<PendingBinding>       m_pendingBindings;
     mutable std::vector<PendingBufferBinding> m_pendingBufferBindings;
+    mutable std::vector<PendingBinding>       m_pendingStorageImages;
 
     // Resolves all queued bindings and writes descriptor sets.
     // Called by SceneRenderer after AllocateSlots() but before Execute().

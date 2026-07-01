@@ -1,4 +1,5 @@
 #include "function/material/MaterialManager.hpp"
+#include "function/material/ProgramCache.hpp"
 #include "function/renderer/RenderFeature.hpp"
 #include "platform/rhi/ShaderReflection.hpp"
 #include "platform/rhi/ShaderReflectionIO.hpp"
@@ -38,9 +39,7 @@ void MaterialManager::Init(RHI::IRHIDevice*             device,
 
 void MaterialManager::Shutdown() {
     m_cachedInstances.clear();
-    for (auto& [name, type] : m_types)
-        type->shader.Unload(m_device);
-    m_types.clear();
+    m_types.clear();  // ShaderPrograms owned by ProgramCache (Issue #86)
     m_textureHeap.Shutdown();
     m_ringBuffer = {};
     m_device     = nullptr;
@@ -69,10 +68,8 @@ void MaterialManager::ClearProjectInstances() {
 void MaterialManager::ClearProjectTypes() {
     std::vector<std::string> toRemove;
     for (auto& [name, type] : m_types) {
-        if (type->isProjectType) {
-            type->shader.Unload(m_device);
-            toRemove.push_back(name);
-        }
+        if (type->isProjectType)
+            toRemove.push_back(name);  // ShaderProgram freed by ProgramCache::ClearProjectPrograms
     }
     for (const auto& name : toRemove)
         m_types.erase(name);
@@ -88,43 +85,23 @@ MaterialType* MaterialManager::RegisterType(std::unique_ptr<MaterialType> type) 
 }
 
 bool MaterialManager::RegisterTypeFromShaders(const MaterialTypeDesc&   desc,
-                                               const FeatureInitContext& ctx)
+                                               const FeatureInitContext& ctx,
+                                               bool                      isProjectType)
 {
-    // Project material types may reference vert/frag SPV that live in the engine
-    // builtin dir (e.g. deferred_geometry.vert), so resolve each file by trying
-    // ctx.shaderDir first then falling back to ctx.engineShaderDir.
-    auto resolve = [&](const std::string& rel) {
-        const std::string primary = ctx.shaderDir + "/" + rel;
-        if (std::filesystem::exists(primary)) return primary;
-        if (!ctx.engineShaderDir.empty() && ctx.engineShaderDir != ctx.shaderDir) {
-            const std::string fallback = ctx.engineShaderDir + "/" + rel;
-            if (std::filesystem::exists(fallback)) return fallback;
-        }
-        return primary;  // let the caller report the missing primary path
-    };
-    const std::string vertSpvPath  = resolve(desc.vertShader + ".vert.spv");
-    const std::string fragSpvPath  = resolve(desc.fragShader + ".frag.spv");
-    const std::string vertReflPath = resolve(desc.vertShader + ".vert.refl");
-    const std::string fragReflPath = resolve(desc.fragShader + ".frag.refl");
-
-    const auto vertSpv = LoadSpv(vertSpvPath);
-    const auto fragSpv = LoadSpv(fragSpvPath);
-    if (vertSpv.empty() || fragSpv.empty()) {
-        SA_LOG_ERROR("MaterialManager: '{}' — shader .spv not found", desc.name);
-        return false;
-    }
-
-    RHI::ShaderReflection vertRefl, fragRefl;
-    if (!RHI::ShaderReflectionIO::LoadFromFile(vertReflPath, vertRefl) ||
-        !RHI::ShaderReflectionIO::LoadFromFile(fragReflPath, fragRefl)) {
-        SA_LOG_ERROR("MaterialManager: '{}' — .refl files not found", desc.name);
-        return false;
-    }
-
-    const RHI::ShaderReflection merged = RHI::MergeReflections(vertRefl, fragRefl);
-
     auto type  = std::make_unique<MaterialType>();
     type->name = desc.name;
+
+    // ShaderProgram (vert+frag + merged reflection) is owned by ProgramCache (#86),
+    // keyed by type name; GetGraphics handles SPV/refl load + the engine-dir fallback.
+    // We read the merged reflection back from it for parameter/texture extraction —
+    // no second .refl load here.
+    type->shader = ctx.programs->GetGraphics(desc.name, desc.vertShader, desc.fragShader,
+                                             ctx.shaderDir, ctx.engineShaderDir, isProjectType);
+    if (!type->shader) {
+        SA_LOG_ERROR("MaterialManager: '{}' — shader program load failed", desc.name);
+        return false;
+    }
+    const RHI::ShaderReflection& merged = type->shader->GetMergedReflection();
 
     if (auto ubo = merged.FindBinding(2, 0)) {
         // Issue #72 Step 6.5: SSBO at set=2 binding=0 named "MaterialParams" → new path.
@@ -199,16 +176,6 @@ bool MaterialManager::RegisterTypeFromShaders(const MaterialTypeDesc&   desc,
     type->defaultDepthWrite = desc.depthWrite;
     type->noVertexInput     = desc.noVertexInput;
 
-    ShaderProgram::Desc pd;
-    pd.vertSpv        = vertSpv;  pd.vertRefl = vertRefl;
-    pd.fragSpv        = fragSpv;  pd.fragRefl = fragRefl;
-    pd.frameLayout    = ctx.frameLayout;
-    pd.bindlessLayout = m_textureHeap.GetLayout();
-    if (!type->shader.Load(ctx.device, pd)) {
-        SA_LOG_ERROR("MaterialManager: '{}' — shader program load failed", desc.name);
-        return false;
-    }
-
     RegisterType(std::move(type));
     return true;
 }
@@ -265,21 +232,20 @@ void MaterialManager::RegisterTypesFromShaderDir(const std::string&        shade
 
         RHI::ShaderReflection fragRefl;
         if (!RHI::ShaderReflectionIO::LoadFromFile(p, fragRefl)) continue;
-        if (fragRefl.shadingModel.empty()) continue;   // builtin shader, not a .saglsl type
+        const std::string shadingModel = fragRefl.GetMeta("shadingModel");
+        if (shadingModel.empty()) continue;   // builtin shader, not a .saglsl type
 
         // Skip already-registered types (builtin or previously scanned).
-        if (GetType(fragRefl.shadingModel)) continue;
+        if (GetType(shadingModel)) continue;
 
-        const std::string fragStem = stem2.string();  // e.g. "simple_albedo.gbuffer"
-        const std::string vertName = fragRefl.vertShader.empty()
-                                         ? "deferred_geometry"
-                                         : fragRefl.vertShader;
+        const std::string fragStem  = stem2.string();  // e.g. "simple_albedo.gbuffer"
+        const std::string vertMeta  = fragRefl.GetMeta("vertShader");
+        const std::string vertName  = vertMeta.empty() ? "deferred_geometry" : vertMeta;
 
-        SA_LOG_INFO("MaterialManager: auto-registering '{}' from .refl",
-                    fragRefl.shadingModel);
-        if (RegisterTypeFromShaders({fragRefl.shadingModel, vertName, fragStem}, ctx)) {
+        SA_LOG_INFO("MaterialManager: auto-registering '{}' from .refl", shadingModel);
+        if (RegisterTypeFromShaders({shadingModel, vertName, fragStem}, ctx, isProjectType)) {
             if (isProjectType) {
-                if (auto* type = GetType(fragRefl.shadingModel))
+                if (auto* type = GetType(shadingModel))
                     type->isProjectType = true;
             }
         }

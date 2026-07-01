@@ -13,7 +13,7 @@ public:
     void Draw(const std::filesystem::path& path) override;
 };
 
-// .txt .md .saglsl .glsl .vert .frag .comp .hlsl — read-only text content.
+// .txt .md .saglsl .saeffect .glsl .vert .frag .comp .hlsl — read-only text content.
 class TextAssetInspector : public IAssetInspector {
 public:
     void Draw(const std::filesystem::path& path) override;

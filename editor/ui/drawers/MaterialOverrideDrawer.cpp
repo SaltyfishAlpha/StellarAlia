@@ -6,6 +6,7 @@
 #include "function/material/MaterialType.hpp"
 #include "resource/AssetRegistry.hpp"
 #include "ui/drawers/DrawerHelpers.hpp"
+#include "ui/drawers/ParamWidgets.hpp"
 
 #include <imgui.h>
 #include <glm/glm.hpp>
@@ -100,48 +101,14 @@ bool MaterialOverrideDrawer::TryDraw(entt::registry& reg, entt::entity entity,
             const char*     labelStr = (def && !def->displayName.empty())
                                        ? def->displayName.c_str() : paramName.c_str();
 
-            using T = RHI::ParamUIType;
-            const T uit = def ? def->uiType : T::Inferred;
-
             ImGui::TextUnformatted(labelStr);
             ImGui::SameLine();
             const float widgetW = std::max(30.f, ImGui::GetContentRegionAvail().x - 28.f);
             ImGui::SetNextItemWidth(widgetW);
             const std::string undoDesc = "Edit " + paramName;
-            auto markDirty = [&scene]{ scene.MarkMaterialDirty(); };
-            if (auto* f = std::get_if<float>(&val)) {
-                const float lo  = def ? def->minValue : 0.f;
-                const float hi  = def ? def->maxValue : 1.f;
-                const float spd = (hi - lo) * 0.005f;
-                changed |= TrackedFieldEdit(f, ctx, undoDesc,
-                    [spd, lo, hi](float* p){ return ImGui::DragFloat("##v", p, spd, lo, hi); },
-                    markDirty);
-            } else if (auto* v2 = std::get_if<glm::vec2>(&val)) {
-                changed |= TrackedFieldEdit(v2, ctx, undoDesc,
-                    [](glm::vec2* p){ return ImGui::DragFloat2("##v", glm::value_ptr(*p), 0.01f); },
-                    markDirty);
-            } else if (auto* v3 = std::get_if<glm::vec3>(&val)) {
-                if (uit == T::Color3 || uit == T::Inferred)
-                    changed |= TrackedFieldEdit(v3, ctx, undoDesc,
-                        [](glm::vec3* p){ return ImGui::ColorEdit3("##v", glm::value_ptr(*p)); },
-                        markDirty);
-                else
-                    changed |= TrackedFieldEdit(v3, ctx, undoDesc,
-                        [](glm::vec3* p){ return ImGui::DragFloat3("##v", glm::value_ptr(*p), 0.01f); },
-                        markDirty);
-            } else if (auto* v4 = std::get_if<glm::vec4>(&val)) {
-                if (uit == T::Color4)
-                    changed |= TrackedFieldEdit(v4, ctx, undoDesc,
-                        [](glm::vec4* p){
-                            return ImGui::ColorEdit4("##v", glm::value_ptr(*p),
-                                                     ImGuiColorEditFlags_Float);
-                        },
-                        markDirty);
-                else
-                    changed |= TrackedFieldEdit(v4, ctx, undoDesc,
-                        [](glm::vec4* p){ return ImGui::DragFloat4("##v", glm::value_ptr(*p), 0.01f); },
-                        markDirty);
-            }
+            ParamDef fallback;  // Inferred / [0,1] when the param has no live def
+            changed |= DrawReflectedParam(def ? *def : fallback, val, "##v", &ctx, undoDesc,
+                                          [&scene]{ scene.MarkMaterialDirty(); });
             ImGui::SameLine();
             if (ImGui::SmallButton("-##rmS")) toRemove = paramName;
             ImGui::PopID();
@@ -181,19 +148,7 @@ bool MaterialOverrideDrawer::TryDraw(entt::registry& reg, entt::entity entity,
                                   ? param.name.c_str()
                                   : param.displayName.c_str();
                 if (ImGui::Selectable(lbl)) {
-                    if (param.size == 16)
-                        mat->scalars[param.name] = glm::vec4{
-                            param.defaultValue[0], param.defaultValue[1],
-                            param.defaultValue[2], param.defaultValue[3]};
-                    else if (param.size == 12)
-                        mat->scalars[param.name] = glm::vec3{
-                            param.defaultValue[0], param.defaultValue[1],
-                            param.defaultValue[2]};
-                    else if (param.size == 8)
-                        mat->scalars[param.name] = glm::vec2{
-                            param.defaultValue[0], param.defaultValue[1]};
-                    else
-                        mat->scalars[param.name] = param.defaultValue[0];
+                    mat->scalars[param.name] = DefaultParamValue(param);
                     changed = true;
                     ImGui::CloseCurrentPopup();
                 }

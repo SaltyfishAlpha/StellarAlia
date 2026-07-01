@@ -91,7 +91,6 @@ int main() {
 
     // ── Spawn CesiumMan entity ────────────────────────────────────────────────
     const AssetID meshUUID  = AssetID::FromString("ce510000-0000-4000-8000-000000000001");
-    const AssetID skelAsset = DeriveSkinID(meshUUID, 0);
     const AssetID animAsset = DeriveAnimID(meshUUID, 0);
 
     entt::entity cesiumMan = scene.CreateEntity("CesiumMan");
@@ -106,7 +105,8 @@ int main() {
         {1.f, 1.f, 1.f}
     };
 
-    reg.emplace<SkeletonComponent>(cesiumMan, SkeletonComponent{skelAsset});
+    // Skeleton is derived internally by AnimationSystem::PrepareEntity from the
+    // SkinnedMeshComponent.meshAsset (DeriveSkinID) — no separate component needed.
     reg.emplace<AnimatorComponent>(cesiumMan, AnimatorComponent{animAsset});
     {
         auto& smc   = reg.emplace<SkinnedMeshComponent>(cesiumMan);
@@ -141,7 +141,7 @@ int main() {
         const float dt = std::chrono::duration<float>(now - lastTime).count();
         lastTime = now;
 
-        animSystem.Update(dt, reg, device.get());
+        animSystem.Update(dt, reg, resMgr, device.get());
         renderer.RenderFrame(scene, static_cast<uint32_t>(w), static_cast<uint32_t>(h));
     }
 

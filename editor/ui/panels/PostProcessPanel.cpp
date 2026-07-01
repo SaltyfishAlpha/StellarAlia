@@ -1,15 +1,34 @@
 #include "ui/panels/PostProcessPanel.hpp"
 #include "ui/drawers/DrawerHelpers.hpp"
+#include "ui/drawers/ParamWidgets.hpp"
 #include "resource/AssetRegistry.hpp"
+#include "engine/Application.hpp"
+#include "function/renderer/SceneRenderer.hpp"
 
 #include <imgui.h>
 
+#include <algorithm>
+
 namespace StellarAlia::Editor {
+
+namespace {
+// Draw one ScreenEffect @Param (Issue #88): read the stored override or the
+// schema default, draw the reflected widget, store back on change. Unchanged
+// params stay absent from the map (fall back to defaults at resolve time).
+bool DrawEffectParam(const ParamDef& def, std::map<std::string, ParamValue>& params) {
+    const char* label = def.displayName.empty() ? def.name.c_str() : def.displayName.c_str();
+    const auto  it    = params.find(def.name);
+    ParamValue  v     = (it != params.end()) ? it->second : DefaultParamValue(def);
+    if (DrawReflectedParam(def, v, label)) { params[def.name] = v; return true; }
+    return false;
+}
+} // namespace
 
 PostProcessPanel::PostProcessPanel(EditorContext& ctx, PostProcessPresenter& presenter)
     : m_presenter(presenter)
     , m_scene(ctx.scene)
     , m_registry(ctx.assetReg)
+    , m_app(ctx.app)
 {}
 
 void PostProcessPanel::OnDraw() {
@@ -179,6 +198,26 @@ void PostProcessPanel::OnDraw() {
 
     ImGui::Spacing();
 
+    // ── Screen Space Reflections (Issue #48) ─────────────────────────────────
+    if (ImGui::CollapsingHeader("Screen Space Reflections")) {
+        if (ImGui::Checkbox("Enabled##ssr", &pp.ssrEnabled))
+            liveUpdate = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Enable TAA as well — it denoises the SSR ray-march jitter.");
+        ImGui::BeginDisabled(!pp.ssrEnabled);
+        if (ImGui::SliderFloat("Max Roughness##ssr", &pp.ssrMaxRoughness, 0.0f, 1.0f, "%.2f"))
+            liveUpdate = true;
+        if (ImGui::SliderInt  ("Max Steps##ssr",     &pp.ssrMaxSteps,    16,   128))
+            liveUpdate = true;
+        if (ImGui::SliderFloat("Thickness##ssr",     &pp.ssrThickness,   0.01f, 1.0f, "%.3f"))
+            liveUpdate = true;
+        if (ImGui::SliderFloat("Strength##ssr",      &pp.ssrStrength,    0.0f, 1.0f, "%.2f"))
+            liveUpdate = true;
+        ImGui::EndDisabled();
+    }
+
+    ImGui::Spacing();
+
     // ── Screen modifications (Issue #47) ─────────────────────────────────────
     if (ImGui::CollapsingHeader("Vignette")) {
         if (ImGui::Checkbox("Enabled##vig", &pp.vignetteEnabled))
@@ -213,6 +252,71 @@ void PostProcessPanel::OnDraw() {
         if (ImGui::SliderFloat("Size##grain",      &pp.filmGrainSize,      0.5f, 5.f,  "%.2f"))
             liveUpdate = true;
         ImGui::EndDisabled();
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+
+    // ── Screen Effects (Issue #88) — per-scene custom .saeffect stack ───────────
+    // Mirrors Unity Volume Overrides / UE Blendables: only effects added here run,
+    // in list order within each injection point. "Add Effect" lists the cooked
+    // catalog (SceneRenderer's ScreenEffectRegistry).
+    if (m_app && ImGui::CollapsingHeader("Screen Effects", ImGuiTreeNodeFlags_DefaultOpen)) {
+        auto& fxReg = m_app->GetRenderer().GetScreenEffectRegistry();
+        auto& list  = pp.screenEffects;
+
+        int removeIdx = -1;
+        for (int i = 0; i < static_cast<int>(list.size()); ++i) {
+            ScreenEffectInstance&   se   = list[i];
+            const ScreenEffectType* type = fxReg.Find(se.name);
+            ImGui::PushID(i);
+
+            if (ImGui::Checkbox("##en", &se.enabled)) liveUpdate = true;
+            ImGui::SameLine();
+
+            // Drag handle: canonical ImGui reorder (swap with neighbour while dragging).
+            ImGui::Selectable(type ? type->name.c_str() : se.name.c_str(), false, 0, ImVec2(180, 0));
+            if (ImGui::IsItemActive() && !ImGui::IsItemHovered()) {
+                const int dir = ImGui::GetMouseDragDelta(0).y < 0.f ? -1 : 1;
+                const int j   = i + dir;
+                if (j >= 0 && j < static_cast<int>(list.size())) {
+                    std::swap(list[i], list[j]);
+                    ImGui::ResetMouseDragDelta();
+                    liveUpdate = true;
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Remove")) removeIdx = i;
+
+            if (!type) {
+                ImGui::TextColored(ImVec4(1.f, 0.5f, 0.3f, 1.f), "  effect not in catalog (cook missing?)");
+            } else {
+                ImGui::Indent();
+                for (const auto& def : type->params)
+                    if (DrawEffectParam(def, se.params)) liveUpdate = true;
+                ImGui::Unindent();
+            }
+            ImGui::PopID();
+        }
+        if (removeIdx >= 0) { list.erase(list.begin() + removeIdx); liveUpdate = true; }
+
+        ImGui::Spacing();
+        if (ImGui::Button("Add Effect")) ImGui::OpenPopup("##add_effect");
+        if (ImGui::BeginPopup("##add_effect")) {
+            bool any = false;
+            for (const auto& t : fxReg.All()) {
+                const bool present = std::any_of(list.begin(), list.end(),
+                    [&](const ScreenEffectInstance& s) { return s.name == t->name; });
+                if (present) continue;
+                any = true;
+                if (ImGui::Selectable(t->name.c_str())) {
+                    list.push_back(ScreenEffectInstance{ t->name, true, {} });
+                    liveUpdate = true;
+                }
+            }
+            if (!any) ImGui::TextDisabled("No effects available (cook a .saeffect)");
+            ImGui::EndPopup();
+        }
     }
 
     if (liveUpdate)

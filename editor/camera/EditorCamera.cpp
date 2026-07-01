@@ -16,12 +16,18 @@ void EditorCamera::Update(const InputSystem& input, float dt, bool mouseLook) {
     // so the qualified key is absent → reads naturally return zero.
     static constexpr std::string_view kMap = "Viewport";
 
-    if (mouseLook) {
-        const glm::vec2 look = input.ReadVec2(kMap, "Look");
-        yaw   -= look.x;
-        pitch -= look.y;
-        pitch  = glm::clamp(pitch, -80.f, 80.f);
-    }
+    // WASD fly navigation is gated behind right-mouse (mouseLook), matching
+    // Unity's flythrough model: while not holding RMB, Keyboard/S is free to act
+    // as the GizmoScale shortcut instead of moving the camera. Without this gate
+    // S means two things at once (move-back AND scale-gizmo) — see EditorMode's
+    // GizmoScale canExecute guard.
+    if (!mouseLook)
+        return;
+
+    const glm::vec2 look = input.ReadVec2(kMap, "Look");
+    yaw   -= look.x;
+    pitch -= look.y;
+    pitch  = glm::clamp(pitch, -80.f, 80.f);
 
     const glm::quat  rot   = Rotation();
     const glm::vec3  fwd   = rot * glm::vec3{ 0.f,  0.f, -1.f };

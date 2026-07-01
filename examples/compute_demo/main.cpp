@@ -98,8 +98,10 @@ int main() {
     }
 
     // ── ShaderProgram: fullscreen blit ────────────────────────────────────────
-    // The blit shader samples at set=0 (no per-frame globals in this pass).
-    // Passing its texture layout as frameLayout places it at set=0 in the pipeline.
+    // The blit shader samples its source texture at set=1 — the slot ShaderProgram
+    // wires from Desc::frameLayout. (set=0 is reserved for the bindless heap since
+    // Issue #72, so a plain sampler2D must not sit there.) We use a demo-local
+    // blit fragment shader (compute_demo_blit.frag) declared at set=1 accordingly.
     ShaderProgram blitProg;
     RHIDescSetHandle  blitDs;
     RHIPipelineHandle blitPipeline;
@@ -107,22 +109,22 @@ int main() {
         // SPV data must be stored as named locals; std::span is a non-owning view
         // and must not be initialised from a temporary vector.
         const auto blitVertSpv  = LoadSpv(shaderDir + "/fullscreen_tri.vert.spv");
-        const auto blitFragSpv  = LoadSpv(shaderDir + "/fullscreen_blit.frag.spv");
+        const auto blitFragSpv  = LoadSpv(shaderDir + "/compute_demo_blit.frag.spv");
         const auto blitVertRefl = LoadRefl(shaderDir + "/fullscreen_tri.vert.refl");
-        const auto blitFragRefl = LoadRefl(shaderDir + "/fullscreen_blit.frag.refl");
+        const auto blitFragRefl = LoadRefl(shaderDir + "/compute_demo_blit.frag.refl");
 
         const ShaderReflection blitMerged = MergeReflections(blitVertRefl, blitFragRefl);
 
-        // Layout for the blit's source sampler (set=0, binding=0)
+        // Layout for the blit's source sampler (set=1, binding=0)
         RHIDescLayoutHandle blitTexLayout =
-            device->CreateDescriptorSetLayout(blitMerged, 0);
+            device->CreateDescriptorSetLayout(blitMerged, 1);
 
         ShaderProgram::Desc blitDesc{};
         blitDesc.vertSpv     = blitVertSpv;   // span views named locals above
         blitDesc.vertRefl    = blitVertRefl;
         blitDesc.fragSpv     = blitFragSpv;
         blitDesc.fragRefl    = blitFragRefl;
-        blitDesc.frameLayout = blitTexLayout; // set=0 = source texture
+        blitDesc.frameLayout = blitTexLayout; // set=1 = source texture
         if (!blitProg.Load(device.get(), blitDesc)) {
             SA_LOG_CRITICAL("ComputeDemo: ShaderProgram (blit) Load failed");
             return 1;
@@ -138,7 +140,7 @@ int main() {
 
         blitPipeline = blitProg.GetOrCreatePipeline(
             device.get(), blitKey,
-            RHICullMode::None, RHIBlendMode::Opaque,
+            RHICullMode::None, RHIBlendMode::Opaque, RHITopology::TriangleList,
             /*depthTest=*/false, /*depthWrite=*/false, /*noVertexInput=*/true);
         if (!blitPipeline.IsValid()) {
             SA_LOG_CRITICAL("ComputeDemo: blit pipeline creation failed");
@@ -208,7 +210,7 @@ int main() {
             cmd.SetViewport(RHIViewport{0.f, 0.f, float(w), float(h)});
             cmd.SetScissor(RHIScissor{0, 0, uint32_t(w), uint32_t(h)});
             cmd.SetPipeline(blitPipeline);
-            cmd.SetDescriptorSet(0, blitDs);
+            cmd.SetDescriptorSet(1, blitDs);  // set=1 = source texture (see blit shader)
             cmd.Draw(3, 1, 0, 0);
             cmd.EndRenderPass();
         });

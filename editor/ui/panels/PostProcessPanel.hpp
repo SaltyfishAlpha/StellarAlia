@@ -6,6 +6,7 @@
 #include "function/scene/Scene.hpp"
 
 namespace StellarAlia::Resource { class AssetRegistry; }
+namespace StellarAlia { class Application; }
 
 namespace StellarAlia::Editor {
 
@@ -20,6 +21,7 @@ private:
     PostProcessPresenter&          m_presenter;
     Scene*                         m_scene    = nullptr;
     const Resource::AssetRegistry* m_registry = nullptr;
+    Application*                   m_app      = nullptr;  // ScreenEffect catalog access (Issue #88)
 };
 
 } // namespace StellarAlia::Editor

@@ -286,8 +286,8 @@ static bool CompileEntry(const ShaderEntry& entry,
         {
             RHI::ShaderReflection refl;
             if (RHI::ShaderReflectionIO::LoadFromFile(reflPath, refl)) {
-                refl.shadingModel = entry.shadingModel;
-                refl.vertShader   = entry.vertShader;
+                refl.SetMeta("shadingModel", entry.shadingModel);
+                refl.SetMeta("vertShader",   entry.vertShader);
                 if (!RHI::ShaderReflectionIO::SaveToFile(reflPath, refl))
                     SA_LOG_WARN("ShaderCook: could not re-write '{}'", reflPath.string());
             } else {
@@ -423,6 +423,207 @@ bool RecompileDeferredLighting(const fs::path&              fragSrcPath,
 
     SA_LOG_INFO("ShaderCook: deferred_lighting.frag.spv written to '{}'", outSpvPath.string());
     return true;
+}
+
+// ── .saeffect parser + compiler (Issue #88 ScreenEffect) ───────────────────────
+//
+// A .saeffect declares one screen pass: header annotations (@Effect/@Stage/
+// @Inject/@In/@Out) + a single `#pragma sa_section fragment|compute` body.
+// @Param values are inline UBO-member annotations (set=2 binding=0), parsed by
+// ShaderReflectTool from the source, exactly as materials do — no cook handling.
+// Unlike .saglsl there is no dispatch generation; each effect is standalone.
+
+struct EffectEntry {
+    std::string name;                 // @Effect
+    std::string stage;                // "fragment" | "compute" (from #pragma sa_section)
+    std::string inject;               // @Inject
+    std::vector<std::string> ins;     // @In tokens, e.g. "hdr:sampled"
+    std::vector<std::string> outs;    // @Out tokens, e.g. "hdr"
+    std::string body;                 // shader GLSL
+    std::string stem;                 // source filename incl. ext, e.g. "grayscale.saeffect"
+    fs::path    sourcePath;
+};
+
+// Normalize "hdr : sampled" → "hdr:sampled"; "hdr" → "hdr".
+static std::string NormalizeResourceToken(const std::string& raw) {
+    const auto colon = raw.find(':');
+    if (colon == std::string::npos) return Trim(raw);
+    return Trim(raw.substr(0, colon)) + ":" + Trim(raw.substr(colon + 1));
+}
+
+static bool ParseSaEffect(const fs::path& path, EffectEntry& out, std::string& err) {
+    std::ifstream f(path);
+    if (!f) { err = "cannot open " + path.string(); return false; }
+
+    out = {};
+    out.sourcePath = path;
+    out.stem       = path.filename().string();  // "grayscale.saeffect"
+
+    enum class Mode { Header, Body } mode = Mode::Header;
+    std::string line;
+    std::string headerStage;  // optional @Stage; validated against section marker
+
+    while (std::getline(f, line)) {
+        const std::string trimmed = Trim(line);
+
+        if (mode == Mode::Header) {
+            if (trimmed.rfind("// @", 0) == 0) {
+                const std::string rest = Trim(trimmed.substr(4));
+                const auto sp = rest.find(' ');
+                if (sp != std::string::npos) {
+                    const std::string key = Trim(rest.substr(0, sp));
+                    std::string val       = Trim(rest.substr(sp + 1));
+                    if (val.size() >= 2 && val.front() == '"' && val.back() == '"')
+                        val = val.substr(1, val.size() - 2);
+                    if      (key == "Effect") out.name    = val;
+                    else if (key == "Stage")  headerStage = val;
+                    else if (key == "Inject") out.inject  = val;
+                    else if (key == "In")     out.ins.push_back(NormalizeResourceToken(val));
+                    else if (key == "Out")    out.outs.push_back(NormalizeResourceToken(val));
+                }
+                continue;
+            }
+            if (trimmed == "#pragma sa_section fragment") { out.stage = "fragment"; mode = Mode::Body; continue; }
+            if (trimmed == "#pragma sa_section compute")  { out.stage = "compute";  mode = Mode::Body; continue; }
+            continue;
+        }
+
+        if (trimmed == "#pragma sa_end_section") { mode = Mode::Header; continue; }
+        out.body += line + '\n';
+    }
+
+    if (out.name.empty())   { err = "missing @Effect in " + path.string(); return false; }
+    if (out.inject.empty()) { err = "missing @Inject in " + path.string(); return false; }
+    if (out.stage.empty())  { err = "missing '#pragma sa_section fragment|compute' in " + path.string(); return false; }
+    if (out.body.empty())   { err = "empty shader body in " + path.string(); return false; }
+    if (!headerStage.empty() && headerStage != out.stage)
+        SA_LOG_WARN("ShaderCook: @Stage '{}' disagrees with section '{}' in {} — using section",
+                    headerStage, out.stage, path.filename().string());
+    return true;
+}
+
+static bool CompileEffectEntry(const EffectEntry& entry,
+                               const fs::path& spvOutDir,
+                               const CookConfig& cfg) {
+    fs::create_directories(spvOutDir);
+
+    const bool        isCompute = (entry.stage == "compute");
+    const std::string kind      = isCompute ? "comp" : "frag";
+    const fs::path    src       = spvOutDir / (entry.stem + "." + kind);
+    const fs::path    spvPath   = spvOutDir / (entry.stem + "." + kind + ".spv");
+    const fs::path    reflPath  = spvOutDir / (entry.stem + "." + kind + ".refl");
+
+    {
+        std::ofstream f(src);
+        if (!f) { SA_LOG_ERROR("ShaderCook: cannot write '{}'", src.string()); return false; }
+        f << entry.body;
+    }
+
+    if (!cfg.force && fs::exists(spvPath) && fs::exists(reflPath)) {
+        const auto srcMtime = fs::last_write_time(entry.sourcePath);
+        if (fs::last_write_time(spvPath) >= srcMtime &&
+            fs::last_write_time(reflPath) >= srcMtime) {
+            SA_LOG_INFO("ShaderCook: effect '{}' up to date", entry.name);
+            return true;
+        }
+    }
+
+    std::string includes;
+    for (const auto& inc : cfg.includePaths)
+        includes += " -I" + Q(inc);
+
+    const std::string glslcCmd =
+        Q(cfg.glslcPath)
+        + (isCompute ? " -fshader-stage=comp" : " -fshader-stage=frag")
+        + includes
+        + " " + Q(src)
+        + " -o " + Q(spvPath);
+
+    SA_LOG_INFO("ShaderCook: compiling effect {}.{} ...", entry.stem, kind);
+    if (const int ret = Exec(glslcCmd); ret != 0) {
+        SA_LOG_ERROR("ShaderCook: glslc failed (exit {}): {}", ret, glslcCmd);
+        std::error_code ec; fs::remove(spvPath, ec); fs::remove(reflPath, ec);
+        return false;
+    }
+
+    if (!cfg.reflToolPath.empty()) {
+        const std::string reflCmd =
+            Q(cfg.reflToolPath)
+            + " --spv "  + Q(spvPath)
+            + " --out "  + Q(reflPath)
+            + " --glsl " + Q(src);
+        if (const int ret = Exec(reflCmd); ret != 0) {
+            SA_LOG_ERROR("ShaderCook: ShaderReflectTool failed (exit {})", ret);
+            std::error_code ec; fs::remove(spvPath, ec); fs::remove(reflPath, ec);
+            return false;
+        }
+
+        auto join = [](const std::vector<std::string>& v) {
+            std::string s;
+            for (size_t i = 0; i < v.size(); ++i) { if (i) s += ','; s += v[i]; }
+            return s;
+        };
+
+        // Standard .refl + metadata keys (mirrors materials' shadingModel injection).
+        RHI::ShaderReflection refl;
+        if (RHI::ShaderReflectionIO::LoadFromFile(reflPath, refl)) {
+            refl.SetMeta("effect", entry.name);
+            refl.SetMeta("stage",  entry.stage);
+            refl.SetMeta("inject", entry.inject);
+            refl.SetMeta("in",     join(entry.ins));
+            refl.SetMeta("out",    join(entry.outs));
+            if (!RHI::ShaderReflectionIO::SaveToFile(reflPath, refl))
+                SA_LOG_WARN("ShaderCook: could not re-write '{}'", reflPath.string());
+        } else {
+            SA_LOG_WARN("ShaderCook: could not read '{}' for metadata injection", reflPath.string());
+        }
+    }
+
+    SA_LOG_INFO("ShaderCook: cooked effect '{}' → {}", entry.name, spvPath.filename().string());
+    return true;
+}
+
+bool HasSaeffectFiles(const fs::path& scanDir) {
+    if (!fs::is_directory(scanDir)) return false;
+    for (const auto& de : fs::recursive_directory_iterator(
+             scanDir, fs::directory_options::skip_permission_denied))
+        if (de.path().extension() == ".saeffect")
+            return true;
+    return false;
+}
+
+CookResult CookEffects(const fs::path& scanDir,
+                       const fs::path& spvOutDir,
+                       const CookConfig& cfg) {
+    CookResult result;
+
+    std::vector<fs::path> sources;
+    if (fs::is_directory(scanDir)) {
+        for (const auto& de : fs::recursive_directory_iterator(
+                 scanDir, fs::directory_options::skip_permission_denied))
+            if (de.path().extension() == ".saeffect")
+                sources.push_back(de.path());
+    }
+    if (sources.empty()) return result;  // success=true, modelCount=0
+
+    std::vector<EffectEntry> good;
+    for (const auto& src : sources) {
+        EffectEntry entry;
+        std::string err;
+        if (!ParseSaEffect(src, entry, err)) {
+            SA_LOG_ERROR("ShaderCook: parse error: {}", err);
+            result.failedModels.push_back(src.stem().string());
+            continue;
+        }
+        if (!CompileEffectEntry(entry, spvOutDir, cfg)) {
+            result.failedModels.push_back(entry.name);
+            continue;
+        }
+        good.push_back(std::move(entry));
+    }
+
+    result.modelCount = static_cast<int>(good.size());
+    return result;
 }
 
 } // namespace StellarAlia::ShaderCook

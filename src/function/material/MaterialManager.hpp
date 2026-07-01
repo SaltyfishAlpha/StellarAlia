@@ -69,7 +69,8 @@ public:
     // Load shaders, parse reflection, build, and register a MaterialType in one call.
     // Returns false on shader load or compile failure.
     // This is the preferred path from RenderFeature::OnInit.
-    bool RegisterTypeFromShaders(const MaterialTypeDesc& desc, const FeatureInitContext& ctx);
+    bool RegisterTypeFromShaders(const MaterialTypeDesc& desc, const FeatureInitContext& ctx,
+                                 bool isProjectType = false);
 
     // Load a ShaderProgram directly from shader stems (without registering a MaterialType).
     // Use for internal passes that need a ShaderProgram but not a full MaterialType, e.g. GPU skinning.

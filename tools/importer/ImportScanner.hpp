@@ -1,6 +1,6 @@
 #pragma once
 
-#include "importer/MetaFile.hpp"
+#include "resource/MetaFile.hpp"
 #include <filesystem>
 #include <string>
 #include <vector>

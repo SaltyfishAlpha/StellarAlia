@@ -47,6 +47,10 @@ public:
     const std::filesystem::path& MatTemplatePath()    const { return m_matTemplate; }
     // Absolute path to templates/shaders/NewShader.saglsl, or empty if not found.
     const std::filesystem::path& ShaderTemplatePath() const { return m_shaderTemplate; }
+    // Absolute path to templates/shaders/NewEffect.saeffect, or empty if not found.
+    const std::filesystem::path& EffectTemplatePath() const { return m_effectTemplate; }
+    // Absolute path to templates/shaders/NewEffectCompute.saeffect, or empty if not found.
+    const std::filesystem::path& EffectComputeTemplatePath() const { return m_effectComputeTemplate; }
     // Absolute path to templates/inputmaps/Controls.sainputmap, or empty if not found.
     const std::filesystem::path& InputMapTemplatePath() const { return m_inputMapTemplate; }
 
@@ -56,6 +60,8 @@ private:
     std::filesystem::path      m_scriptTemplate;
     std::filesystem::path      m_matTemplate;
     std::filesystem::path      m_shaderTemplate;
+    std::filesystem::path      m_effectTemplate;
+    std::filesystem::path      m_effectComputeTemplate;
     std::filesystem::path      m_inputMapTemplate;
 };
 

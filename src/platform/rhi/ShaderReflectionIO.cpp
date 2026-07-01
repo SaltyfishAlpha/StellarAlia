@@ -84,11 +84,14 @@ std::vector<uint8_t> Serialize(const ShaderReflection& refl) {
         buf.insert(buf.end(), b.displayName.begin(), b.displayName.end());
     }
 
-    // v5: material type metadata (empty strings for builtin shaders)
-    WriteU32(buf, static_cast<uint32_t>(refl.shadingModel.size()));
-    buf.insert(buf.end(), refl.shadingModel.begin(), refl.shadingModel.end());
-    WriteU32(buf, static_cast<uint32_t>(refl.vertShader.size()));
-    buf.insert(buf.end(), refl.vertShader.begin(), refl.vertShader.end());
+    // v7: generic shader-level metadata map (replaces v5 shadingModel/vertShader).
+    WriteU32(buf, static_cast<uint32_t>(refl.metadata.size()));
+    for (const auto& [k, v] : refl.metadata) {
+        WriteU32(buf, static_cast<uint32_t>(k.size()));
+        buf.insert(buf.end(), k.begin(), k.end());
+        WriteU32(buf, static_cast<uint32_t>(v.size()));
+        buf.insert(buf.end(), v.begin(), v.end());
+    }
 
     // v6: vertex stage inputs (non-empty only for vertex reflections)
     WriteU32(buf, static_cast<uint32_t>(refl.vertexInputs.size()));
@@ -111,7 +114,7 @@ bool Deserialize(std::span<const uint8_t> data, ShaderReflection& out) {
         return false;
     }
     if (!ReadU32(data, offset, version) ||
-        (version != 3u && version != 4u && version != 5u && version != kVersion)) {
+        (version != 3u && version != 4u && version != 5u && version != 6u && version != kVersion)) {
         SA_LOG_ERROR("ShaderReflectionIO: unsupported version {}", version);
         return false;
     }
@@ -208,23 +211,36 @@ bool Deserialize(std::span<const uint8_t> data, ShaderReflection& out) {
         result.bindings.push_back(std::move(bd));
     }
 
-    // v5: material type metadata
-    if (v5) {
-        uint32_t smLen = 0, vsLen = 0;
-        if (!ReadU32(data, offset, smLen)) return false;
-        if (offset + smLen > data.size()) {
-            SA_LOG_ERROR("ShaderReflectionIO: shadingModel truncated");
-            return false;
+    // Shader-level metadata. v7+ stores a generic key→value map; v5/v6 stored two
+    // fixed strings (shadingModel, vertShader) — migrate those into the map on read
+    // so stale .refl files still load.
+    const bool v7 = (version >= 7u);
+    if (v7) {
+        uint32_t metaCount = 0;
+        if (!ReadU32(data, offset, metaCount)) return false;
+        result.metadata.reserve(metaCount);
+        for (uint32_t i = 0; i < metaCount; ++i) {
+            uint32_t kLen = 0, vLen = 0;
+            if (!ReadU32(data, offset, kLen) || offset + kLen > data.size()) return false;
+            std::string key(reinterpret_cast<const char*>(data.data() + offset), kLen);
+            offset += kLen;
+            if (!ReadU32(data, offset, vLen) || offset + vLen > data.size()) return false;
+            std::string val(reinterpret_cast<const char*>(data.data() + offset), vLen);
+            offset += vLen;
+            result.metadata.emplace_back(std::move(key), std::move(val));
         }
-        result.shadingModel.assign(reinterpret_cast<const char*>(data.data() + offset), smLen);
+    } else if (v5) {
+        uint32_t smLen = 0, vsLen = 0;
+        if (!ReadU32(data, offset, smLen) || offset + smLen > data.size()) return false;
+        if (smLen > 0)
+            result.SetMeta("shadingModel",
+                std::string(reinterpret_cast<const char*>(data.data() + offset), smLen));
         offset += smLen;
 
-        if (!ReadU32(data, offset, vsLen)) return false;
-        if (offset + vsLen > data.size()) {
-            SA_LOG_ERROR("ShaderReflectionIO: vertShader truncated");
-            return false;
-        }
-        result.vertShader.assign(reinterpret_cast<const char*>(data.data() + offset), vsLen);
+        if (!ReadU32(data, offset, vsLen) || offset + vsLen > data.size()) return false;
+        if (vsLen > 0)
+            result.SetMeta("vertShader",
+                std::string(reinterpret_cast<const char*>(data.data() + offset), vsLen));
         offset += vsLen;
     }
 

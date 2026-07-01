@@ -140,26 +140,40 @@ if(STELLAR_BUILD_EDITOR)
     add_subdirectory(editor)
 endif()
 
-# Add example projects
-add_subdirectory(examples/sandbox)
-add_subdirectory(examples/rhi_interface_demo)
-add_subdirectory(examples/rendergraph_demo)
-add_subdirectory(examples/asset_load_demo)
-add_subdirectory(examples/cook_demo)
-add_subdirectory(examples/gpu_resource_demo)
-add_subdirectory(examples/material_demo)
-add_subdirectory(examples/gltf_material_demo)
-add_subdirectory(examples/skybox_demo)
-add_subdirectory(examples/scene_demo)
-add_subdirectory(examples/ibl_demo)
-add_subdirectory(examples/compute_demo)
-add_subdirectory(examples/material_test_demo)
-add_subdirectory(examples/area_light_demo)
-add_subdirectory(examples/hierarchy_demo)
-add_subdirectory(examples/anim_demo)
-add_subdirectory(examples/physics_demo)
-add_subdirectory(examples/scene_renderer_demo)
-add_subdirectory(examples/input_demo)
+# ── Examples policy ──────────────────────────────────────────────────────────
+# examples/ hosts ONLY framework / interface unit tests: self-contained programs
+# that exercise an engine subsystem's API (RHI, RenderGraph, compute pipeline,
+# asset-cook tooling, input mapping) without a full scene/asset pipeline.
+#
+# Full-system tests — material rendering, visual effects (IBL, skybox, area
+# lights), model import, scripting, animation/skeleton, physics, scene graph —
+# belong in the complete test project (demo_project/, loaded by the editor), not
+# here. Those demos plus redundant/superseded ones are SILENCED below (commented
+# out, not deleted) with the reason. Re-enable by uncommenting if needed.
+
+# Active unit tests (framework / interface):
+add_subdirectory(examples/rhi_interface_demo)   # RHI interface contract (Null mock, no GPU)
+add_subdirectory(examples/rendergraph_demo)     # RenderGraph aliasing / compile / barriers
+add_subdirectory(examples/compute_demo)         # Compute pipeline framework (ComputeProgram)
+add_subdirectory(examples/cook_demo)            # Asset cook pipeline / tooling (local assets)
+add_subdirectory(examples/input_demo)           # Action-mapped input system
+add_subdirectory(examples/material_demo)        # Material + shader cook & dispatch test
+
+# Silenced — full-system tests → belong in demo_project:
+# add_subdirectory(examples/sandbox)              # full scene (code-built) + glTF + IBL
+# add_subdirectory(examples/scene_demo)           # ECS + full SceneRenderer render
+# add_subdirectory(examples/scene_renderer_demo)  # redundant: subset of scene_demo
+# add_subdirectory(examples/ibl_demo)             # IBL / PBR visual render
+# add_subdirectory(examples/skybox_demo)          # skybox visual render
+# add_subdirectory(examples/area_light_demo)      # area-light (LTC) visual render
+# add_subdirectory(examples/hierarchy_demo)       # scene hierarchy + transforms render
+# add_subdirectory(examples/material_test_demo)   # material override render
+# add_subdirectory(examples/gltf_material_demo)   # glTF model import + material render (also has unfixed API breaks)
+# add_subdirectory(examples/asset_load_demo)      # model import into scene
+# add_subdirectory(examples/anim_demo)            # animation + skeleton + skinning
+# add_subdirectory(examples/physics_demo)         # Jolt physics simulation
+# Silenced — redundant / superseded:
+# add_subdirectory(examples/gpu_resource_demo)    # redundant: covered by rhi_interface + compute (also unfixed API breaks)
 
 # Generate stub shading dispatch GLSL (empty evaluator list).
 # deferred_lighting.frag includes these files at build time; the real dispatch

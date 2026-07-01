@@ -41,7 +41,7 @@ MaterialType::CreateInstance(RHI::IRHIDevice*      device,
     }
 
     // Allocate set=1 descriptor set.
-    inst->m_descSet = device->AllocateDescriptorSet(shader.GetMaterialLayout());
+    inst->m_descSet = device->AllocateDescriptorSet(shader->GetMaterialLayout());
 
     if (usesMaterialParamsSSBO) {
         // Issue #72 path: no per-instance UBO, no sampler writes. Texture slots
@@ -83,7 +83,7 @@ MaterialType::CreateInstance(RHI::IRHIDevice*      device,
 
 RHI::RHIPipelineHandle MaterialType::GetOrCreatePipeline(RHI::IRHIDevice*     device,
                                                            const AttachmentKey& key) {
-    return shader.GetOrCreatePipeline(device, key,
+    return shader->GetOrCreatePipeline(device, key,
                                        defaultCullMode,
                                        defaultBlendMode,
                                        defaultTopology,

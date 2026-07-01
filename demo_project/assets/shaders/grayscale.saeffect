@@ -1,0 +1,28 @@
+// @Effect  "Grayscale"
+// @Stage   fragment
+// @Inject  BeforeTonemap
+// @In  hdr : sampled
+// @Out hdr
+#pragma sa_section fragment
+
+#version 450
+
+// set=2 binding=0 — EffectParams UBO (same convention as MaterialParams).
+// @Param values are inline member annotations, reflected by ShaderReflectTool.
+layout(set = 2, binding = 0) uniform EffectParams {
+    float strength; // @Range(0.0, 1.0, "Strength") = 1.0
+} u_Fx;
+
+// set=2 binding=1..N — @In resources in declaration order (binding 0 = params).
+layout(set = 2, binding = 1) uniform sampler2D t_hdr;
+
+layout(location = 0) in  vec2 v_UV;
+layout(location = 0) out vec4 out_Color;
+
+void main() {
+    vec3  c    = texture(t_hdr, v_UV).rgb;
+    float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    out_Color  = vec4(mix(c, vec3(luma), u_Fx.strength), 1.0);
+}
+
+#pragma sa_end_section

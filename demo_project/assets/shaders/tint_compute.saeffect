@@ -1,0 +1,29 @@
+// @Effect  "Tint (Compute)"
+// @Stage   compute
+// @Inject  BeforeTonemap
+// @In  hdr : sampled
+// @Out hdr
+#pragma sa_section compute
+
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 2, binding = 0) uniform EffectParams {
+    vec3  tint;      // @Color3("Tint") = 1,0.6,0.3
+    float intensity; // @Range(0.0, 1.0, "Intensity") = 1.0
+} u_Fx;
+
+layout(set = 2, binding = 1)          uniform sampler2D        t_hdr;
+layout(set = 2, binding = 2, rgba16f) uniform writeonly image2D out_hdr;
+
+void main() {
+    ivec2 gid  = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(out_hdr);
+    if (gid.x >= size.x || gid.y >= size.y) return;
+
+    vec3 c = texelFetch(t_hdr, gid, 0).rgb;
+    imageStore(out_hdr, gid, vec4(mix(c, c * u_Fx.tint, u_Fx.intensity), 1.0));
+}
+
+#pragma sa_end_section

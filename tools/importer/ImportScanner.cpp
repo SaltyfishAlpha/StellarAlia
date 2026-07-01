@@ -24,7 +24,7 @@ std::string AssetTypeFromExtension(const fs::path& ext) {
     if (e == ".samat")
         return "Material";
 
-    if (e == ".saglsl")
+    if (e == ".saglsl" || e == ".saeffect")
         return "Shader";
 
     if (e == ".sascene")

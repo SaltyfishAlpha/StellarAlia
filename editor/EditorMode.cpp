@@ -59,6 +59,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <unordered_set>
 #include <sstream>
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -519,18 +520,26 @@ void EditorMode::OnUpdate(float dt) {
     m_camera.Update(input, dt, mouseLook);
     DrawOverlays();
 
-    // Poll file watcher; auto-recompile .cs changes when the window is focused.
+    // Poll file watcher; auto-recompile .cs and auto-cook .saglsl/.saeffect
+    // (Issue #90) when the window is focused — same dirty-then-apply pattern.
     {
         std::vector<fs::path> changed;
         m_scriptWatcher.PollChanges(changed);
         for (const auto& p : changed) {
-            if (p.extension() == ".cs") { m_pendingRecompile = true; break; }
+            const auto ext = p.extension();
+            if      (ext == ".cs")                            m_pendingRecompile  = true;
+            else if (ext == ".saglsl" || ext == ".saeffect")  m_pendingShaderCook = true;
         }
-        if (m_pendingRecompile
-                && m_app->IsWindowFocused()
+        if (m_app->IsWindowFocused()
                 && m_app->GetPlayState() == EnginePlayState::Editing) {
-            m_app->GetScriptSystem().RecompileEditing(m_app->GetEditorScene().Registry());
-            m_pendingRecompile = false;
+            if (m_pendingRecompile) {
+                m_app->GetScriptSystem().RecompileEditing(m_app->GetEditorScene().Registry());
+                m_pendingRecompile = false;
+            }
+            if (m_pendingShaderCook) {
+                CookProjectShaders();   // cooks + defers RequestProjectShaderReload
+                m_pendingShaderCook = false;
+            }
         }
     }
 }
@@ -830,9 +839,10 @@ std::optional<SaProject> EditorMode::LoadProjectFiles(const fs::path& projectDir
     if (projectDir.empty()) return std::nullopt;
     Scene& scene = m_app->GetScene();
 
-    // Watch script dir + reset FileWatcher's "pending" flag for the new root.
+    // Watch script dir + reset FileWatcher's "pending" flags for the new root.
     m_scriptWatcher.Watch(projectDir / "assets");
-    m_pendingRecompile = false;
+    m_pendingRecompile  = false;
+    m_pendingShaderCook = false;
 
     // Scan asset registry (project + engine assets shared root).
     m_assetRegistry->Scan(projectDir / "assets", m_app->GetDesc().engineAssetsDir);
@@ -876,6 +886,28 @@ std::optional<SaProject> EditorMode::LoadProjectFiles(const fs::path& projectDir
     return proj;
 }
 
+// Issue #90: drop cooked <stem>.saeffect.{frag,comp}.{spv,refl,...} whose source
+// .saeffect no longer exists under sourceDir. Called on BOTH cook paths (project
+// load + reimport) so a deleted effect leaves the catalog on the next scan — no
+// ghost in the PostProcess "Add Effect" list. (.saglsl material orphans need a
+// @ShadingModel→snakeName mapping and are not covered here.)
+static void PruneOrphanedEffectCookOutputs(const fs::path& cookDir, const fs::path& sourceDir) {
+    std::error_code ec;
+    std::unordered_set<std::string> liveEffects;  // e.g. "foo.saeffect"
+    for (auto& de : fs::recursive_directory_iterator(sourceDir, ec))
+        if (de.is_regular_file() && de.path().extension() == ".saeffect")
+            liveEffects.insert(de.path().filename().string());
+    if (!fs::is_directory(cookDir, ec)) return;
+    for (auto& de : fs::directory_iterator(cookDir, ec)) {
+        const std::string fn  = de.path().filename().string();
+        const auto        pos = fn.find(".saeffect.");
+        if (pos == std::string::npos) continue;               // not an effect output
+        const std::string src = fn.substr(0, pos) + ".saeffect";
+        if (!liveEffects.count(src))
+            fs::remove(de.path(), ec);                        // orphan → prune
+    }
+}
+
 void EditorMode::LoadProject(const fs::path& saprojectPath) {
     if (m_app->GetPlayState() != EnginePlayState::Editing) {
         SA_LOG_WARN("EditorMode::LoadProject — cannot switch project while not in Editing state");
@@ -895,7 +927,9 @@ void EditorMode::LoadProject(const fs::path& saprojectPath) {
     std::string cookedShaderDir;
     {
         const fs::path assetsDir = projectDir / "assets";
-        if (ShaderCook::HasSaglslFiles(assetsDir)) {
+        const bool hasSaglsl   = ShaderCook::HasSaglslFiles(assetsDir);
+        const bool hasSaeffect = ShaderCook::HasSaeffectFiles(assetsDir);
+        if (hasSaglsl || hasSaeffect) {
             const fs::path spvOut      = cookCacheDir / "shaders";
             const fs::path dispatchOut = cookCacheDir / "generated" / "shaders";
 
@@ -909,21 +943,35 @@ void EditorMode::LoadProject(const fs::path& saprojectPath) {
             cookCfg.reflToolPath = std::string(StellarAliaApp::BIN_DIR) + "/ShaderReflectTool" + exeSuffix;
             cookCfg.includePaths = { StellarAliaApp::ENGINE_SHADER_SRC_DIR, dispatchOut.string() };
 
-            const auto cookResult = ShaderCook::CookDirectory(assetsDir, spvOut, dispatchOut, cookCfg);
-            if (!cookResult.failedModels.empty()) {
-                SA_LOG_WARN("EditorMode: {} shading model(s) failed to cook",
-                            cookResult.failedModels.size());
+            if (hasSaglsl) {
+                const auto cookResult = ShaderCook::CookDirectory(assetsDir, spvOut, dispatchOut, cookCfg);
+                if (!cookResult.failedModels.empty()) {
+                    SA_LOG_WARN("EditorMode: {} shading model(s) failed to cook",
+                                cookResult.failedModels.size());
+                }
+
+                if (cookResult.modelCount > 0) {
+                    // Recompile deferred_lighting.frag with the project dispatch.
+                    const fs::path fragSrc = fs::path(StellarAliaApp::ENGINE_SHADER_SRC_DIR)
+                                             / "deferred_lighting.frag";
+                    const fs::path outSpv  = spvOut / "deferred_lighting.frag.spv";
+                    ShaderCook::RecompileDeferredLighting(fragSrc, dispatchOut, outSpv,
+                                                           cookCfg.glslcPath,
+                                                           { StellarAliaApp::ENGINE_SHADER_SRC_DIR });
+                }
             }
 
-            if (cookResult.modelCount > 0) {
-                // Recompile deferred_lighting.frag with the project dispatch.
-                const fs::path fragSrc = fs::path(StellarAliaApp::ENGINE_SHADER_SRC_DIR)
-                                         / "deferred_lighting.frag";
-                const fs::path outSpv  = spvOut / "deferred_lighting.frag.spv";
-                ShaderCook::RecompileDeferredLighting(fragSrc, dispatchOut, outSpv,
-                                                       cookCfg.glslcPath,
-                                                       { StellarAliaApp::ENGINE_SHADER_SRC_DIR });
+            // Issue #88: cook declarative ScreenEffects (.saeffect) into the same dir.
+            if (hasSaeffect) {
+                const auto fxResult = ShaderCook::CookEffects(assetsDir, spvOut, cookCfg);
+                if (!fxResult.failedModels.empty())
+                    SA_LOG_WARN("EditorMode: {} screen effect(s) failed to cook",
+                                fxResult.failedModels.size());
             }
+
+            // Issue #90: prune cooked effects whose source was deleted (roots out the
+            // startup ghost — LoadProject previously never cleaned cook_cache orphans).
+            PruneOrphanedEffectCookOutputs(spvOut, assetsDir);
 
             cookedShaderDir = spvOut.string();
         }
@@ -1035,9 +1083,15 @@ void EditorMode::CookProjectShaders() {
         return;
     }
 
+    // Issue #90: cook into the project's cook_cache (same dir LoadProject uses),
+    // NOT the engine BUILTIN_SHADER_DIR. This unifies the two cook paths so the
+    // dir pruned on delete == the dir scanned on startup (roots out ghost effects),
+    // and keeps project shaders out of the engine build tree. m_shaderDir (BUILTIN)
+    // stays the runtime fallback; project material/effect programs load from here.
+    const fs::path    cookCacheDir = fs::path(desc.projectDir) / "cook_cache";
     const std::string scanDir     = (fs::path(desc.projectDir) / "assets").generic_string();
-    const std::string spvOut      = fs::path(StellarAliaApp::BUILTIN_SHADER_DIR).generic_string();
-    const std::string dispatchOut = fs::path(StellarAliaApp::SHADER_DISPATCH_DIR).generic_string();
+    const std::string spvOut      = (cookCacheDir / "shaders").generic_string();
+    const std::string dispatchOut = (cookCacheDir / "generated" / "shaders").generic_string();
     const std::string glslcPath   = fs::path(StellarAliaApp::GLSLC_PATH).generic_string();
     const std::string incEng      = (fs::path(StellarAliaApp::ASSETS_DIR) / "shaders").generic_string();
 
@@ -1089,6 +1143,26 @@ void EditorMode::CookProjectShaders() {
     } else {
         SA_LOG_INFO("EditorMode: shader cook complete");
     }
+
+    // Issue #90: the cook CLI regenerates the dispatch GLSL but does NOT recompile
+    // deferred_lighting.frag — without this a shading model added/edited via reimport
+    // would miss its lighting dispatch until a full project reload. Mirror LoadProject.
+    if (ret == 0 && ShaderCook::HasSaglslFiles(scanDir)) {
+        const fs::path fragSrc = fs::path(StellarAliaApp::ENGINE_SHADER_SRC_DIR) / "deferred_lighting.frag";
+        const fs::path outSpv  = fs::path(spvOut) / "deferred_lighting.frag.spv";
+        ShaderCook::RecompileDeferredLighting(fragSrc, fs::path(dispatchOut), outSpv,
+                                              glslcPath, { StellarAliaApp::ENGINE_SHADER_SRC_DIR });
+    }
+
+    // Issue #90: prune cooked effects whose source was deleted (shared with LoadProject).
+    PruneOrphanedEffectCookOutputs(spvOut, scanDir);
+
+    // Re-register project shader types + ScreenEffect catalog (Issue #88) from the
+    // freshly cooked SPV/refl, so new or edited .saglsl / .saeffect appear without a
+    // full project reload. Deferred to the next frame's safe point: this runs inside
+    // the editor UI callback (mid command-buffer), where destroying GPU pipelines
+    // directly would invalidate the recording command buffer.
+    m_app->GetRenderer().RequestProjectShaderReload(spvOut);
 }
 
 CameraData EditorMode::GetCameraData(float aspectRatio) const {

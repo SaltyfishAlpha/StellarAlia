@@ -30,7 +30,8 @@ public:
     [[nodiscard]] const std::vector<EditorAction>& GetActions() const { return m_actions; }
 
 private:
-    void Dispatch(EditorAction& action, EditorContext& ctx);
+    // Returns true if the action actually executed (passed canExecute).
+    bool Dispatch(EditorAction& action, EditorContext& ctx);
 
     std::vector<EditorAction> m_actions;
 };

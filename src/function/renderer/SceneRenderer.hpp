@@ -20,7 +20,9 @@
 #include "function/material/MaterialInstance.hpp"
 #include "function/material/ComputeProgram.hpp"
 #include "function/material/MaterialManager.hpp"
+#include "function/material/ProgramCache.hpp"
 #include "function/material/MaterialParamRing.hpp"
+#include "function/material/ScreenEffectRegistry.hpp"
 #include "function/material/ShaderProgram.hpp"
 #include "function/render_graph/RenderGraph.hpp"
 #include "function/renderer/RenderFeature.hpp"
@@ -126,6 +128,10 @@ public:
     // Access the MaterialManager used by this renderer (e.g. for editor drawers).
     [[nodiscard]] MaterialManager* GetMaterialManager() const { return m_matMgr; }
 
+    // Catalog of cooked ScreenEffect types (Issue #88). Editor reads this to
+    // populate the "Add Effect" menu and draw per-effect @Param widgets.
+    [[nodiscard]] ScreenEffectRegistry& GetScreenEffectRegistry() { return m_screenEffectRegistry; }
+
     // Bind a DebugDraw source for the per-frame line overlay pass.
     // Call after Init(). The overlay is a no-op when dd is null or has no lines.
     void SetDebugDraw(DebugDraw* dd) { m_debugDraw = dd; }
@@ -149,8 +155,17 @@ public:
     // custom shading models were cooked, and registers new project types.
     // cookedShaderDir — directory containing the project's cooked .spv / .refl files,
     //                   or empty string when the project has no .saglsl files.
-    // Device must be idle (call after ClearProjectInstances()).
+    // Drains the GPU itself, so it is safe between frames or at RenderFrame top.
     void ApplyProjectShaderTypes(const std::string& cookedShaderDir);
+
+    // Request a project shader/effect re-register (Issue #88) from a mid-frame
+    // context (e.g. AssetsPanel reimport/create during UI draw). Destroying GPU
+    // programs/pipelines mid-command-buffer is unsafe, so this only records the
+    // request; RenderFrame applies it at the next frame's safe point.
+    void RequestProjectShaderReload(const std::string& cookedShaderDir) {
+        m_pendingShaderReloadDir = cookedShaderDir;
+        m_hasPendingShaderReload = true;
+    }
 
     // ── Render tick ───────────────────────────────────────────────────────────
     //
@@ -245,7 +260,7 @@ private:
                        uint32_t w, uint32_t h) override;
     private:
         MaterialType* m_type = nullptr;
-        ShaderProgram m_skinnedShadowProgram;  // shadow_skinned.vert + shadow.frag
+        ShaderProgram* m_skinnedShadowProgram = nullptr;  // shadow_skinned.vert + shadow.frag (ProgramCache-owned)
     };
 
     // Renders a fullscreen skybox into the HDR buffer (raw HDR, no tonemap).
@@ -276,7 +291,7 @@ private:
                        uint32_t w, uint32_t h) override;
     private:
         SceneRenderer*           m_owner          = nullptr;
-        ShaderProgram            m_skinnedProgram;   // deferred_geometry_skinned.vert + _geometry.frag
+        ShaderProgram*           m_skinnedProgram = nullptr;  // deferred_geometry_skinned.vert (ProgramCache-owned)
         RHI::RHIDescLayoutHandle m_skinDescLayout;   // set=2 layout from m_skinnedProgram
     };
 
@@ -299,8 +314,8 @@ private:
         RHI::RHIDescLayoutHandle GetSkinnedLayout() const { return m_skinnedLayout; }
 
     private:
-        ShaderProgram            m_staticProgram;    // velocity_prepass.{vert,frag}
-        ShaderProgram            m_skinnedProgram;   // velocity_prepass_skinned.vert + shared frag
+        ShaderProgram*           m_staticProgram = nullptr;   // velocity_prepass.{vert,frag} (ProgramCache-owned)
+        ShaderProgram*           m_skinnedProgram = nullptr;  // velocity_prepass_skinned.vert (ProgramCache-owned)
         RHI::RHIDescLayoutHandle m_skinnedLayout;    // reflected set=3 with bindings 0/1/2
     };
 
@@ -321,6 +336,33 @@ private:
     private:
         MaterialType*         m_type = nullptr;
         RHI::RHIDescSetHandle m_gbDescSet;
+    };
+
+    // Screen Space Reflections (Issue #48): single compute pass after
+    // DeferredLighting, before TAA. Replaces the IBL env-probe specular with
+    // screen-traced colour where confident; relies on TAA to denoise the
+    // ray-march jitter. When disabled, AddPasses leaves m_outputHandle invalid
+    // so the feature loop keeps handles.hdr unchanged.
+    class SSRFeature final : public RenderFeature {
+        friend class SceneRenderer;
+    public:
+        void OnInit    (const FeatureInitContext& ctx) override;
+        void OnShutdown(RHI::IRHIDevice* device)       override;
+        void AddPasses (SceneRenderer& renderer, const FrameContext& ctx,
+                        const RendererHandles& handles, const entt::registry& reg,
+                        uint32_t w, uint32_t h) override;
+
+        // Set by AddPasses when enabled; RenderFrame redirects handles.hdr to this.
+        RGTextureHandle  m_outputHandle;
+
+        bool  m_enabled      = false;
+        float m_maxRoughness = 0.4f;
+        int   m_maxSteps     = 64;
+        float m_thickness    = 0.1f;
+        float m_strength     = 1.0f;
+    private:
+        ComputeProgram*       m_prog = nullptr;  // owned by ProgramCache (Issue #86)
+        RHI::RHIDescSetHandle m_ssrSet;  // set=2: depth/albedo/normal/hdr/AO + SSR_Composite UAV
     };
 
     // GTAO ambient occlusion: 3-pass (main + H blur + V blur).
@@ -398,7 +440,7 @@ private:
         RHI::RHIDescSetHandle  m_hdrDescSet;
 
         RHI::RHITextureHandle  m_cgLutTex;
-        ComputeProgram         m_cgBakeProg;
+        ComputeProgram*        m_cgBakeProg = nullptr;  // owned by ProgramCache (Issue #86)
         RHI::RHIDescSetHandle  m_cgBakeDs;
         ColorGradingSettings   m_cgSettings;
         bool                   m_cgDirty   = true;
@@ -454,7 +496,7 @@ private:
     private:
         SceneRenderer* m_owner          = nullptr;
         MaterialType*  m_type           = nullptr;
-        ShaderProgram  m_skinnedProgram;  // selection_mask_skinned.vert + selection_mask.frag
+        ShaderProgram* m_skinnedProgram = nullptr;  // selection_mask_skinned.vert (ProgramCache-owned)
     };
 
     // Fullscreen infinite XZ grid rendered at the Y=0 plane.
@@ -510,10 +552,12 @@ private:
         void RebuildDescSets(int newMipCount, RHI::IRHIDevice* device);
     private:
         int                   m_mipCount       = 6;
-        MaterialType*         m_thresholdType  = nullptr;
-        MaterialType*         m_downsampleType = nullptr;
-        MaterialType*         m_upsampleType   = nullptr;
-        MaterialType*         m_compositeType  = nullptr;
+        // Issue #92: all bloom passes on compute (threshold/downsample: pure write;
+        // upsample/composite: read-modify-write UAV, replacing hardware additive blend).
+        ComputeProgram*       m_thresholdProg  = nullptr;
+        ComputeProgram*       m_downsampleProg = nullptr;
+        ComputeProgram*       m_upsampleProg   = nullptr;
+        ComputeProgram*       m_compositeProg  = nullptr;
         RHI::RHIDescSetHandle m_thresholdDescSet;
         RHI::RHIDescSetHandle m_downsampleDescSet[kMaxBloomMips - 1];
         RHI::RHIDescSetHandle m_upsampleDescSet[kMaxBloomMips - 1];
@@ -630,14 +674,37 @@ private:
         float m_highPct     =  0.95f;
         float m_currentExposure = 1.0f;
     private:
-        ComputeProgram        m_histoProg;
-        ComputeProgram        m_adaptProg;
+        ComputeProgram*       m_histoProg = nullptr;  // owned by ProgramCache (Issue #86)
+        ComputeProgram*       m_adaptProg = nullptr;  // owned by ProgramCache (Issue #86)
         RHI::RHIBufferHandle  m_exposureSsbo;    // device-local, Storage|CopySrc
         RHI::RHIBufferHandle  m_exposureStaging; // CPU-visible, CopyDst
         RHI::RHIDescSetHandle m_histoSet;        // set=1: binding0=HDR tex, binding1=histo SSBO
         RHI::RHIDescSetHandle m_adaptSet;        // set=1: binding0=histo SSBO, binding1=exposure SSBO
         bool                  m_timerInit = false;
         std::chrono::steady_clock::time_point m_lastTime;
+    };
+
+    // Generic executor for declarative ScreenEffects (Issue #88). One anchor
+    // instance per injection point; runs each registered effect at its point:
+    // binds named engine resources + params, draws, and chains handles.hdr.
+    // Users author .saeffect — this engine-owned feature is the only executor.
+    class ScreenEffectFeature final : public RenderFeature {
+        friend class SceneRenderer;
+    public:
+        explicit ScreenEffectFeature(EffectInject inject) : m_inject(inject) {}
+
+        // Reads the owning SceneRenderer's registry + active per-scene stack
+        // (m_screenEffectRegistry / m_activeScreenEffects) — hence nested.
+        void AddPasses(SceneRenderer& renderer, const FrameContext& ctx,
+                       const RendererHandles& handles, const entt::registry& reg,
+                       uint32_t w, uint32_t h) override;
+
+        // Set by AddPasses; SceneRenderer redirects handles.hdr to this when valid.
+        RGTextureHandle      m_outputHandle;
+        [[nodiscard]] EffectInject Inject() const { return m_inject; }
+
+    private:
+        EffectInject m_inject;
     };
 
     // ── Persistent state ──────────────────────────────────────────────────────
@@ -654,6 +721,19 @@ private:
     int                        m_pendingBloomMipCount = -1; // deferred mip count change
 
     FrameUniformsBuffer        m_frameUniforms;   // owned — created in Init
+    ProgramCache               m_programCache;    // owned — GPU program owner (Issue #86)
+    ScreenEffectRegistry       m_screenEffectRegistry;  // owned — cooked .saeffect catalog (Issue #88)
+
+    // Active per-scene ScreenEffect stack, resolved from PostProcessSettings in
+    // ApplyWorldSettings: name + enable + a param blob built from the type's
+    // defaults overlaid with the instance's named overrides. Anchors read this.
+    struct ActiveScreenEffect { std::string name; bool enabled = true; std::vector<uint8_t> params; };
+    std::vector<ActiveScreenEffect> m_activeScreenEffects;
+
+    // Deferred project shader/effect reload (Issue #88) — set from a mid-frame UI
+    // context, consumed at RenderFrame top where GPU-resource destruction is safe.
+    std::string m_pendingShaderReloadDir;
+    bool        m_hasPendingShaderReload = false;
     MaterialParamRing          m_materialRing;    // per-frame SSBO bump allocator
     glm::vec4                  m_shCoeffs[9] = {};  // stored by SetIBL
     uint32_t                   m_frameCount  = 0;   // incremented per RenderFrame
@@ -676,6 +756,7 @@ private:
     GBufferFeature*          m_gbufferFeature          = nullptr;
     VelocityPrepassFeature*  m_velocityPrepassFeature  = nullptr;
     DeferredLightingFeature* m_deferredLightingFeature = nullptr;
+    SSRFeature*              m_ssrFeature              = nullptr;
     SkyboxFeature*           m_skyboxFeature           = nullptr;
     BloomFeature*         m_bloomFeature   = nullptr;
     SSAOFeature*          m_ssaoFeature    = nullptr;
@@ -685,6 +766,12 @@ private:
     MotionBlurFeature*    m_motionBlurFeature = nullptr;
     RenderFeature*        m_tonemapFeature = nullptr;  // either TonemapFeature or LutTonemapFeature
     PostFXFeature*        m_postFxFeature  = nullptr;
+
+    // ScreenEffect injection anchors (Issue #88), indexed by EffectInject.
+    // Pre-placed in m_features at their frame positions; each runs the active
+    // stack entries whose type targets that injection point. RenderFrame
+    // redirects handles.hdr to an anchor's output when it ran an effect.
+    ScreenEffectFeature*  m_seAnchors[4] = {};
 
     // ── Solid-color ambient environment ──────────────────────────────────────
     // A 1×1 RGBA32F cubemap filled with backgroundColor.  Written to

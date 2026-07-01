@@ -18,13 +18,14 @@ bool ComputeProgram::Load(RHI::IRHIDevice* device, const Desc& desc) {
 
     // Build one descriptor set layout per unique set index found in reflection.
     // If a frameLayout was supplied externally it overrides the auto-derived
-    // layout for set=0, so skip that set to avoid creating an unused layout.
+    // layout for set=1 (engine-wide per-frame set convention, see
+    // frame_uniforms.glsl), so skip that set to avoid creating an unused layout.
     std::set<uint32_t> sets;
     for (const auto& b : desc.refl.bindings)
         sets.insert(b.set);
 
     for (uint32_t setIdx : sets) {
-        if (setIdx == 0 && m_frameLayout.IsValid()) continue;
+        if (setIdx == 1 && m_frameLayout.IsValid()) continue;
         m_layouts[setIdx] = device->CreateDescriptorSetLayout(desc.refl, setIdx);
     }
 
@@ -57,9 +58,9 @@ RHI::RHIPipelineHandle ComputeProgram::GetPipeline(RHI::IRHIDevice* device) {
     pipeDesc.computeShader    = m_shader;
     pipeDesc.pushConstantSize = m_refl.pushConstantSize;
 
-    // External frame layout occupies set=0.
+    // External frame layout occupies set=1 (engine-wide per-frame set convention).
     if (m_frameLayout.IsValid())
-        pipeDesc.descriptorLayouts[0] = m_frameLayout;
+        pipeDesc.descriptorLayouts[1] = m_frameLayout;
 
     // Place auto-derived layouts at their respective set positions.
     for (const auto& [setIdx, layout] : m_layouts) {
@@ -80,7 +81,7 @@ RHI::RHIPipelineHandle ComputeProgram::GetPipeline(RHI::IRHIDevice* device) {
 }
 
 RHI::RHIDescLayoutHandle ComputeProgram::GetLayout(uint32_t setIndex) const {
-    if (setIndex == 0 && m_frameLayout.IsValid()) return m_frameLayout;
+    if (setIndex == 1 && m_frameLayout.IsValid()) return m_frameLayout;
     auto it = m_layouts.find(setIndex);
     return (it != m_layouts.end()) ? it->second : RHI::RHIDescLayoutHandle{};
 }

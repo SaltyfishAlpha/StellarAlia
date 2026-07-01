@@ -16,9 +16,13 @@ void EditorActionRegistry::Register(EditorAction action) {
 void EditorActionRegistry::PollAndDispatch(InputSystem& input, EditorContext& ctx) {
     for (auto& action : m_actions) {
         if (input.WasActivated(action.id)) {
-            SA_LOG_INFO("EditorActionRegistry: '{}' fired (top map='{}')",
-                        action.id, std::string(input.GetTopMapName()));
-            Dispatch(action, ctx);
+            // Log only when the action actually runs — a key may be bound to
+            // multiple actions (e.g. Keyboard/S = WASD-back + GizmoScale), and
+            // logging before canExecute would spam for guarded actions that are
+            // intentionally suppressed.
+            if (Dispatch(action, ctx))
+                SA_LOG_INFO("EditorActionRegistry: '{}' fired (top map='{}')",
+                            action.id, std::string(input.GetTopMapName()));
         }
     }
 }
@@ -30,8 +34,8 @@ void EditorActionRegistry::Trigger(std::string_view id, EditorContext& ctx) {
         Dispatch(*it, ctx);
 }
 
-void EditorActionRegistry::Dispatch(EditorAction& action, EditorContext& ctx) {
-    if (action.canExecute && !action.canExecute(ctx)) return;
+bool EditorActionRegistry::Dispatch(EditorAction& action, EditorContext& ctx) {
+    if (action.canExecute && !action.canExecute(ctx)) return false;
 
     if (action.makeCommand) {
         if (ctx.cmdMgr) {
@@ -41,6 +45,7 @@ void EditorActionRegistry::Dispatch(EditorAction& action, EditorContext& ctx) {
     } else if (action.execute) {
         action.execute(ctx);
     }
+    return true;
 }
 
 } // namespace StellarAlia::Editor

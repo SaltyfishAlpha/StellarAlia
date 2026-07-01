@@ -1,9 +1,7 @@
 #include "config/EditorShortcutConfig.hpp"
 
 #include "function/input/ActionMapJsonParser.hpp"
-
-#include <fstream>
-#include <sstream>
+#include "core/io/FileIO.hpp"
 
 namespace StellarAlia::Editor {
 
@@ -29,24 +27,15 @@ static ActionMapDef BuildOverrideMap(
     return def;
 }
 
-static bool ReadFileToString(const std::filesystem::path& path, std::string& out) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f.is_open()) return false;
-    std::stringstream ss;
-    ss << f.rdbuf();
-    out = ss.str();
-    return true;
-}
-
 static bool LoadOverridesFromFile(
     const std::filesystem::path& path,
     std::unordered_map<std::string, BindingDef>& outOverrides)
 {
-    std::string json;
-    if (!ReadFileToString(path, json)) return false;
+    const auto json = IO::ReadText(path);
+    if (!json) return false;
 
     ActionMapDef def;
-    if (!ActionMapJsonParser::Parse(json, def)) return false;
+    if (!ActionMapJsonParser::Parse(*json, def)) return false;
 
     outOverrides.clear();
     for (const auto& a : def.actions) {
@@ -62,10 +51,7 @@ static bool SaveOverridesToFile(
 {
     std::string json;
     ActionMapJsonParser::Serialize(BuildOverrideMap(overrides), json);
-    std::ofstream f(path, std::ios::binary);
-    if (!f.is_open()) return false;
-    f << json;
-    return true;
+    return IO::WriteText(path, json);
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────

@@ -72,7 +72,7 @@ public:
     void RequestReimportAll(); // force-recook all assets under assetsRoot
 
 private:
-    enum class CreateKind : uint8_t { Mat, Saglsl, Scene, Script, InputMap };
+    enum class CreateKind : uint8_t { Mat, Saglsl, Saeffect, SaeffectCompute, Scene, Script, InputMap };
 
     // Left pane: recursive directory tree (dirs only).
     void DrawDirPane(const std::filesystem::path& dir);
@@ -139,7 +139,6 @@ private:
     // ── Multi-selection ────────────────────────────────────────────────────
     std::unordered_set<std::string>   m_selectedPaths;   // path strings of all selected files
     std::string                       m_shiftAnchorPath; // Shift+click range anchor
-    std::string                       m_pendingDeselectOtherPath; // deferred single-select
     std::vector<std::filesystem::path> m_drawOrderFiles; // visible file order (prev frame)
     std::vector<std::filesystem::path> m_drawOrderFilesBuild; // accumulated this frame
 

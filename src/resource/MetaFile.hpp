@@ -5,6 +5,11 @@
 #include <string>
 #include <unordered_map>
 
+// NOTE (Issue #90): relocated from tools/importer to src/resource so runtime code
+// (AssetRegistry, InputMapLoader) can share the single .sameta parser instead of
+// re-implementing it — runtime cannot depend on the tools libs, but tools link the
+// runtime, so the shared home is here. Namespace kept as `Import` to avoid churning
+// every Import::MetaFile call site.
 namespace StellarAlia::Import {
 
 namespace fs = std::filesystem;

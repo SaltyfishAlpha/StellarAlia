@@ -1,0 +1,28 @@
+#version 450
+
+// Compute port of bloom_composite.frag (Issue #92) — add bloom*strength to HDR.
+// The frag version relied on hardware Additive blend; compute read-modify-writes
+// the HDR image: hdr.rgb += bloom * strength (alpha preserved).
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 2, binding = 0)          uniform sampler2D t_Bloom;   // mip[0]
+layout(set = 2, binding = 1, rgba16f) uniform image2D  io_hdr;     // HDR (readwrite)
+
+layout(push_constant) uniform PushConstants {
+    float strength;
+    float _p0, _p1, _p2;
+} pc;
+
+void main() {
+    ivec2 gid     = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 outSize = imageSize(io_hdr);
+    if (gid.x >= outSize.x || gid.y >= outSize.y) return;
+
+    vec2 v_UV = (vec2(gid) + 0.5) / vec2(outSize);
+    vec2 ht   = 0.5 / vec2(textureSize(t_Bloom, 0));
+    vec3 bloom = texture(t_Bloom, clamp(v_UV, ht, 1.0 - ht)).rgb;
+
+    vec4 hdr = imageLoad(io_hdr, gid);
+    imageStore(io_hdr, gid, vec4(hdr.rgb + bloom * pc.strength, hdr.a));
+}

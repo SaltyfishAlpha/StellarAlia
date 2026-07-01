@@ -1,7 +1,10 @@
-#include "importer/MetaFile.hpp"
+#include "resource/MetaFile.hpp"
+
+#include "core/io/FileIO.hpp"
 
 #include <algorithm>
-#include <fstream>
+#include <sstream>
+#include <vector>
 
 namespace StellarAlia::Import {
 
@@ -23,12 +26,13 @@ std::string MetaFile::GetString(const std::string& key, const std::string& def) 
 }
 
 bool MetaFile::Load(const fs::path& metaPath, MetaFile& out) {
-    std::ifstream f(metaPath);
-    if (!f) return false;
+    const auto text = IO::ReadText(metaPath);
+    if (!text) return false;
 
     out = {};
+    std::istringstream in(*text);
     std::string line;
-    while (std::getline(f, line)) {
+    while (std::getline(in, line)) {
         while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
             line.pop_back();
         if (line.empty() || line[0] == '#') continue;
@@ -48,22 +52,19 @@ bool MetaFile::Load(const fs::path& metaPath, MetaFile& out) {
 
 bool MetaFile::Save(const fs::path& metaPath, const MetaFile& meta) {
     if (metaPath.has_parent_path())
-        fs::create_directories(metaPath.parent_path());
+        IO::EnsureDir(metaPath.parent_path());
 
-    std::ofstream f(metaPath);
-    if (!f) return false;
-
-    f << "# StellarAlia Asset Meta v1\n";
-    f << "uuid=" << meta.uuid.ToString() << '\n';
-    f << "type=" << meta.type << '\n';
+    std::string s = "# StellarAlia Asset Meta v1\n";
+    s += "uuid=" + meta.uuid.ToString() + '\n';
+    s += "type=" + meta.type + '\n';
 
     std::vector<std::pair<std::string, std::string>> sorted(
         meta.settings.begin(), meta.settings.end());
     std::sort(sorted.begin(), sorted.end());
     for (const auto& [k, v] : sorted)
-        f << k << '=' << v << '\n';
+        s += k + '=' + v + '\n';
 
-    return f.good();
+    return IO::WriteText(metaPath, s);
 }
 
 } // namespace StellarAlia::Import

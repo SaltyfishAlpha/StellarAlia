@@ -98,6 +98,8 @@
 │    BindlessTextureHeap: 4096-slot set=0 sampler array           │
 │  ShaderProgram: vert+frag SPIRV + reflection + pipeline cache   │
 │  ComputeProgram: compute SPIRV + per-set descriptor layouts     │
+│  ProgramCache: central owner of all ShaderProgram/ComputeProgram │
+│    (Issue #86) name-keyed, engine/project scoped, hot-reload     │
 │  ResourceManager: LoadMesh / LoadTexture / GetBuiltin()         │
 │    Init(engineCookCacheDir, device) → VFS::SetEngineCookCacheDir│
 │    SetProjectCookCache(dir)         → VFS::SetCookCacheDir      │
@@ -289,6 +291,59 @@ All raw source assets are transformed into engine-native cooked formats before
 loading at runtime. The cook step runs at build time (via CMake custom commands)
 or as a standalone CLI (`StellarAliaCook`).
 
+### File-Stream Flow Overview (Issue #90)
+
+Three layers, one direction of dependency (editor → asset system → I/O foundation):
+
+```
+Editor CRUD    AssetsPanel: CreateNewFile / DeletePath / MoveAsset / CommitRename / ReimportFile
+   │           EditorMode:  LoadProject / CookProjectShaders / FileWatcher poll
+   ▼
+Asset system   ImportScanner: ScanAndImport → EnsureMeta → CookAssetEntry
+   │           Cookers: CookMesh/Texture/Material/InputMap · ShaderCookLib
+   │           AssetRegistry (UUID↔path) · MetaFile (the one .sameta parser, resource/MetaFile)
+   ▼
+I/O foundation core/io/FileIO — every whole-file read/write + fs mutation
+               (see "File I/O layer" under Asset Identity). Exceptions: binary
+               Cooked*.cpp keep their own structured read/write (cohesive per format).
+```
+
+**Three on-disk forms per asset:** source (`Hero.glb`) · `.sameta` sidecar (stable UUID +
+type, written by `EnsureMeta`) · cooked product (`<uuid>.samesh`). References are always by
+UUID, never by path — rename/move keep the UUID so references never break.
+
+**Extension → type → cook** (`ImportScanner::AssetTypeFromExtension` + `CookAssetEntry`):
+
+| ext | type | import-time cook | cooked product |
+|---|---|---|---|
+| `.png/.jpg/.hdr/.tga/.bmp` | Texture | CookTexture | `<uuid>.satex` |
+| `.gltf/.glb` | Mesh | CookMesh | `<uuid>.samesh` (+ derived Skeleton/Anim/Material UUIDs) |
+| `.samat` | Material | CookStandaloneMaterial | cooked material (by UUID) |
+| `.sascene` | Scene | — (native JSON) | — |
+| `.cs` | Script | — (Roslyn compiles at runtime) | — |
+| `.saglsl` / `.saeffect` | Shader | — (**shader-only cook path**) | `cook_cache/shaders/…` |
+| `.sainputmap` | InputMap | CookInputMap | `<uuid>.sainputmap` (validated copy) |
+
+**Four flows:** ① **scan/import** — `RunInitialScan → ScanAndImport`: `EnsureMeta` writes a missing
+`.sameta` (new UUID + defaults), then `CookAssetEntry` cooks Mesh/Texture/Material/InputMap
+(Script/Scene/Shader produce no import-time cook); `AssetRegistry::Scan` indexes every `.sameta`.
+② **shader cook** — `.saglsl`/`.saeffect` go through the unified path to `cook_cache/shaders`
+(see "Cook-path unification" under Runtime Cook Flow). ③ **runtime load** — by UUID via
+`VFS::ResolveCookedPath` → loader reads the cooked product (binary via `IO::ReadBytes`). ④ **save**
+— Scene/Project/shortcuts via `IO::WriteJson`/`WriteText`.
+
+**CRUD response matrix:**
+
+| op | response |
+|---|---|
+| **Create** | `CreateNewFile`: `IO::CopyTemplateReplacing`/`Copy`/`WriteText` → `EnsureMeta` (auto `.sameta`) → `CookAssetEntry` → registry rescan; Script recompiles, Shader/Effect fire `onCookShaders`; then inline rename |
+| **Delete** | `DeletePath`: `IO::Remove(source)` + `IO::Remove(.sameta)`. Shader/Effect also fire `onCookShaders` → `PruneOrphanedEffectCookOutputs` drops the orphaned cooked `.refl`/`.spv` so the type/effect leaves the catalog (no ghost) |
+| **Modify — rename** (`CommitRename`) | `IO::Rename` (source + `.sameta`) + sync the internal identity when it still matches the old stem: `.cs` `class`, `.saeffect` `@Effect`, `.sainputmap` `"name"`; Shader/Effect re-cook |
+| **Modify — move** (`MoveAsset`) | `IO::Rename` (source + `.sameta`); UUID unchanged so references survive |
+| **Modify — external edit** | FileWatcher poll: on window focus + Editing, `.cs` → `RecompileEditing`, `.saglsl`/`.saeffect` → `CookProjectShaders` (auto, no manual reimport). Mesh/Texture still need manual Reimport |
+| **Modify — manual Reimport** (`ReimportFile`) | dispatch by `meta.type`: Shader→`onCookShaders`, Mesh→CookMesh, Texture→CookTexture, Material→CookStandaloneMaterial, Skeleton/Animation→sidecar cook, Scene→rescan only |
+| **Query / load** | `AssetRegistry::FindByID`/`FindBySourcePath`/`EntriesByType` → `VFS::ResolveCookedPath` → loader |
+
 ### Asset Identity — `.sameta` & `AssetID`
 
 Every source asset has a companion `.sameta` sidecar file that persists its
@@ -299,8 +354,21 @@ BoomBox.glb
 BoomBox.glb.sameta  ← {"uuid": "xxxxxxxx-…"}
 ```
 
-`Cook::MetaFile::MetaPathFor(path)` derives the sidecar path.
+`Import::MetaFile::MetaPathFor(path)` derives the sidecar path. `MetaFile` (parse /
+serialize `.sameta`) lives in `resource/MetaFile.hpp` (Issue #90 relocated it from
+`tools/importer` so runtime `AssetRegistry` / `InputMapLoader` share the single parser
+instead of re-implementing it — tools link the runtime, so this is the common home).
 `AssetID` is a 128-bit UUID (two `uint64_t hi/lo`).
+
+**File I/O layer (`core/io/FileIO`, Issue #90).** All whole-file reads/writes and common
+`std::filesystem` mutations route through `StellarAlia::IO::` — `ReadText`/`WriteText`,
+`ReadBytes`/`WriteBytes`, `ReadJson`/`WriteJson` (out-param, json_fwd in the header),
+`Copy`/`Rename`/`Remove`/`EnsureDir` (unified `error_code` + `SA_LOG`), and
+`CopyTemplateReplacing` (template instantiation for AssetsPanel create/rename). Call sites
+(SceneSerializer, SaProject, InputMapLoader, EditorShortcutConfig, InputMapImporter, MetaFile,
+AssetsPanel) no longer hand-roll `ifstream`/`ofstream`. `IO::Copy` is named to dodge the Win32
+`CopyFile` macro. Binary cooked-asset serializers (`Cooked*.cpp`) keep their own structured
+`read`/`write` — cohesive per format, intentionally not folded in.
 
 Child UUIDs (for embedded images, materials, per-mesh nodes) are derived
 deterministically from the parent asset UUID using Fibonacci hash salts:
@@ -599,6 +667,19 @@ struct PostProcessSettings {
     bool  filmGrainEnabled   = false;
     float filmGrainIntensity = 0.1f;   // [0..0.3] amplitude
     float filmGrainSize      = 1.6f;   // [0.5..5] noise tile scale
+
+    // Screen Space Reflections (Issue #48) — compute pass after DeferredLighting,
+    // before TAA. Replaces the IBL env-probe specular with screen-traced colour.
+    bool  ssrEnabled      = false;
+    float ssrMaxRoughness = 0.4f;   // fade SSR out above this roughness
+    int   ssrMaxSteps     = 64;     // [16..128] linear march sample count
+    float ssrThickness    = 0.1f;   // view-space depth tolerance for hit test
+    float ssrStrength     = 1.0f;   // [0..1] reflection blend weight
+
+    // Screen Effects (Issue #88) — ordered per-scene stack of custom .saeffect
+    // post-process passes. Only listed instances run (Unity Volume / UE Blendable
+    // model). Each: { name (=@Effect), enabled, params: name→ParamValue overrides }.
+    std::vector<ScreenEffectInstance> screenEffects;
 };
 ```
 
@@ -632,6 +713,18 @@ parameters, and tonemap parameters instantly from `ws.pp` without a device stall
 `pp.tonemapMode` switching retains the WaitIdle feature-slot replacement for `LutTonemapFeature`.
 `pp.bloomMipLevels` change is **deferred** — set `m_pendingBloomMipCount`; actual GPU rebuild
 happens at the start of the next `RenderFrame` resize block (after `WaitIdle`).
+
+**Built-in post-process on compute (Issue #92).** Engine post-process features may run on
+`ComputeProgram` instead of a fullscreen-fragment `MaterialType` (same pattern as SSR /
+AutoExposure) — an internal rewrite, orthogonal to the user-facing ScreenEffect system.
+`BloomFeature`'s four passes are all compute: **threshold / downsample** write their mip as a
+UAV (`imageStore`); **upsample / composite** read-modify-write the destination (`imageLoad + add
++ imageStore`) to replace hardware Additive blend, which compute lacks. The bloom mip pyramid
+(`m_bloomMip[]`) and the `HDR_Color` transient carry `UnorderedAccess` in addition to
+`RenderTarget|Sampled`. This changes no texture/buffer allocation (only the usage flag) — the
+delta vs the old fragment path is graphics ShaderPrograms/pipelines → ComputePrograms/pipelines.
+`PostFXFeature` stays fragment (it writes the swapchain directly, which cannot be a storage
+image, and there is no blit-to-swapchain); Tonemap/SSR compute conversion is left to later issues.
 
 ### Transform Hierarchy
 
@@ -1435,6 +1528,88 @@ class ComputeProgram {
 };
 ```
 
+When supplied, `Desc::frameLayout` occupies **set=1** (matching the engine-wide per-frame
+set convention — set=0 bindless, set=1 frame), so a compute shader can `#include
+"frame_uniforms.glsl"` and bind the renderer's `frameSet` at set=1 exactly like a graphics
+post-FX pass. `CreateComputePipeline` fills the unused set=0 slot with an empty layout.
+`SSRFeature` (Issue #48) is the first consumer; the global IBL/sky/LTC samplers in the frame
+layout are declared `RHIShaderStage::All` (not Fragment-only) so compute passes can sample them.
+
+### ProgramCache (Issue #86)
+
+Central, Resource-layer owner of **all** GPU programs — graphics `ShaderProgram` (vert+frag)
+and `ComputeProgram`. Owned by `SceneRenderer`, injected via `FeatureInitContext::programs`.
+Holders (`MaterialType`, `RenderFeature`) keep raw pointers; the cache owns lifetime.
+
+```cpp
+class ProgramCache {
+    void Init(IRHIDevice*, frameLayout, bindlessLayout, shaderDir);
+    ComputeProgram* GetCompute (stem, useFrameLayout=true, projectScope=false);
+    ShaderProgram*  GetGraphics(key, vertStem, fragStem, primaryDir, fallbackDir, projectScope);
+    bool ReloadGraphicsFrag(key, fragSpv, fragRefl);   // hot-reload (.saglsl dispatch)
+    void ClearProjectPrograms();                       // project switch
+    void Shutdown();
+};
+```
+
+- **Not a dedup layer**: keyed per holder (MaterialType name / `"feature:variant"` / compute
+  stem) — each holder owns its own program instance. shader/material separation already comes
+  from `MaterialInstance → MaterialType → ShaderProgram`; cross-holder dedup is not a goal and
+  would collide with `ShaderProgram`'s AttachmentKey-only pipeline cache. Value is central
+  ownership + uniform loading + uniform hot-reload + engine/project scoping.
+- `MaterialType::shader` is a `ShaderProgram*` into the cache (not by value). `MaterialManager::
+  RegisterTypeFromShaders` delegates program acquisition to `GetGraphics` and reads parameter
+  layout back from `shader->GetMergedReflection()` (single `.refl` load).
+- **Cleanup order** (project switch): instances → `ClearProjectTypes` → `ClearProjectPrograms`
+  (types drop their program pointers before the programs are freed → no dangling/double-free).
+- Compute features (`AutoExposure`, `Tonemap` CG-bake, `SSR`) and graphics feature variants
+  (skinned shadow/gbuffer/velocity/selection) all acquire programs from the cache.
+- **Foundation for "above-program" abstractions**: a `ComputeProgram` is the shared base for
+  any future user-facing compute layer (screen effects, gameplay compute, particles) — those
+  diverge *above* the program (resource model / scheduling / lifetime) and are separate systems.
+
+### ScreenEffect System — `.saeffect` (Issue #88)
+
+Declarative custom post-processing: users author a `.saeffect` (a shader + `@`-annotations),
+zero C++, to insert a pass at a frame injection point — the post-processing-side peer of
+`.saglsl → MaterialType`. Mirrors the material system layer-for-layer:
+
+| Material layer | ScreenEffect layer | Location |
+|---|---|---|
+| `.saglsl` (user) | `.saeffect` (user) | project `assets/shaders/` |
+| `MaterialType` | `ScreenEffectType` (enum `EffectInject` + `@In/@Out` + `ParamDef[]`) | `function/material/ScreenEffectType.hpp` |
+| `MaterialManager` | `ScreenEffectRegistry` (scans `*.saeffect.refl`, owns types, `ClearProjectEffects(device)`) | `function/material/ScreenEffectRegistry.{hpp,cpp}` |
+| `RenderFeature` (engine-only) | `ScreenEffectFeature` (nested in `SceneRenderer`, one anchor per injection point) | `SceneRenderer.hpp/.cpp` |
+
+- **Authoring** (`.saeffect`): header `@Effect / @Stage fragment|compute / @Inject / @In / @Out`
+  + `#pragma sa_section fragment|compute` body. `@Param` values are inline `set=2 binding=0`
+  `EffectParams` UBO member annotations — reflected by ShaderReflectTool exactly as `MaterialParams`.
+- **Cook** (`ShaderCookLib::CookEffects`, independent of `.saglsl` dispatch): produces the standard
+  `<stem>.saeffect.{frag|comp}.{spv,refl}` with `.refl` metadata keys `effect/stage/inject/in/out`
+  (no special `.refl` format — same `SetMeta` mechanism as material `shadingModel`).
+- **Injection points** (`EffectInject`): `AfterLighting / AfterTAA / BeforeTonemap / AfterTonemap`.
+  `SceneRenderer::Init` pre-places one anchor `ScreenEffectFeature` per point in `m_features`;
+  `RenderFrame` redirects `handles.hdr` to an anchor's output when it ran (same pattern as SSR/DoF).
+  Validated HDR-space points are `AfterLighting`/`BeforeTonemap`; `@In` vocabulary
+  (`ResolveEffectHandle`) covers `hdr/depth/gbufferRT0..2/velocity/ssaoTex/taaResolved`.
+- **Compute stage** (Issue #91): `@Stage compute` effects run via the same anchor executor —
+  `@Out` is a UAV storage image (`set=2` binding after the `@In` samplers), written with
+  `BindStorageImage` + `WriteUAV` + `Dispatch(⌈w/8⌉,⌈h/8⌉)` (mirrors `SSRFeature`); `@Out hdr`
+  chains like the fragment path. `ProgramCache::GetCompute` is dir-aware (project `cook_cache/shaders`
+  primary, engine builtin fallback), so **project-authored compute `.saeffect` load** (the #88
+  gap is closed). Create menu: "Shader ▸ Screen Effect — Compute" (`NewEffectCompute.saeffect`).
+  `@Out ldr` cross-buffer + built-in Tonemap→compute are deferred to **#93** (LDR / Tonemap-compute).
+- **Activation model** (Unity Volume Override / UE Blendable): the registry is only a *catalog*;
+  an effect runs **only if listed** in `PostProcessSettings::screenEffects` (per-scene, serialized).
+  `ApplyWorldSettings` resolves each active instance to `m_activeScreenEffects` (type-default param
+  blob overlaid with the instance's named `@Param` overrides). `PostProcessPanel`'s "Screen Effects"
+  section adds/removes/reorders/toggles entries and draws params via the shared `ParamWidgets` layer.
+- **Asset integration**: `.saeffect` → `AssetTypeFromExtension` type `"Shader"` (auto `.sameta`,
+  script icon, text inspector, "Shader ▸ Screen Effect" create menu from `NewEffect.saeffect` template).
+- **GPU-safe reload**: shader/effect re-registration destroys pipelines, so mid-frame UI triggers
+  (create/reimport/delete/rename) call `SceneRenderer::RequestProjectShaderReload`, which defers
+  `ApplyProjectShaderTypes` (self-`WaitIdle`) to the next `RenderFrame` top.
+
 ### MaterialManager
 
 ```
@@ -1733,6 +1908,7 @@ Normal encoding uses **Octahedral Normal Encoding** (OctEncode/OctDecode).
 | `VelocityPrepassFeature` (Issue #84) | enabled when `MotionBlurFeature::m_enabled` OR `TAAFeature::m_enabled` (Issue #85) | Per-object writes to `handles.velocity` (RG16F): each visible draw rasterises curr & prev clip-space positions. `gl_Position` uses jittered VP (matches GBuffer depth); the velocity output uses unjittered `currUnjitteredViewProj` × `prevViewProj` so TAA can reproject without jitter compensation. Skinned variant samples curr/prev bone matrices via set=3 bindings 0/2 (`velocityDescSet`) | `velocity_prepass.vert/.frag` (+ `velocity_prepass_skinned.vert` for skinned) |
 | `SSAOFeature` | always registered; disabled → fills ssaoTex with 1.0 | half-res R8 AO → blurred into `ssaoTex` | `ssao.frag` + `ssao_blur.frag` |
 | `DeferredLightingFeature` | always | HDR (transient RGBA16F) | `deferred_lighting.frag` |
+| `SSRFeature` (Issue #48) | always registered; skips if `pp.ssrEnabled==false` | compute pass: view-space ray-march → replaces IBL env-probe specular with screen-traced colour into transient `SSR_Composite` (RGBA16F UAV); sets `handles.hdr` to it. Relies on TAA to denoise the per-frame jitter | `ssr.comp` |
 | `SelectionMaskFeature` | always | R8 silhouette mask | `selection_mask.vert/.frag` (+ `selection_mask_skinned.vert` for skinned) |
 | `TAAFeature` | always registered; disabled → passes `handles.hdr` through | TAA-resolved into ping-pong history; `handles.taaResolved` | `taa_resolve.frag` |
 | `AutoExposureFeature` | always registered; skips if `pp.autoExposureEnabled==false` | 256-bin log-lum histogram → weighted percentile EV → exponential-smoothing exposure; 1-frame CPU readback via staging; reads `handles.hdr` (pre-TAA content) | `postfx_histogram.comp`, `postfx_exposure_adapt.comp` |
@@ -1747,7 +1923,7 @@ Normal encoding uses **Octahedral Normal Encoding** (OctEncode/OctDecode).
 | `DebugOverlayFeature` | always | debug lines on swapchain | `debug_line.vert/.frag` |
 | user `RenderFeature`s | `AddFeature(...)` | custom | custom |
 
-`BloomFeature`, `TAAFeature`, `DoFFeature`, and `MotionBlurFeature` are always in the feature list; their `AddPasses` early-returns when disabled.
+`BloomFeature`, `TAAFeature`, `DoFFeature`, `MotionBlurFeature`, and `SSRFeature` are always in the feature list; their `AddPasses` early-returns when disabled.
 `TonemapFeature` ↔ `LutTonemapFeature` hot-swapped at runtime by `ApplyWorldSettings` (WaitIdle + slot replace).
 
 ```cpp
@@ -1902,6 +2078,48 @@ All three effects use `if (enable > 0.5)` uniform-control-flow — the shader co
 
 **Script API (`StellarAlia.PostProcess`):** see [Scripting System → Script API Surface](#script-api-surface) for the `PostProcess.Vignette` / `.ChromaticAberration` / `.FilmGrain` Unity-style accessors.
 
+### Screen Space Reflections (Issue #48)
+
+`SSRFeature` is a single **compute** pass (`ssr.comp`) inserted immediately after
+`DeferredLightingFeature` and before `SelectionMask`/`TAA`, so TAA denoises the per-frame
+ray-march jitter. It is the engine's first compute pass to write a **transient UAV texture**
+and the first to consume the per-frame `frameSet` from compute.
+
+**Algorithm (per pixel):** reconstruct view-space position from depth (`u_Frame.invProj`) and
+the G-Buffer normal; reflect the view ray; linear-march the depth buffer with geometric step
+growth + a jittered start, then binary-refine the hit. On a hit, sample the lit HDR at the hit
+UV and **replace the IBL env-probe specular** — recomputing `iblSpec = prefilteredColor *
+(F_ibl·brdfSS.x + brdfSS.y) * occlusion` exactly as `deferred_lighting.frag` does (same
+`occlusion = albedoOcc.a × AO`) so the subtraction cancels and there is no double counting:
+```
+out = hdrIn + conf * (ssrSpec - iblSpec)
+conf = screenEdgeFade × roughnessFade(ssrMaxRoughness) × ssrStrength
+```
+`deferred_lighting.frag` is **unchanged** — SSR is a self-contained "specular correction" pass.
+
+**Data flow / placement:**
+```
+DeferredLighting (handles.hdr ← lit, incl. iblSpec)
+  → SSR (compute): Read depth + gbufferRT0/1 + hdr + AO + set=1 frame; WriteUAV SSR_Composite
+    SceneRenderer redirects handles.hdr = SSR_Composite (mirrors DoF/MotionBlur output redirect)
+  → SelectionMask → TAA (denoises SSR) → Bloom → …
+```
+Disabled (`ssrEnabled==false`) → `AddPasses` early-returns with `m_outputHandle = {}`, the RG
+skips the transient, zero cost.
+
+**Descriptor sets (compute, mirrors SSAO):** set=1 = `frameSet` (camera + IBL samplers, bound
+via `ComputeProgram`'s `frameLayout`); set=2 = SSR resources (b0 depth, b1 gbufferRT0, b2
+gbufferRT1, b3 hdr, b4 AO — all sampled; b5 `SSR_Composite` storage image). `SSR_Composite` is
+`RGBA16F` (`rgba8` is not a guaranteed storage-image format) with `UnorderedAccess | Sampled`.
+
+**Reusable infra added by this feature:**
+- `FrameContext::BindStorageImage(set, binding, RGTextureHandle)` — deferred storage-image
+  (UAV) binding for transient RG textures (counterpart to `BindTexture`/`BindBuffer`); resolved
+  in `FlushBindings` via `WriteDescriptorStorageImage`. First exercise of `RGPassBuilder::WriteUAV`
+  on a texture; the RG auto-emits the `UnorderedAccess(GENERAL) → ShaderRead` barrier for TAA.
+- `ComputeProgram` external `frameLayout` now occupies **set=1** (was set=0); frame samplers
+  are `RHIShaderStage::All`. See [ComputeProgram](#computeprogram).
+
 ### CPU Frustum Culling & BVH
 
 **File:** `src/core/spatial/BVHTree.hpp`
@@ -1969,17 +2187,35 @@ EditorMode::LoadProject()
   │     compare each .saglsl mtime vs .shader_manifest.json; skip unchanged files
   │     parse .saglsl, generate dispatch GLSL (shading_model_ids.glsl +
   │     shading_dispatch.glsl), compile *.gbuffer.frag → .spv + .refl,
-  │     inject @ShadingModel / @VertShader into .refl (ShaderReflection metadata)
+  │     SetMeta shadingModel / vertShader into .refl (generic metadata map, Phase 0 #88)
+  ├─ ShaderCook::HasSaeffectFiles() / CookEffects()   ← Issue #88, independent of dispatch:
+  │     parse .saeffect (@Effect/@Stage/@Inject/@In/@Out), compile <stem>.saeffect.{frag,comp}
+  │     → .spv + .refl, SetMeta effect/stage/inject/in/out (same standard .refl mechanism)
   ├─ ShaderCook::RecompileDeferredLighting()  ← only if dispatch changed;
   │     recompile deferred_lighting.frag with the project dispatch (glslc subprocess)
   │     using -I ENGINE_SHADER_SRC_DIR -I cook_cache/generated/shaders/
   ├─ ClearProjectAssets() / ClearProjectInstances()  ← WaitIdle inside
-  └─ ApplyProjectShaderTypes(cookedShaderDir)
+  └─ ApplyProjectShaderTypes(cookedShaderDir)   ← self-WaitIdle (safe between frames or at RenderFrame top)
        ├─ MaterialManager::ClearProjectTypes()
+       ├─ ScreenEffectRegistry::ClearProjectEffects(device)   ← Issue #88
        ├─ DeferredLightingFeature::ReloadShaders()   ← hot-swap frag SPV
-       └─ MaterialManager::RegisterTypesFromShaderDir(isProjectType=true)
-             reads ShaderReflection::shadingModel / vertShader to auto-register types
+       ├─ MaterialManager::RegisterTypesFromShaderDir(isProjectType=true)
+       │     reads ShaderReflection GetMeta("shadingModel") / GetMeta("vertShader")
+       └─ ScreenEffectRegistry::Scan(isProjectType=true)   ← reads GetMeta("inject") → ScreenEffectType catalog
 ```
+
+Mid-frame UI triggers (create/reimport/delete/rename of `.saglsl` / `.saeffect`) go through
+`SceneRenderer::RequestProjectShaderReload`, which defers `ApplyProjectShaderTypes` to the next
+`RenderFrame` top (destroying pipelines mid-command-buffer is unsafe).
+
+**Cook-path unification (Issue #90).** Both the load-time cook (`LoadProject`) and the
+reimport/create/delete/rename cook (`EditorMode::CookProjectShaders`, run via the CLI) now write to
+the **same** project `cook_cache/shaders` (reimport previously wrote to `BUILTIN_SHADER_DIR`, which
+diverged from the dir scanned on startup and left "ghost" effects). `m_shaderDir` (BUILTIN) stays the
+engine fallback only. `PruneOrphanedEffectCookOutputs(cookDir, sourceDir)` runs on **both** cook
+paths, dropping `<stem>.saeffect.*` whose source was deleted so the effect leaves the catalog. The
+FileWatcher poll auto-cooks on window focus for `.saglsl` / `.saeffect` (previously `.cs` only),
+mirroring the script `m_pendingRecompile` path.
 
 Outputs land in `cook_cache/shaders/` (SPV + refl) and `cook_cache/generated/shaders/` (dispatch GLSL).
 `cook_cache/.shader_manifest.json` records per-file mtime for incremental cook on subsequent loads.

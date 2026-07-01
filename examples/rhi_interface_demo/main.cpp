@@ -98,6 +98,19 @@ public:
         SA_LOG_INFO("[CMD] CopyBufferToTexture  buf={} tex={} mip={} layer={}",
                     src.index, dst.index, mip, layer);
     }
+    void FillBuffer(RHIBufferHandle buffer, uint64_t offset, uint64_t size,
+                    uint32_t value) override {
+        SA_LOG_INFO("[CMD] FillBuffer  buf={} offset={} size={} value={}",
+                    buffer.index, offset, size, value);
+    }
+    void BufferBarrier(RHIBufferHandle buffer, RHIBufferState from,
+                       RHIBufferState to) override {
+        SA_LOG_INFO("[CMD] BufferBarrier  buf={} {}->{}", buffer.index,
+                    static_cast<uint32_t>(from), static_cast<uint32_t>(to));
+    }
+    void GenerateMipmaps(RHITextureHandle texture) override {
+        SA_LOG_INFO("[CMD] GenerateMipmaps  tex={}", texture.index);
+    }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -203,6 +216,10 @@ public:
         return h;
     }
 
+    void FreeDescriptorSet(RHIDescSetHandle ds) override {
+        SA_LOG_INFO("[DEV] FreeDescriptorSet  handle={}", ds.index);
+    }
+
     void WriteDescriptorTexture(RHIDescSetHandle ds,
                                 uint32_t         binding,
                                 RHITextureHandle texture) override {
@@ -249,6 +266,10 @@ public:
         SA_LOG_INFO("[DEV] UploadBufferData  buffer={} size={}B offset={}", buf.index, size, offset);
     }
 
+    void ReadBufferData(RHIBufferHandle buf, void*, uint64_t size, uint64_t offset) override {
+        SA_LOG_INFO("[DEV] ReadBufferData  buffer={} size={}B offset={}", buf.index, size, offset);
+    }
+
     void UploadTextureData(RHITextureHandle tex, const void*, uint64_t size) override {
         SA_LOG_INFO("[DEV] UploadTextureData  texture={} size={}B", tex.index, size);
     }
@@ -256,6 +277,11 @@ public:
     void UploadTextureMips(RHITextureHandle tex,
                            std::span<const MipUpload> mips) override {
         SA_LOG_INFO("[DEV] UploadTextureMips  texture={} mips={}", tex.index, mips.size());
+    }
+
+    void ReadbackTextureMips(RHITextureHandle tex,
+                             std::span<MipReadback> mips) override {
+        SA_LOG_INFO("[DEV] ReadbackTextureMips  texture={} mips={}", tex.index, mips.size());
     }
 
     void ImmediateCompute(std::function<void(IRHICommandList*)> fn) override {
@@ -302,6 +328,18 @@ public:
     }
     void WaitIdle() override {
         SA_LOG_INFO("[DEV] WaitIdle");
+    }
+
+    // ── Introspection ───────────────────────────────────────────────────────────
+
+    const RHITextureDesc* GetTextureDesc(RHITextureHandle) const override {
+        return nullptr;  // Null device stores no descs
+    }
+    RHIMemoryStats GetMemoryStats() const override {
+        return RHIMemoryStats{};
+    }
+    std::string_view GetDeviceName() const override {
+        return "NullRHIDevice";
     }
 
     // ── Swapchain ─────────────────────────────────────────────────────────────

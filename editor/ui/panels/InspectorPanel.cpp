@@ -115,7 +115,7 @@ void InspectorPanel::RegisterAssetDrawers() {
     m_defaultAssetDrawer = std::make_unique<DefaultAssetInspector>();
 
     for (auto ext : {".txt", ".md", ".cs",
-                     ".saglsl", ".glsl", ".vert", ".frag", ".comp", ".hlsl", ".json",
+                     ".saglsl", ".saeffect", ".glsl", ".vert", ".frag", ".comp", ".hlsl", ".json",
                      ".sainputmap"})
         m_assetDrawers[ext] = std::make_unique<TextAssetInspector>();
 

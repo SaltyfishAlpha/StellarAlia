@@ -1,4 +1,4 @@
-﻿# StellarAlia Issue 文档
+# StellarAlia Issue 文档
 
 > **最近一次整理**：2026-06-25
 > **状态来源**：源码核验（详见底部"已完成 issue 索引"段）
@@ -9,9 +9,9 @@
 
 | 状态 | 数量 | 列表 |
 |---|---|---|
-| ✅ 已完成 | 29 | #29 #45 #46 #47 #58 #62-#67 #69 #72 #73 #74 #75 #78 #81 #82 #84 **#85** #56b（旧#71热编译）#71 Phase 2 #71 Phase 3a/3b + Vulkan D/E/F/G/H + Cross-dir Vtx Shader + UI Bug 5 项 |
-| ❌ 未完成（带设计） | 15 | #36 #48 #49 #55 #56 #57 #60 #61 #68 #70 #76 #77 #79 #80 #83 |
-| ❌ 未完成（短条目） | 12 | X-1 ~ X-8 + #54 + #73-A + #74-A + #23 帧率优化伞 |
+| ✅ 已完成 | 36 | #29 #45 #46 #47 **#48** #58 #62-#67 #69 #72 #73 #74 #75 **#77** #78 #81 #82 #84 #85 **#86** **#88** **#90** **#91** **#92** #56b（旧#71热编译）#71 Phase 2 #71 Phase 3a/3b + Vulkan D/E/F/G/H + Cross-dir Vtx Shader + UI Bug 5 项 |
+| ❌ 未完成（带设计） | 15 | #36 #49 #55 #56 #57 #60 #61 #68 #70 #79 #80 #83 **#87** **#89** **#93** |
+| ❌ 未完成（短条目） | 11 | X-1 ~ X-8 + #54 + #73-A + #23 帧率优化伞 |
 
 **关键指标**：`ScriptApiFunctionTable::version = 7` — 表明脚本 API 已经过 v2→v3（Phase 2）→v4→v5（Phase 3a InputMap）→v6（#81 Transform 重命名）→v7（#47 PostProcess）共五轮扩展。
 
@@ -33,19 +33,19 @@
 
 ### 🟡 低优先级 — 渲染/工具
 - **#36 RHI VkMemory 级别别名**（极低，依赖 #16）
-- **#48 SSR**（依赖 #42 TAA）
+- **#48 SSR**（依赖 #42 TAA）✅ DONE — Phase 1（朴素线性步进）
+- **#89 SSR Phase 2：Hi-Z 步进 + 空间去噪**（接续 #48，详细设计见下）
+- **#93 ScreenEffect LDR / Tonemap-compute**（#91 分出；@Out ldr 跨缓冲 + Tonemap→compute C1/C2/C3 待定）
 - **#49 Volumetric Fog**（极低）
 - **#56 Stencil Masking for Deferred Lighting**（详细设计见下）
 - **#57 GPU-Driven Meshlet Cluster Culling**（详细设计见下）
 - **#60 Mesh Split/Merge Cook 工具**（详细设计见下）
 - **#70 GameMode + 项目导出**（详细设计见下）
-- **#76 Cook 工具对 Script 类型静默 skip**（详细设计见下）
 
 ### 🟡 中优先级 — 脚本系统延伸
 - **#80 Script Field 复合类型（List<T> + 嵌套 struct）**（依赖 #75，详细设计见下）
 
 ### 🟢 极低优先级 / cleanup
-- **#77 `m_pendingDeselectOtherPath` 死代码清理**
 - **#79 `ScriptSystem::CaptureFieldValues` 接口空挂**
 
 ### 📋 杂项短条目（暂未独立 issue 编号；标 X-* 临时编号去重）
@@ -63,7 +63,7 @@
 - **X-8 调试渲染**（原序号 #22）：面片 id / lod / 随机 / depth 着色
 - **#54 Reimport 后内存缓存未失效**（低优先级，待复现）— `ReimportDir` 完成后未调 `ClearProjectAssets()` 导致 GPU mesh handle 残留旧数据；曾在 BoomBox.glb 观察到面片破碎，无法稳定复现。修法：reimport 完成触发 `ResourceManager::ClearProjectAssets()`
 - **#73-A `.saglsl` shading model 迁移到 SSBO+bindless 路径**（低优先级）— #72 后内置 PBR 走 SSBO+bindless 零 per-entity desc set 分配，但 `.saglsl` shading models cook 出 `*.gbuffer.frag` 仍声明 `set=2 uniform MaterialParams`（UBO 路径），`MaterialOverrideComponent` 走 `CloneInstance` legacy 路径。改法：更新 `ShaderCookLib` / `NewShader.saglsl` 模板把声明改成 `std430 readonly buffer MaterialParams` + `t_*_Idx` uint 索引，reflection 触发 `usesMaterialParamsSSBO=true`
-- **#74-A 编辑器全局 NOMINMAX**（低优先级）— editor 目标某些 cpp 经过 Windows.h 后 `std::numeric_limits<uint32_t>::max()` 被宏污染。修法：editor PCH 或 CMakeLists 加 `target_compile_definitions(... PRIVATE NOMINMAX)` 全局生效
+- **#74-A 编辑器全局 NOMINMAX** ✅ DONE — `editor/CMakeLists.txt` 对 `StellarAliaEditor` 加 `if(WIN32) target_compile_definitions(... PRIVATE NOMINMAX)`，TU 不再需逐文件 `#define NOMINMAX` 防 Windows.h 宏污染 `numeric_limits::max()`
 
 > 注：原序号 #73 / #74 与下方独立 issue 编号 #73 / #74（Script Inspector 三连）冲突；为避免歧义此处加 -A 后缀。下方"Issue #73 Script Inspector 前置"是已完成的另一 issue。
 
@@ -104,30 +104,8 @@
 
 ---
 
-## Issue #48 — SSR（屏幕空间反射）
-
-**优先级：低（依赖 #42 TAA 降噪，否则噪点过多）**
-
-### 目标
-
-利用 GBuffer 法线/粗糙度 + depth 做屏幕空间光线步进，替代纯 IBL 高光反射，效果适用于平整表面（地板、金属面板）。
-
-### 设计
-
-- **SSR Trace pass**（compute）：HiZ 加速步进，roughness > 阈值时跳过，未命中回退 IBL
-- **SSR Resolve pass**：重投影历史混合（依赖 TAA velocity buffer 降噪）
-- 新增瞬态纹理：`ssrRaw`(RGBA16F, viewport)、`ssrResolved`(RGBA16F, viewport)
-- DeferredLighting 合并 SSR 结果 + IBL 高光
-
-### 参数
-
-```cpp
-bool  ssrEnabled      = false;
-float ssrMaxRoughness = 0.4f;  // 超过此粗糙度不计算 SSR
-int   ssrMaxSteps     = 64;
-float ssrThickness    = 0.1f;  // 深度容差
-float ssrStrength     = 1.0f;
-```
+## Issue #48 — SSR（屏幕空间反射）✅ DONE
+<!-- 单 compute pass (ssr.comp) 跑在 DeferredLighting 后 / TAA 前：视空间线性步进 + 二分细化，命中采样 lit HDR，按与 deferred_lighting.frag 相同的 split-sum 权重替换 IBL env-probe 高光（out = hdrIn + conf*(ssrSpec − iblSpec)，occlusion 含 AO 故精确抵消、无重复计费），不改 deferred_lighting.frag；步进抖动靠 TAA 降噪。新增 FrameContext::BindStorageImage（瞬态 UAV 延迟绑定）+ 首次启用 RGPassBuilder::WriteUAV(texture)；ComputeProgram 外部 frameLayout 改占 set=1，frame 全局 sampler stage Fragment→All 供 compute 采样；PostProcessSettings +5 个 ssr* 字段 + 序列化 + PostProcessPanel UI。Phase 2 留 HiZ / glossy 反射模糊 / stochastic+spatial resolve / SSR 专属时序累积。 -->
 
 ---
 
@@ -1727,34 +1705,8 @@ ApplyTo 已是"对 defaults 列表内每个 ActionMapDef 的 actions 逐个 patc
 ## Issue #75 — Script Field Inspector：序列化、类型扩展与属性 ✅ DONE (partial — List/nested deferred to #80)
 <!-- P5 serialization: SceneSerializer reads/writes script.fields[{name,kind,value}] for Bool/Int32/Float/String/Vec2-4/Color/AssetRef/EntityRef + scene_local_id mirror; ScriptFieldKindToString/FromString in schema header; RecompileEditing migration walks all ScriptComponent entities and reconciles vs new schema (retained/reset/defaulted/dropped one-line summary). P6 types: managed StellarAlia.Color + AssetRef (16B UUID hi+lo) + Entity (sceneLocalId↔entt bits translation in ScriptSystem::InjectFieldValues / InjectSingleField with schema-routed EntityRef); ScriptDrawer Color (ColorEdit3/4), AssetRef (DrawAssetIDField + SetFieldCommand undo, [AssetType("Mesh")] typeHint filter), EntityRef (picker + SAENTITY drop + "(missing #N)" fallback). P3: EntityIdComponent {uint64 sceneLocalId} auto-emplaced by Scene::CreateEntity from monotonic m_nextLocalId (reset on Clear); Scene::FindBySceneLocalId / AssignSceneLocalId public API; SceneSerializer round-trips scene_local_id, pre-#75 scenes auto-assign on load. O2 attributes (schema wire v2): [Range]/[Tooltip]/[Header]/[HideInInspector]/[SerializeField] + [AssetType] in StellarAlia.Runtime; FieldReflector BuildSchemaBlob writes tooltip/header/flags/range tail; DecodeSchema branches on schemaVersion≥2; ScriptDrawer applies SliderInt/SliderFloat for Range, SetTooltip on hover, SeparatorText before field, skips render for hidden. Defaults: new GetClassDefaultsBlob export uses Activator.CreateInstance to capture C# initializers into ScriptClassSchema.defaults; FetchAndCacheSchema pulls them alongside schema; EnsureValue<T> + RecompileEditing migration both seed from defaults before falling back to kind-zero. SetFieldCommand<uint64_t> added for EntityRef undo. Deferred to #80: List<T> field kind set + variant alts + ScriptDrawer TreeNode UI; nested [Serializable] struct dot-path expansion. -->
 
-## Issue #76 — Cook 工具对 Script 类型静默 skip
-
-**优先级：低**（日志噪音清理）
-
-`tools/cook/main.cpp` 的 type 分派对未识别 `entry.meta.type` 走 `[Cook] SKIP (unsupported type: ...)` 分支。自 #73 把 `.cs` 纳入 ImportScanner 后，每次 cook 都会刷一条 "unsupported type: Script" 警告，因为 Script 资源是 runtime-consumed、本来就不走 cook cache。
-
-**改法**：在 type 分派表加显式 Script 静默分支：
-
-```cpp
-} else if (entry.meta.type == "Script") {
-    // Runtime-consumed; no cook output. Silent skip to avoid log noise.
-    continue;   // not counted in skipped/failed/ok
-}
-```
-
-同样模式适用于将来其它 runtime-only 资源类型。
-
----
-
-## Issue #77 — AssetsPanel `m_pendingDeselectOtherPath` 死代码清理
-
-**优先级：极低**（cleanup）
-
-#73 把 file-pane selection 触发从 `IsItemClicked()`（mouse-down）改为 `IsItemHovered() && IsMouseReleased(Left)`（mouse-up over source），意味着 selection body 只在"释放还在源 item 上"时跑——即一次确认的 click，不可能再演变为 drag。
-
-旧的"多选项 click 时先记录 pending，到 mouse-up 时 flush（如果中间没 drag）"机制（`m_pendingDeselectOtherPath`）现在的语义已经被外层的 click-vs-release 路由完全覆盖：到达 selection body 的时刻就已经判定为 click。
-
-**改法**：删除 `m_pendingDeselectOtherPath` 字段和它的 flush 代码（`AssetsPanel.cpp` 中部 + background-click 清空 + `BeginDragDropSource` clear 等），把"多选项 single-click 收缩到单选"逻辑直接 inline 到 selection body 内。
+## Issue #77 — AssetsPanel `m_pendingDeselectOtherPath` 死代码清理 ✅ DONE
+<!-- #73 把 selection 改为 release-over-item 触发后，到达 selection body 即已判定为 click，deferred flush 机制（字段 + OnDraw flush 块 + BeginDragDropSource/背景点击 clear）全成死代码；删字段，多选 single-click 折叠逻辑直接 inline 进 else 分支。 -->
 
 ---
 
@@ -2270,3 +2222,143 @@ Phase 1 必须先做。Phase 2-7 中 P6 / P7 可与 P3-P5 并行（只要 Phase 
 
 ---
 
+## Issue #86 — ProgramCache：统一 GPU 程序持有层（重构）✅ DONE
+<!-- Phase 1+2 完成：新增 Resource 层 `ProgramCache`（SceneRenderer 持有、经 FeatureInitContext::programs 注入）集中持有所有 ComputeProgram + ShaderProgram，按 holder key 缓存（不去重）、engine/project 双作用域、统一热重载。compute features（AutoExposure/Tonemap/SSR）改 `GetCompute` 持裸指针；MaterialType::shader 由按值改 `ShaderProgram*`（GetGraphics，单次 .refl 加载，merged 反射从 program 取）；4 个 feature skinned 变体 + MaterialManager 注册路径全迁入 cache；清理顺序 instances→types→programs 防双 free。ComputeProgram 外部 frameLayout 改占 set=1；frame 全局 sampler stage→All 供 compute 采样。Phase 3（ComputeDispatch）撤销——program 之上无单一抽象，按用例分叉，拆出独立的 ScreenEffect 后处理 issue（见 #88）。 -->
+
+---
+## Issue #87 — PSO 预编译 / pipeline cache 持久化（发布向优化）
+
+**优先级：低（仅"若发布游戏"才需要；关联 #70 项目导出）**
+
+引擎当前运行时惰性 `GetOrCreatePipeline`（create-on-miss），编辑器/研究用足够。发布游戏需消除首遇材质+state 组合时的 shader 编译卡顿：录制 PSO desc 清单 → 加载期 worker 线程预建暖 cache + 落 `VkPipelineCache` blob 跨运行复用。属 #70 发布管线的子项，待发布需求出现再展开。
+
+---
+
+## Issue #88 — ScreenEffect：声明式自定义后处理 ✅ DONE
+<!-- 用户写 .saeffect(@Effect/@Stage/@Inject/@In/@Out + 内联 @Param)零 C++ 插入自定义后处理 pass = .saglsl→MaterialType 的后处理侧同级。Phase0 ShaderReflection 泛化为通用 metadata map;ScreenEffectType/ScreenEffectRegistry 落 function/material(仿 MaterialType/MaterialManager),ScreenEffectFeature 为 SceneRenderer nested feature(4 注入锚点 AfterLighting/AfterTAA/BeforeTonemap/AfterTonemap + RenderFrame redirect handles.hdr);cook 走 ShaderCookLib::CookEffects 产 <stem>.saeffect.{frag,comp}.{spv,refl}+metadata(标准 refl,机制同 shadingModel);资产集成 .saeffect→type Shader(自动 .sameta/脚本图标/文本 inspector/Shader 子菜单新建+NewEffect.saeffect 模板);激活模型=Unity Volume/UE Blendable:PostProcessSettings.screenEffects 每场景有序栈(序列化)+PostProcessPanel add/remove/enable/拖拽/参数+Add Effect 目录,ApplyWorldSettings 解析为 m_activeScreenEffects;ParamWidgets 公共反射 param 控件层(材质 MaterialOverrideDrawer 共用);GPU 安全 mid-frame 触发走 RequestProjectShaderReload 延迟到 RenderFrame 顶应用。遗留→#90:双 cook 目录/启动幽灵 effect/焦点自动 cook 仅 .cs。 -->
+
+---
+
+## Issue #89 — SSR Phase 2：Hi-Z 步进 + 空间去噪
+
+**优先级：中（接续 #48 ✅ DONE；解决 #48 遗留的条纹 + 噪点；#48 脚注已预留本阶段）**
+
+> 详细规划 2026-06-29。背景见 #48：当前 `ssr.comp` 为**视空间线性步进 + 几何增长步长（`stepLen *= 1.3`）**，存在两个实测问题：
+> 1. **条纹状反射**（亮地板反射到竖直物体上呈扁长条带）—— 根因是视空间步进在掠射角/远距离下每步跨多个屏幕像素，深度缓冲被欠采样 → 连续反射量化成离散深度带；恒定 `thickness` 命中窗口 + 增长步长把一大段射线落进同一 `hitUV`。
+> 2. **噪点重** —— 全管线对 SSR 仅有 TAA 时间累积，**无空间去噪**；抖动用 `fract(sin(dot))` 白噪声方差大；TAA 邻域 AABB clamp 用含噪当前帧算 box，反过来限制 history 收敛；运动时 blend→0.5 噪点浮出。
+>
+> **决策确认（2026-06-29）**：①空间去噪**完整做**（Phase C：stochastic GGX + trace/resolve 拆分 + 邻域 BRDF 加权）；②Hi-Z 存储**先验证单张 R32F mip-chain + per-mip RT view（方案 A）**，RHI 不支持再回退独立 mip 纹理。
+
+### 目标
+
+把线性步进替换为 **Hi-Z（深度 min 金字塔）屏幕空间 cell traversal**，从根上消除条纹并提升长射程命中率 / 降低步进开销；加入**按 roughness 的随机化 + 空间 resolve 去噪**，配合低差异抖动序列，在交给 TAA 前把噪点压到可接受。命中后的 split-sum IBL 高光替换逻辑（`out = hdrIn + conf*(ssrSpec − iblSpec)`）保持不变，不改 `deferred_lighting.frag`。
+
+### 设计
+
+#### A. Hi-Z 深度金字塔构建
+
+镜像现有 **Bloom 金字塔模式**（`SceneRenderer.cpp:3539` 逐 mip 独立纹理 + fullscreen pass）。Hi-Z 仅 SSR 用，故 build passes 内聚在 `SSRFeature`（未来 SSGI/contact shadow 复用再提为独立 `HiZFeature`）。
+
+- **存储**（两方案，Phase A step 1 先验证 RHI）：
+  - **方案 A（推荐）**：单张 `R32F` **mip-chain** 纹理，per-mip RT view 写入、`textureLod(t_HiZ, uv, level)` 任意层采样。需确认 RHI 支持 per-mip image view 作 RenderTarget + 采样完整 mip chain（`RHITextureDesc.mipLevels` 已支持，见 `SceneRenderer.cpp:384`）。
+  - **方案 B（回退）**：独立 mip 纹理（仿 `bloomMip[]`），打进 `sampler2DArray` 供 shader 按 level 索引。不优雅、限定层数，仅在方案 A 不可行时用。
+- **mip 0**：从 `handles.depth`(D32F) copy 为 R32F（保留 NDC depth 直接比较）。
+- **mip i+1 = mip i 的 2×2 min**（NDC depth 近=0，min=最近表面；用于"射线在 cell 全部几何之前则整块跳过"）。非 2 幂分辨率边界用 3×3 覆盖奇数边。
+- 新 shader：`hiz_copy`（depth→mip0）+ `hiz_downsample`（2×2 min）。
+
+#### B. Hi-Z 屏幕空间步进（重写 `ssr.comp` march 段）
+
+替换 `ssr.comp:67-111` 的视空间线性步进 + 二分细化为经典 Hi-Z cell traversal（Uludag *"Hi-Z Screen-Space Cone-Traced Reflections"* 思路）：
+
+```
+在屏幕空间(UV + NDC depth)沿反射射线推进：
+  当前 mip 的 cell 内推进到 cell 边界；取 cell 的 Hi-Z(min)：
+    射线深度比 cell min 更近(在所有几何前) → 该 cell 无遮挡，mip++（粗，跨大步）
+    射线进入 cell(深度 ≥ cell min)        → mip--（细，细化），直到 mip 0 命中
+mip 0 命中时用 thickness 判 ray↔surface z 差，避免穿背面
+```
+
+屏幕空间逐 cell 推进 → 透视正确，**消除条纹**；粗 mip 跨空区 → 长射程便宜且不漏细几何。
+
+#### C. 随机化 + 空间去噪（glossy 反射）
+
+- **低差异抖动**：`ssr.comp:73` 的 `fract(sin(dot))` 白噪声 → Hammersley/蓝噪声序列（用 `u_Frame.frameIndex`，已 mod 256）。低差异，TAA 短窗口即可收敛。
+- **Stochastic GGX 抽样**：按 roughness 用 GGX importance sampling 扰动反射射线方向（每像素一条射线 + 上述抽样序列），取代当前只抖动起点。
+- **拆 trace / resolve 两 pass**（核心架构改动）：
+  - **trace pass**：输出 *反射色* + *hitUV / pdf / mask* 到中间 RT（不再直接合成 hdr）。
+  - **resolve pass**（新 compute，SSR trace 后 / 合成回 hdr 前）：邻域（按 roughness 缩放的核，如 5×5）按 BRDF pdf 加权平均相邻像素命中 → 空间去噪，再做 split-sum 替换合成回 hdr。
+- 最终仍交 TAA 做时序累积。**低差异抽样 + 空间 resolve + TAA 时序**三者叠加，分别压不同频段噪声。
+
+#### D. 管线顺序（feature 序列）
+
+```
+DeferredLighting → [HiZ build → SSR trace → SSR resolve]（SSRFeature 内部多 pass） → … → TAA
+```
+
+复用：`FrameContext::BindTexture/BindStorageImage`、`RGPassBuilder::Read/WriteUAV` + 自动 barrier、`ctx.rg->CreateTexture` 瞬态、`ProgramCache::GetCompute/GetGraphics`、`u_Frame.jitter/frameIndex`、`m_outputHandle` redirect 模式。
+
+### 实施步骤（分阶段，每阶段可独立验证）
+
+**Phase A — Hi-Z 金字塔（独立验证：可视化金字塔层）**
+- [ ] 1. RHI 能力确认：单张 R32F mip-chain 的 per-mip RT view + 完整 mip 采样；不行则回退方案 B
+- [ ] 2. Hi-Z build passes：`hiz_copy`(depth→mip0) + `hiz_downsample`(2×2 min) 逐层；资源创建/绑定仿 bloomMip
+- [ ] 3. 验证：debug view 输出某层 Hi-Z，确认 min-reduce 正确、奇数边界无瑕疵
+
+**Phase B — Hi-Z 步进（独立验证：条纹消失）**
+- [ ] 4. 重写 `ssr.comp` march 段为 Hi-Z cell traversal，保留命中后 split-sum 替换逻辑不变
+- [ ] 5. 验证：镜面/低粗糙度地板反射，确认条纹消除、长射程命中、步进次数下降（Tracy 对比 #48）
+
+**Phase C — 随机化 + 空间去噪（独立验证：噪点下降）**
+- [ ] 6. 抖动序列换 Halton/蓝噪声 + glossy GGX importance sampling 扰动射线
+- [ ] 7. 拆 trace/resolve：trace 输出反射色 + hitUV/pdf/mask 中间 RT；新 `ssr_resolve` 邻域 BRDF 加权合成回 hdr
+- [ ] 8. 验证：glossy 反射噪点显著下降，静止/运动下配合 TAA 均可接受
+
+**Phase D — 收尾**
+- [ ] 9. PostProcess 参数/UI（resolve 半径、stochastic 开关）+ 序列化 + 文档
+- [ ] 10. 性能 profiling 与 #48 对比
+
+### 边界情况与约束
+
+| 项 | 处理 |
+|----|------|
+| **per-mip RT view 的 RHI 支持** | Phase A 最大不确定点 → step 1 先验证；不支持回退独立 mip 纹理（限层数） |
+| 非 2 幂分辨率 | Hi-Z min-reduce 奇数边用 3×3 覆盖，避免漏采样导致跳穿 |
+| 中间 RT 显存 | trace/resolve 拆分增反射色 RGBA16F + hit info RG/RGBA16F；可后续 half-res trace + full-res resolve 省带宽（Phase C 先 full-res） |
+| 与 TAA 关系 | 空间 resolve **不替代** TAA，二者叠加；resolve 后信号更平滑 → TAA 邻域 clamp 副作用更小 |
+| per-pixel velocity 不脱影 | 属 #83 P1 范畴（已在 #83 受益清单记录），本 issue **不含** |
+| **不做** | 多次弹射 / ray-traced 反射 / SSGI（Hi-Z 基础设施为其未来铺路，但本 issue 不实现） |
+
+### 受益 issues
+
+- 为未来 **SSGI / contact shadows** 提供可复用的 Hi-Z 金字塔 + 屏幕空间 traversal 基础设施
+- trace/resolve 多 pass + 中间 RT 模式进一步验证 #88 ScreenEffect 的 compute 基础设施
+
+---
+
+## Issue #90 — 文件流操作收敛（File I/O 集中化 / 去重）✅ DONE
+<!-- 新建 core/io/FileIO 门面(ReadText/WriteText/ReadBytes/WriteBytes/ReadJson/WriteJson 出参+json_fwd、Copy(避Win32宏)/Rename/Remove/EnsureDir、CopyTemplateReplacing;统一 error_code+SA_LOG)——全库不再手写 ifstream/ofstream(仅二进制 Cooked*.cpp 有意保留结构化 read/write)。MetaFile 从 tools/importer 下沉 src/resource(唯一 .sameta parser,删 AssetRegistry::ParseSameta + InputMapLoader::ReadUuidFromSameta 两份重复)。CreateNewFile/CommitRename/DeletePath/MoveAsset + SceneSerializer/SaProject/InputMapLoader/EditorShortcutConfig/InputMapImporter 全迁 IO::。cook 目录统一到 cook_cache/shaders(CookProjectShaders 不再写 BUILTIN_SHADER_DIR + 补 reimport RecompileDeferredLighting);PruneOrphanedEffectCookOutputs 两 cook 入口都调用(根治启动幽灵 effect);FileWatcher 焦点自动 cook 扩展 .saglsl/.saeffect(m_pendingShaderCook,同 .cs)。docs/architecture.md 增 File-Stream Flow Overview + File I/O layer + Cook-path unification 三段。遗留:.saglsl 材质孤儿(命名不派生于文件名)+ 其余 tools fs 点未迁,低优先级。 -->
+
+---
+
+## Issue #91 — ScreenEffect Phase 2：compute stage ✅ DONE
+<!-- 核心 compute 执行路径完成:ScreenEffectFeature::AddPasses 拆 frag/compute 分支——compute @Out 瞬态加 UnorderedAccess、set=2 b0 EffectParams UBO/b1..K @In sampled/b(K+1) @Out storage、WriteUAV+SetComputePipeline+SetDescriptorSet(1,frame)(2,eff)+Dispatch((w+7)/8,(h+7)/8),@Out hdr 链式(镜像 SSRFeature)。comp 模板 NewEffectCompute.saeffect(8×8 + b0 UBO/b1 t_hdr/b2 out_hdr image2D rgba16f)+ AssetsPanel CreateKind::SaeffectCompute(Shader 子菜单 "Screen Effect — Compute" + EntityTemplateRegistry::EffectComputeTemplatePath)+ demo tint_compute.saeffect。ProgramCache::GetCompute 加 primaryDir/fallbackDir(空→builtin,SSR/AE 不受影响),registry Scan isCompute 传 ctx.shaderDir+engineShaderDir → 解锁项目目录 compute .saeffect(清 #88 遗留)。ResolveEffectHandle 已含 hdr/depth/gbuffer/velocity/ssaoTex/taaResolved。构建全绿;实机验证 opt-in 栈 "Tint (Compute)" 生效。LDR(@Out ldr 跨缓冲 + ldr 词汇)+ Tonemap→compute 移出→ #93(互相耦合、主驱动 tonemap 已延后)。 -->
+
+---
+
+## Issue #92 — 内建后处理 compute 重写（bloom）✅ DONE
+<!-- BloomFeature 4 道 pass 全 frag→compute(引擎 feature 内部 MaterialType→ComputeProgram,仿 SSR):threshold/downsample 纯写 UAV(imageStore);upsample/composite 原硬件 Additive→imageLoad+add+imageStore(readwrite image2D rgba16f)。新增 bloom_{threshold,downsample,upsample,composite}.comp;删死文件 bloom_*.frag(5 个)。BloomFeature 4 个 ComputeProgram* 成员,OnInit/RebuildDescSets 从各 GetLayout(2) 分配 descSet(b0 sampler+b1 storage),AddPasses BindStorageImage+WriteUAV+SetComputePipeline+Dispatch((w+7)/8,(h+7)/8);mip 链+HDR_Color 加 UnorderedAccess usage(保留 RT|Sampled)。统计核实:不改变 texture/buffer 字节(仅 usage 标志;frag 类型零 texture/buffer 分配),变化仅 graphics program/pipeline→compute,GetMemoryStats 正确无泄漏。PostFX 保留 frag(直写 swapchain+无 RHI blit,compute 净负);Tonemap/SSR compute 化移出→留其它 issue(SSR 见 #89)。全库仅注释/RG pass 名提及 Bloom。 -->
+
+---
+
+## Issue #93 — ScreenEffect LDR / Tonemap-compute（接续 #91）
+
+**优先级：中低（#91 分出;三步互相耦合,主驱动 Tonemap→compute 需先定机制）**
+
+> 从 #91 移出(用户 2026-07-01):单独做 @Out ldr 无当前消费者,与 tonemap 一并推进更合理。
+
+### 待展开(/plan)
+- **ldr 词汇 + @Out ldr 跨缓冲**:`ResolveEffectHandle` 补 `ldr`;执行器分辨 `@Out hdr` vs `@Out ldr`(各自 redirect `handles.hdr`/`handles.ldr`);`@Out ldr` 的 compute 效果写 RGBA16F storage 瞬态(swapchain 不能作 storage image)后 redirect `handles.ldr`;回归 PostFX 开/关(PostFX 读 ldr 写 swapchain)与 present-copy。词汇表标注 swapchain 仅 frag-out。
+- **Tonemap→compute**:C1 常驻内建效果(registry always-on 标志 + 注入序)/ C2 TonemapFeature 委托 compute 执行 helper / C3 引擎 feature compute 重写(仿 #92 bloom,最简)三选;`hdr→ldr` 跨缓冲(ldr 转 RGBA16F storage,见上);CG-LUT/exposure 迁移;LutTonemap 协调;像素等价。
+- 关联:#92 已建立"内建 frag feature→compute"范式(C3 可直接复用);#91 已提供 compute .saeffect 执行路径(C1/C2 可复用)。
+
+---

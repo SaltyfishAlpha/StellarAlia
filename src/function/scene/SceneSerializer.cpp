@@ -47,6 +47,7 @@
 #include "function/scene/SceneSerializer.hpp"
 #include "function/scene/Scene.hpp"
 #include "core/logs/Log.hpp"
+#include "core/io/FileIO.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -179,6 +180,32 @@ nlohmann::json SceneSerializer::SerializeToJson(const Scene& scene) {
             ppj["filmGrainEnabled"]   = pp.filmGrainEnabled;
             ppj["filmGrainIntensity"] = pp.filmGrainIntensity;
             ppj["filmGrainSize"]      = pp.filmGrainSize;
+            ppj["ssrEnabled"]         = pp.ssrEnabled;
+            ppj["ssrMaxRoughness"]    = pp.ssrMaxRoughness;
+            ppj["ssrMaxSteps"]        = pp.ssrMaxSteps;
+            ppj["ssrThickness"]       = pp.ssrThickness;
+            ppj["ssrStrength"]        = pp.ssrStrength;
+
+            // Screen Effects (Issue #88) — ordered per-scene stack.
+            json fxArr = json::array();
+            for (const auto& se : pp.screenEffects) {
+                json sej;
+                sej["name"]    = se.name;
+                sej["enabled"] = se.enabled;
+                json paramsJ = json::object();
+                for (const auto& [pname, val] : se.params) {
+                    std::visit([&](const auto& v) {
+                        using T = std::decay_t<decltype(v)>;
+                        if constexpr (std::is_same_v<T, float>)      paramsJ[pname] = v;
+                        else if constexpr (std::is_same_v<T, glm::vec2>) paramsJ[pname] = { v.x, v.y };
+                        else if constexpr (std::is_same_v<T, glm::vec3>) paramsJ[pname] = { v.x, v.y, v.z };
+                        else if constexpr (std::is_same_v<T, glm::vec4>) paramsJ[pname] = { v.x, v.y, v.z, v.w };
+                    }, val);
+                }
+                sej["params"] = std::move(paramsJ);
+                fxArr.push_back(std::move(sej));
+            }
+            ppj["screenEffects"] = std::move(fxArr);
             wj["postProcess"]       = std::move(ppj);
         }
         root["world"] = std::move(wj);
@@ -403,15 +430,10 @@ nlohmann::json SceneSerializer::SerializeToJson(const Scene& scene) {
 bool SceneSerializer::SaveToFile(const Scene& scene,
                                   const std::filesystem::path& path) {
     const json root = SerializeToJson(scene);
-    std::ofstream f(path);
-    if (!f) {
-        SA_LOG_ERROR("SceneSerializer: cannot write '{}'", path.string());
-        return false;
-    }
-    f << root.dump(2);
+    if (!IO::WriteJson(path, root, 2)) return false;
     SA_LOG_INFO("SceneSerializer: saved '{}' ({} entities)",
                 path.string(), root["entities"].size());
-    return f.good();
+    return true;
 }
 
 // ── DeserializeFromJson ───────────────────────────────────────────────────────
@@ -501,6 +523,36 @@ bool SceneSerializer::DeserializeFromJson(Scene& scene, const nlohmann::json& ro
             pp.filmGrainEnabled   = ppj.value("filmGrainEnabled",   pp.filmGrainEnabled);
             pp.filmGrainIntensity = ppj.value("filmGrainIntensity", pp.filmGrainIntensity);
             pp.filmGrainSize      = ppj.value("filmGrainSize",      pp.filmGrainSize);
+            pp.ssrEnabled         = ppj.value("ssrEnabled",         pp.ssrEnabled);
+            pp.ssrMaxRoughness    = ppj.value("ssrMaxRoughness",    pp.ssrMaxRoughness);
+            pp.ssrMaxSteps        = ppj.value("ssrMaxSteps",        pp.ssrMaxSteps);
+            pp.ssrThickness       = ppj.value("ssrThickness",       pp.ssrThickness);
+            pp.ssrStrength        = ppj.value("ssrStrength",        pp.ssrStrength);
+
+            // Screen Effects (Issue #88) — ordered per-scene stack.
+            pp.screenEffects.clear();
+            if (ppj.contains("screenEffects") && ppj["screenEffects"].is_array()) {
+                for (const auto& sej : ppj["screenEffects"]) {
+                    ScreenEffectInstance se;
+                    se.name    = sej.value("name", std::string{});
+                    se.enabled = sej.value("enabled", true);
+                    if (se.name.empty()) continue;
+                    if (sej.contains("params") && sej["params"].is_object()) {
+                        for (const auto& [pname, v] : sej["params"].items()) {
+                            if (v.is_number())      se.params[pname] = v.get<float>();
+                            else if (v.is_array()) {
+                                switch (v.size()) {
+                                    case 2:  se.params[pname] = glm::vec2(v[0], v[1]); break;
+                                    case 3:  se.params[pname] = glm::vec3(v[0], v[1], v[2]); break;
+                                    case 4:  se.params[pname] = glm::vec4(v[0], v[1], v[2], v[3]); break;
+                                    default: break;
+                                }
+                            }
+                        }
+                    }
+                    pp.screenEffects.push_back(std::move(se));
+                }
+            }
         } else {
             // Backward compat: read old top-level tonemap keys from pre-#40 scenes.
             pp.tonemapMode = (wj.value("tonemapMode", "Builtin") == "LUT")
@@ -830,20 +882,8 @@ bool SceneSerializer::DeserializeFromJson(Scene& scene, const nlohmann::json& ro
 
 bool SceneSerializer::LoadFromFile(Scene& scene,
                                     const std::filesystem::path& path) {
-    std::ifstream f(path);
-    if (!f) {
-        SA_LOG_ERROR("SceneSerializer: cannot open '{}'", path.string());
-        return false;
-    }
-
     json root;
-    try {
-        f >> root;
-    } catch (const json::exception& ex) {
-        SA_LOG_ERROR("SceneSerializer: JSON parse error in '{}': {}",
-                     path.string(), ex.what());
-        return false;
-    }
+    if (!IO::ReadJson(path, root)) return false;   // logs open + parse errors
 
     if (!DeserializeFromJson(scene, root)) return false;
     SA_LOG_INFO("SceneSerializer: loaded '{}' ({} entities)",

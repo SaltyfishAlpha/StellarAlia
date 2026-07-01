@@ -217,10 +217,10 @@ int main() {
         fu.resolution  = glm::vec2(static_cast<float>(w), static_cast<float>(h));
         fu.deltaTime   = 0.016f;
 
-        LightUniforms lu{};  // unused but required by FrameUniformsBuffer
-        lu.direction = glm::normalize(glm::vec3(1.f, -1.f, 0.5f));
-        lu.intensity = 1.f;
-        lu.color     = glm::vec3(1.f);
+        // Skybox has no lit geometry; a zero-initialized (lightCount=0) block is
+        // all FrameUniformsBuffer needs. LightUniforms is now a lights[] array,
+        // not the old flat direction/intensity/color struct.
+        LightUniforms lu{};
 
         frameUniforms.Upload(fi, fu, lu);
 

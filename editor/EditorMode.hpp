@@ -109,7 +109,8 @@ private:
     EditorContext                             m_ctx;
 
     Platform::FileWatcher      m_scriptWatcher;
-    bool                       m_pendingRecompile = false;
+    bool                       m_pendingRecompile  = false;
+    bool                       m_pendingShaderCook = false;  // Issue #90: focus-triggered .saglsl/.saeffect cook
 
     std::filesystem::path      m_currentScenePath;
     std::filesystem::path      m_pendingProjectLoad;   // deferred — set in OnRenderUI, executed in OnUpdate

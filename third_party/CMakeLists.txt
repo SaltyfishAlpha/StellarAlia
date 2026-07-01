@@ -310,6 +310,10 @@ endif()
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/JoltPhysics/Jolt/Jolt.h)
     # Do not let Jolt override our project's CMAKE_CXX_FLAGS_*
     set(OVERRIDE_CXX_FLAGS                OFF CACHE BOOL "" FORCE)
+    # Match the rest of the project (dynamic CRT, /MDd). Jolt defaults this ON
+    # for MSVC, which builds Jolt.lib with /MTd and breaks linking of the cook
+    # and shader-reflect tool executables (LNK2038/LNK2005).
+    set(USE_STATIC_MSVC_RUNTIME_LIBRARY   OFF CACHE BOOL "" FORCE)
     # Disable Jolt's aggressive warning-as-error settings
     set(ENABLE_ALL_WARNINGS               OFF CACHE BOOL "" FORCE)
     # LTO can break MinGW / non-MSVC builds

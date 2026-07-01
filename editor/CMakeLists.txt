@@ -4,6 +4,13 @@ file(GLOB_RECURSE EDITOR_SOURCES CONFIGURE_DEPENDS
 
 add_library(StellarAliaEditor STATIC ${EDITOR_SOURCES})
 
+# windows.h (pulled in transitively by some panels, e.g. NFD / shell APIs) defines
+# min/max macros that clobber std::numeric_limits<>::max() and std::min/max. Define
+# NOMINMAX target-wide so individual TUs no longer need a per-file guard before windows.h.
+if(WIN32)
+    target_compile_definitions(StellarAliaEditor PRIVATE NOMINMAX)
+endif()
+
 target_link_libraries(StellarAliaEditor
     PUBLIC  StellarAliaRuntime StellarAliaImporter StellarAliaShaderCookLib imgui
     PRIVATE $<$<TARGET_EXISTS:nfd>:nfd>

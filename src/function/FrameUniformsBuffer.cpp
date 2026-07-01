@@ -30,11 +30,15 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
         bd.name    = "LightData";
         refl.bindings.push_back(bd);
     }
+    // Global frame samplers are visible to ALL stages (incl. compute): screen-space
+    // compute passes (SSR #48, future volumetric fog / GI) sample these IBL/sky/LTC
+    // LUTs. RHIShaderStage::All = Vertex|Fragment|Compute; pure layout metadata, no
+    // runtime cost, and graphics access (Fragment) is unaffected.
     {
         RHI::ShaderBindingDesc bd;
         bd.set     = 1; bd.binding = 2;
         bd.type    = RHI::RHIDescriptorType::Texture2D;
-        bd.stages  = RHI::RHIShaderStage::Fragment;
+        bd.stages  = RHI::RHIShaderStage::All;
         bd.name    = "t_BrdfLut";
         refl.bindings.push_back(bd);
     }
@@ -42,7 +46,7 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
         RHI::ShaderBindingDesc bd;
         bd.set     = 1; bd.binding = 3;
         bd.type    = RHI::RHIDescriptorType::TextureCube;
-        bd.stages  = RHI::RHIShaderStage::Fragment;
+        bd.stages  = RHI::RHIShaderStage::All;
         bd.name    = "t_PrefilteredEnv";
         refl.bindings.push_back(bd);
     }
@@ -50,7 +54,7 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
         RHI::ShaderBindingDesc bd;
         bd.set     = 1; bd.binding = 4;
         bd.type    = RHI::RHIDescriptorType::TextureCube;
-        bd.stages  = RHI::RHIShaderStage::Fragment;
+        bd.stages  = RHI::RHIShaderStage::All;
         bd.name    = "t_SkyboxMap";
         refl.bindings.push_back(bd);
     }
@@ -58,7 +62,7 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
         RHI::ShaderBindingDesc bd;
         bd.set     = 1; bd.binding = 5;
         bd.type    = RHI::RHIDescriptorType::Texture2D;
-        bd.stages  = RHI::RHIShaderStage::Fragment;
+        bd.stages  = RHI::RHIShaderStage::All;
         bd.name    = "t_LtcMat";
         refl.bindings.push_back(bd);
     }
@@ -66,7 +70,7 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
         RHI::ShaderBindingDesc bd;
         bd.set     = 1; bd.binding = 6;
         bd.type    = RHI::RHIDescriptorType::Texture2D;
-        bd.stages  = RHI::RHIShaderStage::Fragment;
+        bd.stages  = RHI::RHIShaderStage::All;
         bd.name    = "t_LtcAmp";
         refl.bindings.push_back(bd);
     }

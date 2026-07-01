@@ -1,10 +1,10 @@
 #include "importer/InputMapImporter.hpp"
 
+#include "core/io/FileIO.hpp"
+
 #include <nlohmann/json.hpp>
 
-#include <fstream>
 #include <iostream>
-#include <sstream>
 
 namespace StellarAlia::Import {
 
@@ -17,7 +17,7 @@ static bool NeedsRecook(const AssetEntry& entry, const fs::path& outPath) {
 }
 
 bool CookInputMap(const AssetEntry& entry, const fs::path& cookCacheDir, bool force) {
-    fs::create_directories(cookCacheDir);
+    IO::EnsureDir(cookCacheDir);
 
     const fs::path outPath = cookCacheDir / (entry.meta.uuid.ToString() + ".sainputmap");
 
@@ -26,19 +26,16 @@ bool CookInputMap(const AssetEntry& entry, const fs::path& cookCacheDir, bool fo
         return true;
     }
 
-    std::ifstream in(entry.sourcePath);
-    if (!in.is_open()) {
+    const auto src = IO::ReadText(entry.sourcePath);
+    if (!src) {
         std::cerr << "[Cook] FAIL  " << entry.sourcePath.filename()
                   << " — could not open source\n";
         return false;
     }
-    std::stringstream ss;
-    ss << in.rdbuf();
-    const std::string src = ss.str();
 
     nlohmann::json j;
     try {
-        j = nlohmann::json::parse(src);
+        j = nlohmann::json::parse(*src);
     } catch (const std::exception& e) {
         std::cerr << "[Cook] FAIL  " << entry.sourcePath.filename()
                   << " — JSON parse error: " << e.what() << '\n';
@@ -56,13 +53,11 @@ bool CookInputMap(const AssetEntry& entry, const fs::path& cookCacheDir, bool fo
         return false;
     }
 
-    std::ofstream out(outPath, std::ios::binary);
-    if (!out.is_open()) {
+    if (!IO::WriteJson(outPath, j)) {
         std::cerr << "[Cook] FAIL  " << entry.sourcePath.filename()
                   << " — could not open output: " << outPath << '\n';
         return false;
     }
-    out << j.dump(2);
 
     std::cout << "[Cook] IM    " << entry.sourcePath.filename()
               << "  →  " << outPath.filename() << '\n';

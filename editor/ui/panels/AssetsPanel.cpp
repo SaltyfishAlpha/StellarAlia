@@ -6,6 +6,7 @@
 #include "resource/AssetRegistry.hpp"
 #include "core/logs/Log.hpp"
 #include "core/asset/AssetID.hpp"
+#include "core/io/FileIO.hpp"
 #include "function/input/InputSystem.hpp"
 
 #include "importer/ImportScanner.hpp"
@@ -64,7 +65,7 @@ static void OpenFileExternal(const fs::path& path) {
 static bool IsTextAsset(const fs::path& ext) {
     std::string e = ext.string();
     std::transform(e.begin(), e.end(), e.begin(), ::tolower);
-    for (auto sv : { ".saglsl", ".glsl", ".vert", ".frag", ".comp", ".hlsl",
+    for (auto sv : { ".saglsl", ".saeffect", ".glsl", ".vert", ".frag", ".comp", ".hlsl",
                      ".cs", ".txt", ".md", ".json", ".lua", ".py", ".js", ".ts",
                      ".sainputmap" })
         if (e == sv) return true;
@@ -289,19 +290,28 @@ void AssetsPanel::RenderCreateMenuContents(const fs::path& dir) {
     ImGui::Separator();
     if (ImGui::MenuItem("Scene (.sascene)"))       CreateNewFile(CreateKind::Scene,    dir);
     if (ImGui::MenuItem("Material (.samat)"))      CreateNewFile(CreateKind::Mat,      dir);
-    if (ImGui::MenuItem("Shader (.saglsl)"))       CreateNewFile(CreateKind::Saglsl,   dir);
+    if (ImGui::BeginMenu("Shader")) {
+        if (ImGui::MenuItem("Surface Shader (.saglsl)"))          CreateNewFile(CreateKind::Saglsl,          dir);
+        if (ImGui::MenuItem("Screen Effect — Fragment (.saeffect)"))  CreateNewFile(CreateKind::Saeffect,        dir);
+        if (ImGui::MenuItem("Screen Effect — Compute (.saeffect)"))   CreateNewFile(CreateKind::SaeffectCompute, dir);
+        ImGui::EndMenu();
+    }
     if (ImGui::MenuItem("Script (.cs)"))           CreateNewFile(CreateKind::Script,   dir);
     if (ImGui::MenuItem("InputMap (.sainputmap)")) CreateNewFile(CreateKind::InputMap, dir);
 }
 
 void AssetsPanel::CreateNewFile(CreateKind kind, const fs::path& dir)
 {
+    // Saeffect (frag) and SaeffectCompute share ext/stem/type/token — only the template differs.
+    const bool isEffectKind = (kind == CreateKind::Saeffect || kind == CreateKind::SaeffectCompute);
     const std::string ext         = (kind == CreateKind::Saglsl)   ? ".saglsl"
+                                  : isEffectKind                   ? ".saeffect"
                                   : (kind == CreateKind::Scene)    ? ".sascene"
                                   : (kind == CreateKind::Script)   ? ".cs"
                                   : (kind == CreateKind::InputMap) ? ".sainputmap"
                                   :                                  ".samat";
     const std::string defaultStem = (kind == CreateKind::Saglsl)   ? "New Shader"
+                                  : isEffectKind                   ? "New Effect"
                                   : (kind == CreateKind::Scene)    ? "New Scene"
                                   : (kind == CreateKind::Script)   ? "NewScript"
                                   : (kind == CreateKind::InputMap) ? "New InputMap"
@@ -318,136 +328,71 @@ void AssetsPanel::CreateNewFile(CreateKind kind, const fs::path& dir)
         destPath = dir / (defaultStem + sep + std::to_string(n) + ext);
     }
 
-    // Write template content.
-    std::ofstream f(destPath);
-    if (!f) {
-        SA_LOG_WARN("AssetsPanel: could not create '{}'", destPath.string());
-        return;
-    }
-
+    // Write template content (Issue #90: all file writes go through IO::).
     if (kind == CreateKind::Script) {
         const std::string cls  = destPath.stem().string();
         const fs::path    tmpl = m_templateReg ? m_templateReg->ScriptTemplatePath() : fs::path{};
-        f.close();
-        bool written = false;
-        if (!tmpl.empty() && fs::exists(tmpl)) {
-            std::ifstream src(tmpl);
-            std::ofstream dst(destPath);
-            if (src && dst) {
-                std::string line;
-                while (std::getline(src, line)) {
-                    // Replace the template class name ("NewScript") with the actual stem.
-                    std::string::size_type pos = 0;
-                    while ((pos = line.find("NewScript", pos)) != std::string::npos) {
-                        line.replace(pos, 9, cls);
-                        pos += cls.size();
-                    }
-                    dst << line << '\n';
-                }
-                written = true;
-            }
-        }
-        if (!written) {
-            std::ofstream fb(destPath);
-            fb << "using StellarAlia;\n\n"
-               << "public class " << cls << " : ScriptBase\n"
-               << "{\n"
-               << "    public override void OnUpdate(float dt)\n"
-               << "    {\n"
-               << "    }\n"
-               << "}\n";
-        }
+        const bool written = !tmpl.empty() && fs::exists(tmpl)
+                          && IO::CopyTemplateReplacing(tmpl, destPath, "NewScript", cls);
+        if (!written)
+            IO::WriteText(destPath,
+                "using StellarAlia;\n\npublic class " + cls + " : ScriptBase\n{\n"
+                "    public override void OnUpdate(float dt)\n    {\n    }\n}\n");
     } else if (kind == CreateKind::Scene) {
         const fs::path tmpl = m_templateReg ? m_templateReg->DefaultScenePath() : fs::path{};
-        f.close();
         if (!tmpl.empty() && fs::exists(tmpl)) {
-            std::error_code ec;
-            fs::copy_file(tmpl, destPath, fs::copy_options::overwrite_existing, ec);
-            if (ec) {
-                SA_LOG_WARN("AssetsPanel: could not copy scene template: {}", ec.message());
-                return;
-            }
+            if (!IO::Copy(tmpl, destPath)) return;
         } else {
-            std::ofstream fb(destPath);
-            fb << "{\n  \"entities\": []\n}\n";
+            IO::WriteText(destPath, "{\n  \"entities\": []\n}\n");
         }
     } else if (kind == CreateKind::Mat) {
-        f.close();
         const fs::path tmpl = m_templateReg ? m_templateReg->MatTemplatePath() : fs::path{};
         if (tmpl.empty() || !fs::exists(tmpl)) {
             SA_LOG_WARN("AssetsPanel: material template not found ({})",
                         tmpl.empty() ? "no registry" : tmpl.string());
-            fs::remove(destPath);
             return;
         }
-        std::error_code ec;
-        fs::copy_file(tmpl, destPath, fs::copy_options::overwrite_existing, ec);
-        if (ec) {
-            SA_LOG_WARN("AssetsPanel: could not copy material template: {}", ec.message());
-            return;
-        }
+        if (!IO::Copy(tmpl, destPath)) return;
     } else if (kind == CreateKind::InputMap) {
-        f.close();
+        // Patch the template's "name" to the file stem — a baked-in name would
+        // collide (RegisterMaps replaces by name → only the last would survive).
         const std::string mapName = destPath.stem().string();
         const fs::path    tmpl    = m_templateReg ? m_templateReg->InputMapTemplatePath() : fs::path{};
         bool wrote = false;
         if (!tmpl.empty() && fs::exists(tmpl)) {
-            // Read template, patch "name" field to match file stem, write to dest.
-            // Template's baked-in "name": "Gameplay" would otherwise collide with
-            // every other map created from this template (RegisterMaps replaces
-            // by name → only the last one would survive).
-            std::ifstream tsrc(tmpl);
-            std::stringstream ss; ss << tsrc.rdbuf();
-            try {
-                auto j = nlohmann::json::parse(ss.str());
+            nlohmann::json j;
+            if (IO::ReadJson(tmpl, j)) {
                 j["name"] = mapName;
-                std::ofstream fdst(destPath);
-                if (fdst) { fdst << j.dump(2); wrote = true; }
-            } catch (const std::exception& e) {
-                SA_LOG_WARN("AssetsPanel: inputmap template not valid JSON: {}", e.what());
+                wrote = IO::WriteJson(destPath, j);
             }
         }
-        if (!wrote) {
-            // Fallback: minimal valid map with the file stem as map name.
-            std::ofstream fb(destPath);
-            fb << "{\n  \"name\": \"" << mapName << "\",\n"
-               << "  \"passthrough\": false,\n"
-               << "  \"actions\": []\n}\n";
-        }
+        if (!wrote)
+            IO::WriteText(destPath, "{\n  \"name\": \"" + mapName +
+                          "\",\n  \"passthrough\": false,\n  \"actions\": []\n}\n");
     } else {
-        // kind == CreateKind::Saglsl
-        const std::string shaderName = destPath.stem().string();
-        const fs::path    tmpl = m_templateReg ? m_templateReg->ShaderTemplatePath() : fs::path{};
-        f.close();
+        // kind == Saglsl / Saeffect / SaeffectCompute — copy the template and patch its
+        // placeholder token to the file stem (drives @ShadingModel / @Effect so each
+        // created file is unique). Compute vs fragment effect only differ by template.
+        const fs::path    tmpl = !m_templateReg ? fs::path{}
+                               : (kind == CreateKind::SaeffectCompute) ? m_templateReg->EffectComputeTemplatePath()
+                               : isEffectKind                          ? m_templateReg->EffectTemplatePath()
+                               :                                         m_templateReg->ShaderTemplatePath();
         if (tmpl.empty() || !fs::exists(tmpl)) {
-            SA_LOG_WARN("AssetsPanel: shader template not found ({})",
+            SA_LOG_WARN("AssetsPanel: {} template not found ({})",
+                        isEffectKind ? "effect" : "shader",
                         tmpl.empty() ? "no registry" : tmpl.string());
-            fs::remove(destPath);
             return;
         }
-        std::ifstream src(tmpl);
-        std::ofstream dst(destPath);
-        if (!src || !dst) {
-            SA_LOG_WARN("AssetsPanel: could not read/write shader template '{}'", tmpl.string());
+        if (!IO::CopyTemplateReplacing(tmpl, destPath, isEffectKind ? "NewEffect" : "NewShader",
+                                       destPath.stem().string()))
             return;
-        }
-        std::string line;
-        while (std::getline(src, line)) {
-            std::string::size_type pos = 0;
-            while ((pos = line.find("NewShader", pos)) != std::string::npos) {
-                line.replace(pos, 9, shaderName);
-                pos += shaderName.size();
-            }
-            dst << line << '\n';
-        }
     }
-    f.close();
     SA_LOG_INFO("AssetsPanel: created '{}'", destPath.string());
 
     // Register the new asset: every kind gets a .sameta (so it has a UUID and
     // shows up in the AssetRegistry). CookAssetEntry no-ops for kinds without
     // a cooked output (Script, Scene, Shader), so we don't need to branch here.
-    const std::string type = (kind == CreateKind::Saglsl)   ? "Shader"
+    const std::string type = (kind == CreateKind::Saglsl || isEffectKind) ? "Shader"
                            : (kind == CreateKind::Scene)    ? "Scene"
                            : (kind == CreateKind::Script)   ? "Script"
                            : (kind == CreateKind::InputMap) ? "InputMap"
@@ -465,6 +410,12 @@ void AssetsPanel::CreateNewFile(CreateKind kind, const fs::path& dir)
     // would have to manually "Reimport All Assets" to see the new class.
     if (kind == CreateKind::Script)
         m_presenter.RequestRecompileScripts();
+
+    // New shaders/effects (Issue #88): cook + re-register immediately so the new
+    // shading model / ScreenEffect shows up (material picker / PostProcess "Add
+    // Effect") without a manual Reimport.
+    if ((kind == CreateKind::Saglsl || isEffectKind) && m_onCookShaders)
+        m_onCookShaders();
 
     // New inputmaps: re-run InputMapLoader so the new ActionMapDef enters the
     // InputSystem registry immediately. Without this the map is invisible until
@@ -564,10 +515,7 @@ void AssetsPanel::CommitRename() {
         m_renamingPath.clear();
         return;
     }
-    std::error_code ec;
-    fs::rename(m_renamingPath, newPath, ec);
-    if (ec) {
-        SA_LOG_WARN("AssetsPanel: rename failed: {}", ec.message());
+    if (!IO::Rename(m_renamingPath, newPath)) {
         m_renamingPath.clear();
         return;
     }
@@ -575,7 +523,7 @@ void AssetsPanel::CommitRename() {
     const fs::path oldMeta = Import::MetaFile::MetaPathFor(m_renamingPath);
     const fs::path newMeta = Import::MetaFile::MetaPathFor(newPath);
     if (fs::exists(oldMeta))
-        fs::rename(oldMeta, newMeta, ec);
+        IO::Rename(oldMeta, newMeta);
 
     SA_LOG_INFO("AssetsPanel: renamed '{}' → '{}'",
                 m_renamingPath.filename().string(), newPath.filename().string());
@@ -600,21 +548,17 @@ void AssetsPanel::CommitRename() {
             return true;
         };
         if (oldStem != newStem && isValidIdent(newStem)) {
-            std::ifstream in(newPath);
-            if (in) {
-                std::string content((std::istreambuf_iterator<char>(in)),
-                                     std::istreambuf_iterator<char>());
-                in.close();
+            if (auto content = IO::ReadText(newPath)) {
                 const std::string pattern = "class " + oldStem;
                 const std::string replacement = "class " + newStem;
                 bool modified = false;
                 std::string::size_type pos = 0;
-                while ((pos = content.find(pattern, pos)) != std::string::npos) {
+                while ((pos = content->find(pattern, pos)) != std::string::npos) {
                     // Word-boundary check: the next char must not extend the identifier.
                     const std::string::size_type end = pos + pattern.size();
-                    const char next = end < content.size() ? content[end] : '\0';
+                    const char next = end < content->size() ? (*content)[end] : '\0';
                     if (!std::isalnum(static_cast<unsigned char>(next)) && next != '_') {
-                        content.replace(pos, pattern.size(), replacement);
+                        content->replace(pos, pattern.size(), replacement);
                         pos += replacement.size();
                         modified = true;
                     } else {
@@ -622,9 +566,7 @@ void AssetsPanel::CommitRename() {
                     }
                 }
                 if (modified) {
-                    std::ofstream out(newPath);
-                    out << content;
-                    out.close();
+                    IO::WriteText(newPath, *content);
                     SA_LOG_INFO("AssetsPanel: renamed C# class '{}' → '{}' inside '{}'",
                                 oldStem, newStem, newPath.filename().string());
                 }
@@ -645,28 +587,44 @@ void AssetsPanel::CommitRename() {
         const std::string oldStem = m_renamingPath.stem().string();
         const std::string newStem = newPath.stem().string();
         if (oldStem != newStem) {
-            try {
-                std::ifstream in(newPath);
-                nlohmann::json j = nlohmann::json::parse(in);
-                in.close();
-                if (j.contains("name") && j["name"].is_string()
-                    && j["name"].get<std::string>() == oldStem) {
-                    j["name"] = newStem;
-                    std::ofstream out(newPath);
-                    out << j.dump(2) << '\n';
-                    out.close();
-                    SA_LOG_INFO("AssetsPanel: renamed InputMap name '{}' → '{}' inside '{}'",
+            nlohmann::json j;
+            if (IO::ReadJson(newPath, j)
+                && j.contains("name") && j["name"].is_string()
+                && j["name"].get<std::string>() == oldStem) {
+                j["name"] = newStem;
+                IO::WriteJson(newPath, j);
+                SA_LOG_INFO("AssetsPanel: renamed InputMap name '{}' → '{}' inside '{}'",
+                            oldStem, newStem, newPath.filename().string());
+            }
+        }
+    }
+
+    // For .saeffect (Issue #88): sync the @Effect display name to the new filename
+    // when it still matches the old stem (ScreenEffectRegistry keys the catalog by
+    // @Effect, and the cooked output name derives from the filename). Robust to
+    // annotation spacing — patches the first quoted value after "@Effect".
+    const bool isEffect = newPath.extension() == ".saeffect";
+    if (isEffect) {
+        const std::string oldStem = m_renamingPath.stem().string();
+        const std::string newStem = newPath.stem().string();
+        if (oldStem != newStem) {
+            if (auto content = IO::ReadText(newPath)) {
+                const auto tag = content->find("@Effect");
+                const auto q1  = (tag != std::string::npos) ? content->find('"', tag) : std::string::npos;
+                const auto q2  = (q1  != std::string::npos) ? content->find('"', q1 + 1) : std::string::npos;
+                if (q2 != std::string::npos && content->substr(q1 + 1, q2 - q1 - 1) == oldStem) {
+                    content->replace(q1 + 1, q2 - q1 - 1, newStem);
+                    IO::WriteText(newPath, *content);
+                    SA_LOG_INFO("AssetsPanel: renamed @Effect '{}' → '{}' inside '{}'",
                                 oldStem, newStem, newPath.filename().string());
                 }
-            } catch (const std::exception& ex) {
-                SA_LOG_WARN("AssetsPanel: could not patch inputmap name in '{}': {}",
-                            newPath.filename().string(), ex.what());
             }
         }
     }
 
     m_filePaneDirty    = true;
     m_renamingFromTree = false;
+    const fs::path renamedExt = newPath.extension();
     SetSelectedPath(newPath);
     m_renamingPath.clear();
 
@@ -674,6 +632,11 @@ void AssetsPanel::CommitRename() {
         m_onImport();
     else if (m_registry)
         m_registry->Scan(m_assetsRoot, {});
+
+    // Renamed shader/effect: re-cook so the new filename's cooked output + patched
+    // @Effect name enter the catalog and the old (orphaned) output is pruned.
+    if ((renamedExt == ".saeffect" || renamedExt == ".saglsl") && m_onCookShaders)
+        m_onCookShaders();
 
     // Scripts: recompile so the ScriptClassSchema reflects the renamed class
     // before the user opens the Inspector. The FileWatcher would eventually
@@ -714,24 +677,23 @@ void AssetsPanel::CreateNewDir(const fs::path& parent) {
 }
 
 void AssetsPanel::DeletePath(const fs::path& path) {
-    std::error_code ec;
-    if (fs::is_directory(path, ec))
-        fs::remove_all(path, ec);
-    else {
-        fs::remove(path, ec);
-        const fs::path meta = Import::MetaFile::MetaPathFor(path);
-        if (fs::exists(meta, ec)) fs::remove(meta, ec);
-    }
-    if (ec) {
-        SA_LOG_WARN("AssetsPanel: delete failed '{}': {}", path.filename().string(), ec.message());
-        return;
-    }
+    const bool wasDir = fs::is_directory(path);   // check before removal
+    if (!IO::Remove(path)) return;                // file or recursive dir; logs on failure
+    if (!wasDir)
+        IO::Remove(Import::MetaFile::MetaPathFor(path));  // drop sidecar (no-op if absent)
     SA_LOG_INFO("AssetsPanel: deleted '{}'", path.filename().string());
     m_filePaneDirty = true;
     if (m_selectedPath == path) SetSelectedPath({});
 
     if (m_onImport)    m_onImport();
     else if (m_registry) m_registry->Scan(m_assetsRoot, {});
+
+    // Deleting a shader/effect source (Issue #88): re-cook so orphaned cooked
+    // outputs are pruned and the type/effect leaves the catalog (otherwise the
+    // stale .refl keeps the effect running / the shading model registered).
+    const std::string ext = path.extension().string();
+    if ((ext == ".saeffect" || ext == ".saglsl") && m_onCookShaders)
+        m_onCookShaders();
 }
 
 void AssetsPanel::MoveAsset(const fs::path& src, const fs::path& destDir) {
@@ -744,14 +706,12 @@ void AssetsPanel::MoveAsset(const fs::path& src, const fs::path& destDir) {
                     src.filename().string());
         return;
     }
-    std::error_code ec;
-    fs::rename(src, dest, ec);
-    if (ec) { SA_LOG_WARN("AssetsPanel: move failed: {}", ec.message()); return; }
+    if (!IO::Rename(src, dest)) return;   // logs on failure
 
-    if (!fs::is_directory(dest, ec)) {
+    if (!fs::is_directory(dest)) {
         const fs::path srcMeta  = Import::MetaFile::MetaPathFor(src);
         const fs::path destMeta = Import::MetaFile::MetaPathFor(dest);
-        if (fs::exists(srcMeta, ec)) fs::rename(srcMeta, destMeta, ec);
+        if (fs::exists(srcMeta)) IO::Rename(srcMeta, destMeta);
     }
     SA_LOG_INFO("AssetsPanel: moved '{}' → '{}'",
                 src.filename().string(), destDir.filename().string());
@@ -774,14 +734,6 @@ void AssetsPanel::OnDraw() {
     if (m_assetsRoot.empty() || !fs::exists(m_assetsRoot)) {
         ImGui::TextDisabled("No project loaded.");
         return;
-    }
-
-    // Flush deferred single-select: click on multi-selected item without dragging.
-    if (!m_pendingDeselectOtherPath.empty() && !ImGui::IsMouseDown(0)) {
-        SetSelectedPath(fs::path(m_pendingDeselectOtherPath));
-        m_selectedPaths   = { m_pendingDeselectOtherPath };
-        m_shiftAnchorPath = m_pendingDeselectOtherPath;
-        m_pendingDeselectOtherPath.clear();
     }
 
     // Validate selected directory
@@ -989,7 +941,7 @@ static const char* GlyphForExt(const std::string& ext) {
     if (ext == ".sascene")                                 return FA_ICON_SCENE;
     if (ext == ".sanim")                                   return FA_ICON_ANIMATION;
     if (ext == ".saskel")                                  return FA_ICON_SKELETON;
-    if (ext == ".saglsl" || ext == ".cs")                   return FA_ICON_SCRIPT;
+    if (ext == ".saglsl" || ext == ".saeffect" || ext == ".cs") return FA_ICON_SCRIPT;
     if (ext == ".sainputmap")                              return FA_ICON_INPUTMAP;
     if (ext == ".json"  || ext == ".jsonc")                return FA_ICON_CONFIG;
     return nullptr;
@@ -1234,19 +1186,16 @@ void AssetsPanel::DrawFilePane() {
                 }
                 SetSelectedPath(p);
             } else {
-                if (m_selectedPaths.count(pathStr) && m_selectedPaths.size() > 1)
-                    m_pendingDeselectOtherPath = pathStr;
-                else {
-                    m_selectedPaths   = { pathStr };
-                    SetSelectedPath(p);
-                    m_shiftAnchorPath = pathStr;
-                }
+                // Plain click confirmed on release-over-item: a drag would have
+                // dispatched mouse-up elsewhere, so reaching here is always a click.
+                // Collapse any multi-selection down to this single item.
+                m_selectedPaths   = { pathStr };
+                SetSelectedPath(p);
+                m_shiftAnchorPath = pathStr;
             }
         }
         // ── Drag ─────────────────────────────────────────────────────────────
         if (ImGui::BeginDragDropSource()) {
-            m_pendingDeselectOtherPath.clear();
-
             AssetDragPayload payload{};
             // Absolute disk path (first field — back-compat with pre-#73 receivers
             // that cast payload->Data to const char*; folders included).
@@ -1544,7 +1493,6 @@ void AssetsPanel::DrawFilePane() {
     // Left-click on background → deselect all.
     if (ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() &&
             ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        m_pendingDeselectOtherPath.clear();
         m_selectedPaths.clear();
         SetSelectedPath({});
         m_shiftAnchorPath.clear();

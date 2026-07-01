@@ -1,0 +1,137 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+
+// Screen Space Reflections (Issue #48) — single-pass compute.
+//
+// Runs after DeferredLighting (handles.hdr holds the lit scene incl. IBL specular)
+// and before TAA (which denoises the per-frame ray-march jitter). For each
+// reflective pixel it view-space ray-marches the depth buffer; on a hit it samples
+// the lit HDR and REPLACES the IBL env-probe specular term — recomputed here with
+// the exact same split-sum weight as deferred_lighting.frag:171-181, so the
+// subtraction cancels and there is no double counting:
+//     out = hdrIn + conf * (ssrSpec - iblSpec)
+//
+// set=1 (frame): camera matrices + t_PrefilteredEnv + t_BrdfLut (via pbr.glsl).
+// set=2 (SSR resources, this pass).
+#include "pbr.glsl"   // -> frame_uniforms.glsl (u_Frame, IBL), common.glsl (OctDecode, ReconstructWorldPos)
+
+layout(set = 2, binding = 0) uniform sampler2D t_GDepth;
+layout(set = 2, binding = 1) uniform sampler2D t_GAlbedoOcclusion;  // RGBA8: albedo.rgb + occlusion.a
+layout(set = 2, binding = 2) uniform sampler2D t_GNormalMaterial;   // RGBA16F: octN.rg + rough.b + metal.a
+layout(set = 2, binding = 3) uniform sampler2D t_HDR;               // lit scene colour to reflect
+layout(set = 2, binding = 4) uniform sampler2D t_AO;                // GTAO (1.0 = no occlusion)
+layout(set = 2, binding = 5, rgba16f) uniform writeonly image2D u_SSROut;
+
+layout(push_constant) uniform PC {
+    int   maxSteps;
+    float thickness;     // view-space depth tolerance for a hit
+    float maxRoughness;  // fade SSR out toward this roughness
+    float strength;      // [0..1] reflection blend weight
+} pc;
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// View-space position from a uv + depth sample (single invProj transform).
+vec3 ViewPosFromUV(vec2 uv, float d) {
+    vec4 c = u_Frame.invProj * vec4(uv * 2.0 - 1.0, d, 1.0);
+    return c.xyz / c.w;
+}
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 dim = ivec2(u_Frame.resolution);
+    if (px.x >= dim.x || px.y >= dim.y) return;
+
+    vec2  uv    = (vec2(px) + 0.5) / u_Frame.resolution;
+    vec3  hdrIn = texelFetch(t_HDR, px, 0).rgb;
+
+    float depth = texture(t_GDepth, uv).r;
+    if (depth >= 1.0 - EPSILON) {                 // sky / no geometry
+        imageStore(u_SSROut, px, vec4(hdrIn, 1.0));
+        return;
+    }
+
+    // ── Unpack G-Buffer (mirrors deferred_lighting.frag) ─────────────────────
+    vec4  albedoOcc = texture(t_GAlbedoOcclusion, uv);
+    vec4  normalMat = texture(t_GNormalMaterial,  uv);
+    vec3  albedo    = albedoOcc.rgb;
+    float occlusion = albedoOcc.a * texture(t_AO, uv).r;
+    vec3  worldN    = OctDecode(normalMat.rg);
+    float roughness = normalMat.b;
+    float metallic  = normalMat.a;
+
+    // Roughness fade: above maxRoughness the surface keeps pure IBL specular.
+    float roughFade = 1.0 - smoothstep(pc.maxRoughness * 0.75, pc.maxRoughness, roughness);
+    if (roughFade <= 0.0) { imageStore(u_SSROut, px, vec4(hdrIn, 1.0)); return; }
+
+    // ── View-space ray march ─────────────────────────────────────────────────
+    vec3 viewPos   = ViewPosFromUV(uv, depth);
+    vec3 viewN     = normalize(mat3(u_Frame.view) * worldN);
+    vec3 rayDir    = reflect(normalize(viewPos), viewN);   // incident = camera->point
+
+    // Per-frame jittered start offset → TAA averages the resulting noise.
+    float jitter   = fract(sin(dot(vec2(px) + float(u_Frame.frameIndex), vec2(12.9898, 78.233))) * 43758.5453);
+    float stepLen  = max(0.05, -viewPos.z * 0.04);
+    vec3  rayPos   = viewPos + rayDir * stepLen * (1.0 + jitter);
+
+    bool hit = false;
+    vec2 hitUV = vec2(0.0);
+    for (int i = 0; i < pc.maxSteps; ++i) {
+        if (rayPos.z > -0.001) break;             // crossed near plane / behind camera
+        vec4 clip = u_Frame.proj * vec4(rayPos, 1.0);
+        if (clip.w <= 0.0) break;
+        vec2 sUV = (clip.xy / clip.w) * 0.5 + 0.5;
+        if (sUV.x < 0.0 || sUV.x > 1.0 || sUV.y < 0.0 || sUV.y > 1.0) break;
+
+        float sd = texture(t_GDepth, sUV).r;
+        if (sd < 1.0 - EPSILON) {
+            vec3  sView = ViewPosFromUV(sUV, sd);
+            float delta = sView.z - rayPos.z;     // > 0 → ray is behind the surface
+            if (delta > 0.0 && delta < pc.thickness) { hit = true; hitUV = sUV; break; }
+        }
+        rayPos  += rayDir * stepLen;
+        stepLen *= 1.3;                            // geometric growth extends range
+    }
+
+    if (!hit) { imageStore(u_SSROut, px, vec4(hdrIn, 1.0)); return; }
+
+    // Binary refinement between the last in-front sample and the first behind one.
+    {
+        vec3 a = rayPos - rayDir * stepLen / 1.3;  // previous (in front)
+        vec3 b = rayPos;                           // current  (behind)
+        for (int r = 0; r < 5; ++r) {
+            vec3 mid  = (a + b) * 0.5;
+            vec4 c    = u_Frame.proj * vec4(mid, 1.0);
+            vec2 mUV  = (c.xy / c.w) * 0.5 + 0.5;
+            float sd  = texture(t_GDepth, mUV).r;
+            vec3  sV  = ViewPosFromUV(mUV, sd);
+            if (sV.z - mid.z > 0.0) b = mid; else a = mid;
+            hitUV = mUV;
+        }
+    }
+
+    // ── Confidence: screen-edge fade × roughness fade × strength ─────────────
+    vec2  edge = smoothstep(vec2(0.0), vec2(0.08), hitUV)
+               * (1.0 - smoothstep(vec2(0.92), vec2(1.0), hitUV));
+    float conf = edge.x * edge.y * roughFade * pc.strength;
+
+    // ── Replace IBL env-probe specular with the screen-traced reflection ─────
+    // Recomputed identically to deferred_lighting.frag so iblSpec cancels exactly.
+    vec3  worldPos = ReconstructWorldPos(uv, depth, u_Frame.invViewProj);
+    vec3  V        = normalize(u_Frame.cameraPos - worldPos);
+    vec3  Rw       = reflect(-V, worldN);
+    float NdotV    = max(dot(worldN, V), 0.0);
+    vec3  F0       = mix(vec3(0.04), albedo, metallic);
+    vec3  F_ibl    = FresnelSchlickRoughness(NdotV, F0, roughness);
+
+    const float MAX_REFLECTION_LOD = 4.0;
+    vec3  prefiltered = textureLod(t_PrefilteredEnv, Rw, roughness * MAX_REFLECTION_LOD).rgb;
+    vec2  brdfSS      = texture(t_BrdfLut, vec2(NdotV, roughness)).rg;
+    vec3  envBRDF     = F_ibl * brdfSS.x + brdfSS.y;
+
+    vec3  iblSpec  = prefiltered * envBRDF * occlusion;
+    vec3  ssrColor = textureLod(t_HDR, hitUV, 0.0).rgb;
+    vec3  ssrSpec  = ssrColor * envBRDF * occlusion;
+
+    imageStore(u_SSROut, px, vec4(hdrIn + conf * (ssrSpec - iblSpec), 1.0));
+}

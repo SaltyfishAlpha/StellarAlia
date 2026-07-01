@@ -3,6 +3,8 @@
 #include "function/input/ActionMapJsonParser.hpp"
 #include "function/input/InputSystem.hpp"
 #include "core/logs/Log.hpp"
+#include "core/io/FileIO.hpp"
+#include "resource/MetaFile.hpp"
 
 #include <filesystem>
 #include <unordered_map>
@@ -14,29 +16,18 @@ namespace StellarAlia {
 
 namespace fs = std::filesystem;
 
-// Extract `uuid=<value>` (canonical UUID string) from a .sameta file.
-// Returns empty string when missing or unreadable.
+// Extract the canonical UUID string from a .sameta file via the shared parser
+// (Issue #90). Returns empty string when missing or unreadable.
 static std::string ReadUuidFromSameta(const fs::path& metaPath) {
-    std::ifstream f(metaPath);
-    if (!f.is_open()) return {};
-    std::string line;
-    while (std::getline(f, line)) {
-        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
-            line.pop_back();
-        if (line.empty() || line[0] == '#') continue;
-        const auto eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        if (line.substr(0, eq) == "uuid") return line.substr(eq + 1);
-    }
-    return {};
+    Import::MetaFile meta;
+    if (!Import::MetaFile::Load(metaPath, meta)) return {};
+    return meta.uuid.ToString();
 }
 
 static bool ReadFileToString(const fs::path& path, std::string& out) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f.is_open()) return false;
-    std::stringstream ss;
-    ss << f.rdbuf();
-    out = ss.str();
+    auto s = IO::ReadText(path);
+    if (!s) return false;
+    out = std::move(*s);
     return true;
 }
 

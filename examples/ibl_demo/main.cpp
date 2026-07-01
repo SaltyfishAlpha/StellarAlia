@@ -59,7 +59,7 @@ public:
         m_type = ctx.matMgr->GetType("LutTonemap");
         if (!m_type) { SA_LOG_WARN("LutTonemapFeature: shader load failed"); return; }
 
-        m_descSet = ctx.device->AllocateDescriptorSet(m_type->shader.GetMaterialLayout());
+        m_descSet = ctx.device->AllocateDescriptorSet(m_type->shader->GetMaterialLayout());
 
         // ── Load LUT PNG and upload to GPU ────────────────────────────────────
         auto img = ImageLoader::Load(m_lutPath);

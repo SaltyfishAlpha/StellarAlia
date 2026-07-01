@@ -17,8 +17,8 @@ namespace StellarAlia {
 //   - No AttachmentKey cache; compute pipelines are format-independent and
 //     created once on the first GetPipeline() call.
 //   - Owns DescriptorSetLayouts for every set index found in the reflection.
-//   - Optionally accepts an external layout at set=0 (e.g. per-frame globals)
-//     to mirror the ShaderProgram::frameLayout convention.
+//   - Optionally accepts an external layout at set=1 (per-frame globals)
+//     to mirror the engine-wide set=1 frame convention (frame_uniforms.glsl).
 //
 // Typical usage:
 //
@@ -40,9 +40,10 @@ public:
         std::span<const uint8_t>  spv;
         RHI::ShaderReflection     refl;
 
-        // Optional: caller-managed layout for set=0 (e.g. per-frame scene data
-        // bound by RenderGraph before the dispatch).  When valid, this layout
-        // occupies slot 0 in the pipeline layout instead of the auto-derived one.
+        // Optional: caller-managed layout for set=1 (per-frame scene data
+        // bound before the dispatch).  When valid, this layout occupies set=1
+        // in the pipeline layout instead of the auto-derived one — matching the
+        // engine-wide per-frame set convention (set=0 bindless, set=1 frame).
         RHI::RHIDescLayoutHandle  frameLayout = {};
     };
 
