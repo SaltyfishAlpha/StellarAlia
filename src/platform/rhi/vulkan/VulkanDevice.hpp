@@ -50,7 +50,8 @@ public:
     RHIDescSetHandle AllocateDescriptorSet(RHIDescLayoutHandle layout) override;
     void FreeDescriptorSet(RHIDescSetHandle ds) override;
     void WriteDescriptorTexture(RHIDescSetHandle ds, uint32_t binding,
-                                RHITextureHandle texture) override;
+                                RHITextureHandle texture,
+                                bool depthStencilReadLayout = false) override;
     void WriteDescriptorTextureArray(RHIDescSetHandle ds, uint32_t binding,
                                      uint32_t arrayElement,
                                      RHITextureHandle texture) override;
@@ -203,6 +204,11 @@ private:
     struct TextureEntry {
         VkImage        image      = VK_NULL_HANDLE;
         VkImageView    view       = VK_NULL_HANDLE;  // full-mip view (all levels)
+        // Issue #56: depth+stencil formats need two views — `view` carries
+        // DEPTH|STENCIL aspects (attachment use only; sampling such a view is
+        // invalid), this one is DEPTH-only for sampled-image descriptors.
+        // VK_NULL_HANDLE for all non-stencil formats.
+        VkImageView    sampledDepthView = VK_NULL_HANDLE;
         VmaAllocation  alloc      = VK_NULL_HANDLE;  // null → swapchain-owned
         RHITextureDesc desc       = {};
         bool           valid      = false;
@@ -288,6 +294,7 @@ private:
         VkImage                  image    = VK_NULL_HANDLE;
         VmaAllocation            alloc    = VK_NULL_HANDLE;
         VkImageView              view     = VK_NULL_HANDLE;
+        VkImageView              sampledDepthView = VK_NULL_HANDLE;  // Issue #56
         std::vector<VkImageView> mipViews;
     };
     struct PendingFree {

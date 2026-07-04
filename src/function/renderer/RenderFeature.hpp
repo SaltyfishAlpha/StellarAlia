@@ -109,8 +109,10 @@ struct FrameContext {
     // Queues a descriptor write that is resolved and flushed after Execute()
     // when all physical slot handles are valid (imported and transient alike).
     // No-op if either handle is invalid.
+    // depthStencilRead (Issue #56): write with DEPTH_STENCIL_READ_ONLY layout —
+    // pair with RGPassBuilder::ReadDepthStencil + RHIDepthAttachment::readOnly.
     void BindTexture(RHI::RHIDescSetHandle set, uint32_t binding,
-                     RGTextureHandle handle) const;
+                     RGTextureHandle handle, bool depthStencilRead = false) const;
 
     // ── Buffer binding without exposing RHIBufferHandle ───────────────────────
     //
@@ -144,6 +146,7 @@ private:
         RHI::RHIDescSetHandle set;
         uint32_t              binding;
         RGTextureHandle       handle;
+        bool                  depthStencilRead = false;  // Issue #56
     };
     struct PendingBufferBinding {
         RHI::RHIDescSetHandle set;

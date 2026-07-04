@@ -10,11 +10,12 @@
         "emissiveScale": 2.0,
         "height": 3.0,
         "intensity": 68.0,
-        "twoSided": false,
+        "twoSided": true,
         "width": 2.0
       },
       "id": 0,
       "materialOverride": {
+        "doubleSided": 1,
         "materialAsset": "d3f4abb0-0000-4000-0000-000000000001",
         "scalars": {
           "baseColorFactor": [
@@ -74,11 +75,12 @@
         "emissiveScale": 2.0,
         "height": 3.0,
         "intensity": 38.0,
-        "twoSided": false,
+        "twoSided": true,
         "width": 2.0
       },
       "id": 1,
       "materialOverride": {
+        "doubleSided": 1,
         "materialAsset": "d3f4abb0-0000-4000-0000-000000000001",
         "scalars": {
           "baseColorFactor": [
@@ -326,13 +328,14 @@
       },
       "id": 6,
       "materialOverride": {
-        "materialAsset": "d3f4abb0-0000-4000-0000-000000000001",
+        "doubleSided": 1,
+        "materialAsset": "b8006537-f08e-4445-a067-f29a11372ed2",
         "scalars": {
           "baseColorFactor": [
             0.10392635315656662,
-            0.3165302872657776,
+            0.31660231947898865,
             0.8480392098426819,
-            1.0
+            0.6830000281333923
           ],
           "metallicFactor": 0.8500000238418579,
           "roughnessFactor": 0.0
@@ -469,13 +472,15 @@
       },
       "id": 8,
       "materialOverride": {
+        "alphaMode": 0,
+        "doubleSided": 1,
         "materialAsset": "d3f4abb0-0000-4000-0000-000000000001",
         "scalars": {
           "baseColorFactor": [
             0.0,
             0.0,
             0.0,
-            1.0
+            0.9100000262260437
           ],
           "metallicFactor": 1.0,
           "roughnessFactor": 0.27000001072883606
@@ -534,18 +539,9 @@
         "class": "",
         "fields": [
           {
-            "kind": "Float",
-            "name": "smoothing",
-            "value": 8.0
-          },
-          {
-            "kind": "Vec3",
-            "name": "lookAtBias",
-            "value": [
-              0.0,
-              1.0,
-              0.0
-            ]
+            "kind": "String",
+            "name": "targetName",
+            "value": "Player"
           },
           {
             "kind": "Vec3",
@@ -557,9 +553,18 @@
             ]
           },
           {
-            "kind": "String",
-            "name": "targetName",
-            "value": "Player"
+            "kind": "Vec3",
+            "name": "lookAtBias",
+            "value": [
+              0.0,
+              1.0,
+              0.0
+            ]
+          },
+          {
+            "kind": "Float",
+            "name": "smoothing",
+            "value": 8.0
           }
         ]
       },
@@ -667,7 +672,7 @@
       "focusDistance": 5.0,
       "lutStrength": 1.0,
       "maxCocPx": 20.0,
-      "motionBlurEnabled": false,
+      "motionBlurEnabled": true,
       "motionBlurMaxSpeed": 0.10000000149011612,
       "motionBlurSamples": 8,
       "motionBlurStrength": 0.5,

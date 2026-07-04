@@ -34,7 +34,10 @@ void VulkanCommandList::BeginRenderPass(const RHIRenderPassDesc& desc) {
     depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     if (desc.hasDepth) {
         depthAttachment.imageView   = m_device->GetVkImageView(desc.depthAttachment.texture);
-        depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        // Issue #56: DEPTH_STENCIL layouts (valid for depth-only formats too).
+        depthAttachment.imageLayout = desc.depthAttachment.readOnly
+                                          ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                                          : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         depthAttachment.loadOp      = desc.depthAttachment.clearOnLoad
                                           ? VK_ATTACHMENT_LOAD_OP_CLEAR
                                           : VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -42,6 +45,15 @@ void VulkanCommandList::BeginRenderPass(const RHIRenderPassDesc& desc) {
         depthAttachment.clearValue.depthStencil = {desc.depthAttachment.clearDepth,
                                                    desc.depthAttachment.clearStencil};
         renderingInfo.pDepthAttachment = &depthAttachment;
+
+        // Issue #56: stencil-bearing depth format → always attach stencil
+        // (clear/load follows depth). Matches CreatePipeline, which declares
+        // stencilAttachmentFormat for these formats unconditionally.
+        const RHITextureDesc* texDesc =
+            m_device->GetTextureDesc(desc.depthAttachment.texture);
+        if (texDesc && texDesc->format == RHIFormat::D24_S8) {
+            renderingInfo.pStencilAttachment = &depthAttachment;
+        }
     }
 
     vkCmdBeginRendering(m_cmd, &renderingInfo);

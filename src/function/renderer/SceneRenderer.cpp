@@ -110,6 +110,8 @@ bool SceneRenderer::Init(const Desc& desc) {
                     | RHI::RHITextureUsage::Sampled;
         d.debugName = "ShadowMap";
         m_shadowMap = desc.device->CreateTexture(d);
+        // Issue #56: forward passes sample the shadow map via set=1 binding=7.
+        m_frameUniforms.SetShadowMap(m_shadowMap);
     }
 
     // ── G-Buffer + HDR textures (1×1 placeholders, resized on first RenderFrame) ─
@@ -161,7 +163,7 @@ bool SceneRenderer::Init(const Desc& desc) {
         RHI::RHITextureDesc d{};
         d.width     = 1;
         d.height    = 1;
-        d.format    = RHI::RHIFormat::D32F;
+        d.format    = kSceneDepthFormat;
         d.usage     = RHI::RHITextureUsage::DepthStencil
                     | RHI::RHITextureUsage::Sampled;
         d.debugName = "SceneDepth";
@@ -254,6 +256,11 @@ bool SceneRenderer::Init(const Desc& desc) {
         m_features.insert(m_features.begin(), std::move(gf));
     }
     {
+        // Issue #56: depth prepass runs right before GBuffer (clears depth+stencil,
+        // draws MASK geometry). Reverse insert → placed after the GBuffer insert.
+        m_features.insert(m_features.begin(), std::make_unique<DepthPrepassFeature>());
+    }
+    {
         auto sf = std::make_unique<SkyboxFeature>();
         m_skyboxFeature = sf.get();
         m_features.insert(m_features.begin(), std::move(sf));
@@ -279,11 +286,22 @@ bool SceneRenderer::Init(const Desc& desc) {
             m_seAnchors[static_cast<int>(inject)] = anchor.get();
             m_features.insert(it, std::move(anchor));
         };
+        // Issue #56: forward transparent sits directly after TAA. Placed with the
+        // same find-by-pointer mechanism so the AfterTAA anchor can then be
+        // placed after it — user effects see the transparent-composited frame.
+        {
+            auto fwd = std::make_unique<ForwardTransparentFeature>();
+            m_forwardTransparentFeature = fwd.get();
+            auto it = findFeature(m_taaFeature);
+            if (it != m_features.end()) ++it;
+            m_features.insert(it, std::move(fwd));
+        }
+
         // AfterLighting: after SSR (lit HDR incl. reflections), pre-TAA.
         placeAnchor(m_ssrFeature ? static_cast<RenderFeature*>(m_ssrFeature)
                                  : static_cast<RenderFeature*>(m_deferredLightingFeature),
                     EffectInject::AfterLighting, /*after=*/true);
-        placeAnchor(m_taaFeature,     EffectInject::AfterTAA,      /*after=*/true);
+        placeAnchor(m_forwardTransparentFeature, EffectInject::AfterTAA, /*after=*/true);
         placeAnchor(m_tonemapFeature, EffectInject::BeforeTonemap, /*after=*/false);
         placeAnchor(m_tonemapFeature, EffectInject::AfterTonemap,  /*after=*/true);
     }
@@ -739,6 +757,46 @@ void SceneRenderer::ReplaceTonemapFeature(std::unique_ptr<RenderFeature> newFeat
 
 // ── BuildDrawList ─────────────────────────────────────────────────────────────
 
+// Issue #56: GBuffer/prepass geometry writes stencil=1 — DeferredLighting
+// stencil-tests against it so background/cut-out pixels never run the
+// lighting fragment.
+static constexpr RHI::RHIStencilOpState kStencilWriteRef1{
+    RHI::RHIStencilOp::Keep,     // failOp
+    RHI::RHIStencilOp::Replace,  // passOp
+    RHI::RHICompareOp::Always,   // compareOp
+    1, 0xFF, 0xFF};              // reference, compareMask, writeMask
+
+// Patch named scalar params and bindless texture indices into an SSBO-path
+// param blob. Shared by the entity-wide and per-slot (Issue #101) override
+// layers on both the static and skinned BuildDrawList paths.
+static void ApplyOverridesToBlob(std::vector<uint8_t>&                    blob,
+                                 const MaterialType*                      type,
+                                 const std::map<std::string, ParamValue>& scalars,
+                                 const std::map<std::string, AssetID>&    textures,
+                                 Resource::ResourceManager*               resMgr,
+                                 MaterialManager*                         matMgr)
+{
+    for (const auto& [name, val] : scalars) {
+        const ParamDef* pd = type->FindParam(name);
+        if (!pd) continue;
+        std::visit([&](const auto& v) {
+            const uint32_t sz = static_cast<uint32_t>(sizeof(v));
+            if (pd->offset + sz <= blob.size())
+                std::memcpy(blob.data() + pd->offset, &v, sz);
+        }, val);
+    }
+    for (const auto& [name, texID] : textures) {
+        if (!texID.IsValid()) continue;
+        const TextureDef* td = type->FindTexture(name);
+        if (!td) continue;
+        const auto tex = resMgr->LoadTexture(texID);
+        if (!tex.IsValid()) continue;
+        const uint32_t idx = matMgr->GetTextureHeap().Register(tex);
+        if (td->uboBlobOffset + sizeof(idx) <= blob.size())
+            std::memcpy(blob.data() + td->uboBlobOffset, &idx, sizeof(idx));
+    }
+}
+
 void SceneRenderer::BuildDrawList(Scene& scene) {
     SA_PROFILE_SCOPE_N("BuildDrawList");
     m_drawItems.clear();
@@ -756,7 +814,7 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
     gbKey.colorFormats[0] = RHI::RHIFormat::RGBA8_UNORM;
     gbKey.colorFormats[1] = RHI::RHIFormat::RGBA16F;
     gbKey.colorFormats[2] = RHI::RHIFormat::RGBA16F;
-    gbKey.depthFormat     = RHI::RHIFormat::D32F;
+    gbKey.depthFormat     = kSceneDepthFormat;
 
     const auto& reg = scene.Registry();
 
@@ -804,6 +862,13 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
                 if (loaded) base = loaded;
             }
 
+            // Issue #101: per-submesh override layer for this slot (may be null).
+            const MaterialSlotOverride* slotOvr = nullptr;
+            if (matOverride) {
+                auto s = matOverride->slotOverrides.find(static_cast<int32_t>(si));
+                if (s != matOverride->slotOverrides.end()) slotOvr = &s->second;
+            }
+
             DrawItem item{};
             item.entity            = e;
             item.subLocalTransform = sub.localTransform;
@@ -829,30 +894,17 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
                 // offset. No MaterialInstance clone, no per-entity descriptor.
                 std::vector<uint8_t> blob = base->GetParamBlob();
                 if (matOverride) {
-                    for (const auto& [name, val] : matOverride->scalars) {
-                        const ParamDef* pd = base->GetType()->FindParam(name);
-                        if (!pd) continue;
-                        std::visit([&](const auto& v) {
-                            const uint32_t sz = static_cast<uint32_t>(sizeof(v));
-                            if (pd->offset + sz <= blob.size())
-                                std::memcpy(blob.data() + pd->offset, &v, sz);
-                        }, val);
-                    }
-                    for (const auto& [name, texID] : matOverride->textures) {
-                        if (!texID.IsValid()) continue;
-                        const TextureDef* td = base->GetType()->FindTexture(name);
-                        if (!td) continue;
-                        const auto tex = m_resMgr->LoadTexture(texID);
-                        if (!tex.IsValid()) continue;
-                        const uint32_t idx = m_matMgr->GetTextureHeap().Register(tex);
-                        if (td->uboBlobOffset + sizeof(idx) <= blob.size())
-                            std::memcpy(blob.data() + td->uboBlobOffset, &idx, sizeof(idx));
-                    }
+                    ApplyOverridesToBlob(blob, base->GetType(), matOverride->scalars,
+                                         matOverride->textures, m_resMgr, m_matMgr);
+                    if (slotOvr)
+                        ApplyOverridesToBlob(blob, base->GetType(), slotOvr->scalars,
+                                             slotOvr->textures, m_resMgr, m_matMgr);
                 }
                 item.materialUboOffset =
                     m_materialRing.Allocate(blob.data(),
                                             static_cast<uint32_t>(blob.size()));
-            } else if (matOverride && (!matOverride->scalars.empty() || !matOverride->textures.empty())) {
+            } else if (matOverride && (!matOverride->scalars.empty() ||
+                                       !matOverride->textures.empty() || slotOvr)) {
                 // Legacy UBO path with overrides — still uses CloneInstance.
                 // Triggers the original validation issue but only for non-PBR
                 // shaders that haven't been converted yet (none in current builtin set).
@@ -863,12 +915,51 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
                     for (const auto& [name, texID] : matOverride->textures)
                         if (texID.IsValid())
                             clone->SetTexture(name, m_resMgr->LoadTexture(texID));
+                    if (slotOvr) {
+                        for (const auto& [name, val] : slotOvr->scalars)
+                            std::visit([&](const auto& v){ clone->SetParam(name, v); }, val);
+                        for (const auto& [name, texID] : slotOvr->textures)
+                            if (texID.IsValid())
+                                clone->SetTexture(name, m_resMgr->LoadTexture(texID));
+                    }
                     item.material      = clone.get();
                     item.ownedMaterial = std::move(clone);
                 }
             }
 
-            item.pipeline         = item.material->GetType()->GetOrCreatePipeline(m_device, gbKey);
+            item.alphaMode        = item.material->GetRenderState().alphaMode;
+            item.doubleSided      = item.material->GetRenderState().doubleSided;
+            // Issue #56: per-entity render-state override (editor UI / scene).
+            // alphaMode is SSBO-path only, same constraint as the asset field.
+            if (matOverride) {
+                if (matOverride->alphaMode >= 0 &&
+                    item.material->GetType()->usesMaterialParamsSSBO)
+                    item.alphaMode = static_cast<AlphaMode>(matOverride->alphaMode);
+                if (matOverride->doubleSided >= 0)
+                    item.doubleSided = matOverride->doubleSided != 0;
+            }
+            // Issue #101: slot render-state overrides layer after entity-wide.
+            if (slotOvr) {
+                if (slotOvr->alphaMode >= 0 &&
+                    item.material->GetType()->usesMaterialParamsSSBO)
+                    item.alphaMode = static_cast<AlphaMode>(slotOvr->alphaMode);
+                if (slotOvr->doubleSided >= 0)
+                    item.doubleSided = slotOvr->doubleSided != 0;
+            }
+            // Issue #56: GBuffer pipelines write stencil=1; MASK geometry runs
+            // EQUAL/no-write against prepass-filled depth. BLEND items keep the
+            // default-state pipeline (unused — GBuffer skips them).
+            {
+                PipelineRenderState st = item.material->GetType()->DefaultRenderState();
+                st.stencilWriteEnable = true;
+                st.stencilFront = st.stencilBack = kStencilWriteRef1;
+                if (item.doubleSided) st.cullMode = RHI::RHICullMode::None;
+                if (item.alphaMode == AlphaMode::Mask) {
+                    st.depthCompareOp = RHI::RHICompareOp::Equal;
+                    st.depthWrite     = false;
+                }
+                item.pipeline = item.material->GetType()->GetOrCreatePipeline(m_device, gbKey, st);
+            }
             item.pushConstantSize = static_cast<uint32_t>(sizeof(glm::mat4));
 
             m_drawItems.push_back(std::move(item));
@@ -918,6 +1009,13 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
                 if (loaded) base = loaded;
             }
 
+            // Issue #101: per-submesh override layer for this slot (may be null).
+            const MaterialSlotOverride* slotOvr = nullptr;
+            if (matOverride) {
+                auto s = matOverride->slotOverrides.find(static_cast<int32_t>(si));
+                if (s != matOverride->slotOverrides.end()) slotOvr = &s->second;
+            }
+
             DrawItem item{};
             item.entity            = e;
             item.subLocalTransform = glm::mat4(1.f);  // skeleton drives transforms
@@ -938,30 +1036,17 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
                 // Issue #72: same SSBO+bindless path as static meshes.
                 std::vector<uint8_t> blob = base->GetParamBlob();
                 if (matOverride) {
-                    for (const auto& [name, val] : matOverride->scalars) {
-                        const ParamDef* pd = base->GetType()->FindParam(name);
-                        if (!pd) continue;
-                        std::visit([&](const auto& v) {
-                            const uint32_t sz = static_cast<uint32_t>(sizeof(v));
-                            if (pd->offset + sz <= blob.size())
-                                std::memcpy(blob.data() + pd->offset, &v, sz);
-                        }, val);
-                    }
-                    for (const auto& [name, texID] : matOverride->textures) {
-                        if (!texID.IsValid()) continue;
-                        const TextureDef* td = base->GetType()->FindTexture(name);
-                        if (!td) continue;
-                        const auto tex = m_resMgr->LoadTexture(texID);
-                        if (!tex.IsValid()) continue;
-                        const uint32_t idx = m_matMgr->GetTextureHeap().Register(tex);
-                        if (td->uboBlobOffset + sizeof(idx) <= blob.size())
-                            std::memcpy(blob.data() + td->uboBlobOffset, &idx, sizeof(idx));
-                    }
+                    ApplyOverridesToBlob(blob, base->GetType(), matOverride->scalars,
+                                         matOverride->textures, m_resMgr, m_matMgr);
+                    if (slotOvr)
+                        ApplyOverridesToBlob(blob, base->GetType(), slotOvr->scalars,
+                                             slotOvr->textures, m_resMgr, m_matMgr);
                 }
                 item.materialUboOffset =
                     m_materialRing.Allocate(blob.data(),
                                             static_cast<uint32_t>(blob.size()));
-            } else if (matOverride && (!matOverride->scalars.empty() || !matOverride->textures.empty())) {
+            } else if (matOverride && (!matOverride->scalars.empty() ||
+                                       !matOverride->textures.empty() || slotOvr)) {
                 auto clone = m_matMgr->CloneInstance(base);
                 if (clone) {
                     for (const auto& [name, val] : matOverride->scalars)
@@ -969,14 +1054,50 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
                     for (const auto& [name, texID] : matOverride->textures)
                         if (texID.IsValid())
                             clone->SetTexture(name, m_resMgr->LoadTexture(texID));
+                    if (slotOvr) {
+                        for (const auto& [name, val] : slotOvr->scalars)
+                            std::visit([&](const auto& v){ clone->SetParam(name, v); }, val);
+                        for (const auto& [name, texID] : slotOvr->textures)
+                            if (texID.IsValid())
+                                clone->SetTexture(name, m_resMgr->LoadTexture(texID));
+                    }
                     item.material      = clone.get();
                     item.ownedMaterial = std::move(clone);
                 }
             }
 
+            item.alphaMode        = item.material->GetRenderState().alphaMode;
+            item.doubleSided      = item.material->GetRenderState().doubleSided;
+            // Issue #56: per-entity render-state override (see static path).
+            if (matOverride) {
+                if (matOverride->alphaMode >= 0 &&
+                    item.material->GetType()->usesMaterialParamsSSBO)
+                    item.alphaMode = static_cast<AlphaMode>(matOverride->alphaMode);
+                if (matOverride->doubleSided >= 0)
+                    item.doubleSided = matOverride->doubleSided != 0;
+            }
+            // Issue #101: slot render-state overrides layer after entity-wide.
+            if (slotOvr) {
+                if (slotOvr->alphaMode >= 0 &&
+                    item.material->GetType()->usesMaterialParamsSSBO)
+                    item.alphaMode = static_cast<AlphaMode>(slotOvr->alphaMode);
+                if (slotOvr->doubleSided >= 0)
+                    item.doubleSided = slotOvr->doubleSided != 0;
+            }
             // pipeline is the material's standard pipeline — used for sorting and as
-            // a fallback; GBufferFeature overrides with skinnedPipeline at draw time.
-            item.pipeline         = item.material->GetType()->GetOrCreatePipeline(m_device, gbKey);
+            // a fallback; GBufferFeature overrides with the skinned variant at draw
+            // time. State matches the static path (stencil write, MASK EQUAL).
+            {
+                PipelineRenderState st = item.material->GetType()->DefaultRenderState();
+                st.stencilWriteEnable = true;
+                st.stencilFront = st.stencilBack = kStencilWriteRef1;
+                if (item.doubleSided) st.cullMode = RHI::RHICullMode::None;
+                if (item.alphaMode == AlphaMode::Mask) {
+                    st.depthCompareOp = RHI::RHICompareOp::Equal;
+                    st.depthWrite     = false;
+                }
+                item.pipeline = item.material->GetType()->GetOrCreatePipeline(m_device, gbKey, st);
+            }
             item.pushConstantSize = static_cast<uint32_t>(sizeof(glm::mat4));
 
             m_drawItems.push_back(std::move(item));
@@ -1294,7 +1415,7 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
             RHI::RHITextureDesc d{};
             d.width     = w;
             d.height    = h;
-            d.format    = RHI::RHIFormat::D32F;
+            d.format    = kSceneDepthFormat;
             d.usage     = RHI::RHITextureUsage::DepthStencil
                         | RHI::RHITextureUsage::Sampled;
             d.debugName = "SceneDepth";
@@ -1504,6 +1625,14 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
             handles.hdr = m_ssrFeature->m_outputHandle;
         if (m_taaFeature && f.get() == m_taaFeature && m_taaFeature->m_outputHandle.IsValid())
             handles.taaResolved = m_taaFeature->m_outputHandle;
+        // Issue #56: transparent composite replaces BOTH views of "current color"
+        // (Bloom threshold reads taaResolved, composite/anchors read hdr); the TAA
+        // ping-pong history texture itself stays transparent-free.
+        if (m_forwardTransparentFeature && f.get() == m_forwardTransparentFeature &&
+            m_forwardTransparentFeature->m_outputHandle.IsValid()) {
+            handles.hdr         = m_forwardTransparentFeature->m_outputHandle;
+            handles.taaResolved = m_forwardTransparentFeature->m_outputHandle;
+        }
         if (m_dofFeature && f.get() == m_dofFeature && m_dofFeature->m_outputHandle.IsValid())
             handles.hdr = m_dofFeature->m_outputHandle;
         if (m_motionBlurFeature && f.get() == m_motionBlurFeature && m_motionBlurFeature->m_outputHandle.IsValid())
@@ -1535,10 +1664,10 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
 // ── FrameContext::BindTexture / BindBuffer / FlushBindings ────────────────────
 
 void FrameContext::BindTexture(RHI::RHIDescSetHandle set, uint32_t binding,
-                               RGTextureHandle handle) const
+                               RGTextureHandle handle, bool depthStencilRead) const
 {
     if (!handle.IsValid() || !set.IsValid()) return;
-    m_pendingBindings.push_back({set, binding, handle});
+    m_pendingBindings.push_back({set, binding, handle, depthStencilRead});
 }
 
 void FrameContext::BindBuffer(RHI::RHIDescSetHandle set, uint32_t binding,
@@ -1568,7 +1697,7 @@ void FrameContext::FlushBindings() const
     for (const auto& b : m_pendingBindings) {
         const RHI::RHITextureHandle rhi = rg->GetResolvedHandle(b.handle);
         if (rhi.IsValid())
-            device->WriteDescriptorTexture(b.set, b.binding, rhi);
+            device->WriteDescriptorTexture(b.set, b.binding, rhi, b.depthStencilRead);
     }
     m_pendingBindings.clear();
 
@@ -1666,6 +1795,8 @@ void SceneRenderer::ShadowFeature::AddPasses(SceneRenderer& renderer,
             bool frameSetBound = false;
             for (const auto& item : drawItems) {
                 if (!item.pipeline.IsValid()) continue;
+                // Issue #56: BLEND casts no shadow (not in the shadow map).
+                if (item.alphaMode == AlphaMode::Blend) continue;
                 const RHI::RHIPipelineHandle effectivePipeline =
                     (item.isSkinned && skinnedShadowPipeline.IsValid())
                         ? skinnedShadowPipeline : pipeline;
@@ -1776,6 +1907,136 @@ void SceneRenderer::SkyboxFeature::AddPasses(SceneRenderer& /*renderer*/,
         });
 }
 
+// ── DepthPrepassFeature (Issue #56) ──────────────────────────────────────────
+
+void SceneRenderer::DepthPrepassFeature::OnInit(const FeatureInitContext& ctx)
+{
+    m_maskProgram = ctx.programs->GetGraphics("depth_prepass:mask",
+                        "deferred_geometry", "depth_prepass_mask",
+                        ctx.shaderDir, ctx.engineShaderDir);
+    if (!m_maskProgram)
+        SA_LOG_WARN("DepthPrepassFeature: mask shader load failed — MASK materials render opaque-ish");
+    m_maskSkinnedProgram = ctx.programs->GetGraphics("depth_prepass:mask_skinned",
+                               "deferred_geometry_skinned", "depth_prepass_mask",
+                               ctx.shaderDir, ctx.engineShaderDir);
+}
+
+void SceneRenderer::DepthPrepassFeature::AddPasses(SceneRenderer& renderer,
+                                                    const FrameContext& ctx,
+                                                    const RendererHandles& handles,
+                                                    const entt::registry& reg,
+                                                    uint32_t w, uint32_t h)
+{
+    SA_PROFILE_SCOPE_N("DepthPrepass::AddPasses");
+    if (renderer.m_config.depthPrepassMode == DepthPrepassMode::Full) {
+        static bool warned = false;
+        if (!warned) {
+            SA_LOG_WARN("DepthPrepassMode::Full not implemented yet — falling back to MaskedOnly");
+            warned = true;
+        }
+    }
+
+    bool anyMask = false;
+    for (const DrawItem* it : renderer.m_visibleDrawItems)
+        if (it->alphaMode == AlphaMode::Mask) { anyMask = true; break; }
+
+    AttachmentKey dpKey{};
+    dpKey.colorCount  = 0;
+    dpKey.depthFormat = kSceneDepthFormat;
+
+    PipelineRenderState st{};   // LEQUAL + depthWrite defaults
+    st.stencilWriteEnable = true;
+    st.stencilFront = st.stencilBack = kStencilWriteRef1;
+
+    RHI::RHIPipelineHandle maskPipe, maskPipeDS, maskSkinnedPipe, maskSkinnedPipeDS;
+    if (anyMask && m_maskProgram) {
+        auto stDS = st;
+        stDS.cullMode = RHI::RHICullMode::None;
+        maskPipe   = m_maskProgram->GetOrCreatePipeline(ctx.device, dpKey, st);
+        maskPipeDS = m_maskProgram->GetOrCreatePipeline(ctx.device, dpKey, stDS);
+        if (m_maskSkinnedProgram) {
+            maskSkinnedPipe   = m_maskSkinnedProgram->GetOrCreatePipeline(ctx.device, dpKey, st);
+            maskSkinnedPipeDS = m_maskSkinnedProgram->GetOrCreatePipeline(ctx.device, dpKey, stDS);
+        }
+    }
+
+    const RGTextureHandle rgDepth = handles.depth;
+    const RHI::RHIDescSetHandle frameSet = ctx.frameSet;
+    const entt::registry* regPtr = &reg;
+
+    // Always emitted: the pass owns the frame's depth+stencil clear, so the
+    // GBuffer pass Loads unconditionally (no cross-feature "did prepass run"
+    // state). With zero MASK items this is just a clear.
+    ctx.rg->AddPass("DepthPrepass",
+        [rgDepth](RGPassBuilder& b) { b.WriteDepth(rgDepth); },
+        [&drawItems = renderer.m_visibleDrawItems, regPtr, frameSet,
+         maskPipe, maskPipeDS, maskSkinnedPipe, maskSkinnedPipeDS, rgDepth, w, h,
+         bindlessSet = renderer.m_matMgr->GetTextureHeap().GetDescSet()]
+        (RHI::IRHICommandList& cmd, const RGResources& res)
+        {
+            SA_PROFILE_SCOPE_N("DepthPrepass::Execute");
+            RHI::RHIRenderPassDesc rpDesc{};
+            rpDesc.depthAttachment.texture     = res.Get(rgDepth);
+            rpDesc.depthAttachment.clearOnLoad = true;
+            rpDesc.depthAttachment.clearDepth  = 1.f;
+            rpDesc.hasDepth = true;
+            rpDesc.width    = w;
+            rpDesc.height   = h;
+
+            cmd.BeginRenderPass(rpDesc);
+            cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
+            cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
+
+            RHI::RHIPipelineHandle currentPipeline{};
+            RHI::RHIBufferHandle   currentVB{};
+            RHI::RHIBufferHandle   currentIB{};
+            bool frameSetBound = false;
+
+            for (const DrawItem* itemPtr : drawItems) {
+                const auto& item = *itemPtr;
+                if (item.alphaMode != AlphaMode::Mask) continue;
+                const RHI::RHIPipelineHandle pipe =
+                    item.isSkinned ? (item.doubleSided ? maskSkinnedPipeDS : maskSkinnedPipe)
+                                   : (item.doubleSided ? maskPipeDS       : maskPipe);
+                if (!pipe.IsValid()) continue;
+
+                const auto* wt = regPtr->try_get<WorldTransformComponent>(item.entity);
+                if (!wt) continue;
+                const glm::mat4 world = wt->matrix * item.subLocalTransform;
+
+                if (pipe.index != currentPipeline.index) {
+                    cmd.SetPipeline(pipe);
+                    currentPipeline = pipe;
+                    if (!frameSetBound) {
+                        if (bindlessSet.IsValid())
+                            cmd.SetDescriptorSet(0, bindlessSet);
+                        cmd.SetDescriptorSet(1, frameSet);
+                        frameSetBound = true;
+                    }
+                }
+                // MASK is SSBO-path only (legacy-UBO downgraded at load).
+                cmd.SetDescriptorSet(2, item.material->GetDescSet(),
+                                     std::span<const uint32_t>{&item.materialUboOffset, 1});
+                if (item.isSkinned && item.skinDescSet.IsValid())
+                    cmd.SetDescriptorSet(3, item.skinDescSet);
+                if (item.vertexBuffer.index != currentVB.index) {
+                    cmd.SetVertexBuffer(0, item.vertexBuffer);
+                    currentVB = item.vertexBuffer;
+                }
+                if (item.indexBuffer.index != currentIB.index) {
+                    cmd.SetIndexBuffer(item.indexBuffer);
+                    currentIB = item.indexBuffer;
+                }
+                if (item.pushConstantSize > 0)
+                    cmd.SetPushConstants(&world, item.pushConstantSize,
+                                         RHI::RHIShaderStage::Vertex);
+                cmd.DrawIndexed(item.indexCount, 1, item.firstIndex,
+                                item.vertexOffset, 0);
+            }
+            cmd.EndRenderPass();
+        });
+}
+
 // ── GBufferFeature ────────────────────────────────────────────────────────────
 
 void SceneRenderer::GBufferFeature::OnInit(const FeatureInitContext& ctx)
@@ -1832,11 +2093,23 @@ void SceneRenderer::GBufferFeature::AddPasses(SceneRenderer& renderer,
     gbKey.colorFormats[0] = RHI::RHIFormat::RGBA8_UNORM;
     gbKey.colorFormats[1] = RHI::RHIFormat::RGBA16F;
     gbKey.colorFormats[2] = RHI::RHIFormat::RGBA16F;
-    gbKey.depthFormat     = RHI::RHIFormat::D32F;
+    gbKey.depthFormat     = kSceneDepthFormat;
 
-    RHI::RHIPipelineHandle skinnedPipeline{};
-    if (m_skinnedProgram)
-        skinnedPipeline = m_skinnedProgram->GetOrCreatePipeline(ctx.device, gbKey);
+    // Issue #56: skinned pipeline variants — {opaque LEQUAL/write, MASK EQUAL/
+    // no-write} × {back-cull, double-sided}, all writing stencil=1.
+    RHI::RHIPipelineHandle skinnedPipes[4] = {};
+    if (m_skinnedProgram) {
+        for (int mask = 0; mask < 2; ++mask)
+            for (int ds = 0; ds < 2; ++ds) {
+                PipelineRenderState st{};
+                st.stencilWriteEnable = true;
+                st.stencilFront = st.stencilBack = kStencilWriteRef1;
+                if (mask) { st.depthCompareOp = RHI::RHICompareOp::Equal; st.depthWrite = false; }
+                if (ds)   { st.cullMode = RHI::RHICullMode::None; }
+                skinnedPipes[mask * 2 + ds] =
+                    m_skinnedProgram->GetOrCreatePipeline(ctx.device, gbKey, st);
+            }
+    }
 
     ctx.rg->AddPass("GBuffer",
         [rgRT0, rgRT1, rgRT2, rgDepth](RGPassBuilder& b) {
@@ -1845,7 +2118,7 @@ void SceneRenderer::GBufferFeature::AddPasses(SceneRenderer& renderer,
             b.Write(rgRT2);
             b.WriteDepth(rgDepth);
         },
-        [&drawItems = renderer.m_visibleDrawItems, regPtr, frameSet, skinnedPipeline, w, h,
+        [&drawItems = renderer.m_visibleDrawItems, regPtr, frameSet, skinnedPipes, w, h,
          rgRT0, rgRT1, rgRT2, rgDepth,
          bindlessSet = renderer.m_matMgr->GetTextureHeap().GetDescSet()]
         (RHI::IRHICommandList& cmd, const RGResources& res)
@@ -1860,8 +2133,9 @@ void SceneRenderer::GBufferFeature::AddPasses(SceneRenderer& renderer,
             rpDesc.colorAttachments[2].texture     = res.Get(rgRT2);
             rpDesc.colorAttachments[2].clearOnLoad = true;
             rpDesc.depthAttachment.texture     = res.Get(rgDepth);
-            rpDesc.depthAttachment.clearOnLoad = true;
-            rpDesc.depthAttachment.clearDepth  = 1.f;
+            // Issue #56: DepthPrepass owns the frame's depth+stencil clear —
+            // Load here preserves prepass depth (MASK EQUAL path) and stencil.
+            rpDesc.depthAttachment.clearOnLoad = false;
             rpDesc.hasDepth = true;
             rpDesc.width    = w;
             rpDesc.height   = h;
@@ -1880,9 +2154,14 @@ void SceneRenderer::GBufferFeature::AddPasses(SceneRenderer& renderer,
 
             for (const DrawItem* itemPtr : drawItems) {
                 const auto& item = *itemPtr;
+                // Issue #56: BLEND renders in the forward transparent pass only.
+                if (item.alphaMode == AlphaMode::Blend) continue;
 
+                const int skinnedVariant =
+                    (item.alphaMode == AlphaMode::Mask ? 2 : 0) + (item.doubleSided ? 1 : 0);
                 const RHI::RHIPipelineHandle effectivePipeline =
-                    (item.isSkinned && skinnedPipeline.IsValid()) ? skinnedPipeline : item.pipeline;
+                    (item.isSkinned && skinnedPipes[skinnedVariant].IsValid())
+                        ? skinnedPipes[skinnedVariant] : item.pipeline;
                 if (!effectivePipeline.IsValid()) continue;
 
                 const auto* wt = regPtr->try_get<WorldTransformComponent>(item.entity);
@@ -1974,7 +2253,7 @@ void SceneRenderer::VelocityPrepassFeature::AddPasses(SceneRenderer& renderer,
     AttachmentKey velKey{};
     velKey.colorCount      = 1;
     velKey.colorFormats[0] = RHI::RHIFormat::RG16F;
-    velKey.depthFormat     = RHI::RHIFormat::D32F;
+    velKey.depthFormat     = kSceneDepthFormat;
 
     // depthTest=true (cull occluded fragments), depthWrite=false (don't overwrite
     // GBuffer's depth buffer). Cull mode matches GBuffer (Back).
@@ -2032,6 +2311,8 @@ void SceneRenderer::VelocityPrepassFeature::AddPasses(SceneRenderer& renderer,
 
             for (const DrawItem* itemPtr : drawItems) {
                 const auto& item = *itemPtr;
+                // Issue #56: BLEND writes no velocity (drawn after TAA).
+                if (item.alphaMode == AlphaMode::Blend) continue;
 
                 const RHI::RHIPipelineHandle effective =
                     (item.isSkinned && skinnedPipeline.IsValid()) ? skinnedPipeline : staticPipeline;
@@ -2108,17 +2389,27 @@ void SceneRenderer::DeferredLightingFeature::AddPasses([[maybe_unused]] SceneRen
     ctx.BindTexture(m_gbDescSet, 0, handles.gbufferRT0);
     ctx.BindTexture(m_gbDescSet, 1, handles.gbufferRT1);
     ctx.BindTexture(m_gbDescSet, 2, handles.gbufferRT2);
-    ctx.BindTexture(m_gbDescSet, 3, handles.depth);
+    // Issue #56: depth is simultaneously a read-only stencil attachment during
+    // this pass — descriptor layout must be DEPTH_STENCIL_READ_ONLY.
+    ctx.BindTexture(m_gbDescSet, 3, handles.depth, /*depthStencilRead=*/true);
     ctx.BindTexture(m_gbDescSet, 4, handles.shadowMap);
     ctx.BindTexture(m_gbDescSet, 5, handles.ssaoTex);
 
     AttachmentKey hdrKey{};
     hdrKey.colorCount      = 1;
     hdrKey.colorFormats[0] = RHI::RHIFormat::RGBA16F;
-    hdrKey.depthFormat     = RHI::RHIFormat::Undefined;
+    hdrKey.depthFormat     = kSceneDepthFormat;  // Issue #56: stencil attachment present
 
     // AlphaBlend: alpha=0 from background pixels preserves the skybox written first.
-    const RHI::RHIPipelineHandle pipeline = m_type->GetOrCreatePipeline(ctx.device, hdrKey);
+    // Issue #56: stencil test EQUAL 1 — background / cut-out pixels (stencil 0)
+    // are rejected by fixed function before the lighting fragment runs.
+    PipelineRenderState lightState = m_type->DefaultRenderState();
+    lightState.stencilTestEnable = true;
+    lightState.stencilFront.compareOp = RHI::RHICompareOp::Equal;
+    lightState.stencilFront.reference = 1;
+    lightState.stencilBack = lightState.stencilFront;
+    const RHI::RHIPipelineHandle pipeline =
+        m_type->GetOrCreatePipeline(ctx.device, hdrKey, lightState);
 
     const RHI::RHIDescSetHandle frameSet  = ctx.frameSet;
     const RHI::RHIDescSetHandle gbDescSet = m_gbDescSet;
@@ -2135,18 +2426,24 @@ void SceneRenderer::DeferredLightingFeature::AddPasses([[maybe_unused]] SceneRen
             b.Read(rgRT0);
             b.Read(rgRT1);
             b.Read(rgRT2);
-            b.Read(rgDepth);
+            // Issue #56: depth+stencil read-only attachment (stencil test) with
+            // simultaneous depth sampling — DEPTH_STENCIL_READ_ONLY state.
+            b.ReadDepthStencil(rgDepth);
             b.Read(rgShadowMap);  // triggers layout transition DEPTH_ATTACHMENT → SHADER_READ_ONLY
             b.Read(rgSsaoTex);
             b.Write(rgHdr);       // Skybox → DeferredLighting edge now comes from RG Compile
         },
-        [pipeline, frameSet, gbDescSet, rgHdr, w, h]
+        [pipeline, frameSet, gbDescSet, rgHdr, rgDepth, w, h]
         (RHI::IRHICommandList& cmd, const RGResources& res)
         {
             RHI::RHIRenderPassDesc rpDesc{};
             rpDesc.colorAttachmentCount = 1;
             rpDesc.colorAttachments[0].texture     = res.Get(rgHdr);
             rpDesc.colorAttachments[0].clearOnLoad = false;  // preserve skybox
+            rpDesc.depthAttachment.texture     = res.Get(rgDepth);
+            rpDesc.depthAttachment.clearOnLoad = false;
+            rpDesc.depthAttachment.readOnly    = true;   // Issue #56
+            rpDesc.hasDepth = true;
             rpDesc.width  = w;
             rpDesc.height = h;
 
@@ -2159,6 +2456,209 @@ void SceneRenderer::DeferredLightingFeature::AddPasses([[maybe_unused]] SceneRen
             cmd.Draw(3, 1, 0, 0);
             cmd.EndRenderPass();
         });
+}
+
+// ── ForwardTransparentFeature (Issue #56) ────────────────────────────────────
+
+void SceneRenderer::ForwardTransparentFeature::OnInit(const FeatureInitContext& ctx)
+{
+    m_program = ctx.programs->GetGraphics("forward_transparent:static",
+                    "deferred_geometry", "forward_transparent",
+                    ctx.shaderDir, ctx.engineShaderDir);
+    if (!m_program) {
+        SA_LOG_WARN("ForwardTransparentFeature: shader load failed — BLEND materials invisible");
+        return;
+    }
+    m_skinnedProgram = ctx.programs->GetGraphics("forward_transparent:skinned",
+                           "deferred_geometry_skinned", "forward_transparent",
+                           ctx.shaderDir, ctx.engineShaderDir);
+    m_copyProgram = ctx.programs->GetGraphics("forward_transparent:copy",
+                        "fullscreen_tri", "forward_copy",
+                        ctx.shaderDir, ctx.engineShaderDir);
+    if (m_copyProgram)
+        m_copyDescSet = ctx.device->AllocateDescriptorSet(m_copyProgram->GetMaterialLayout());
+}
+
+void SceneRenderer::ForwardTransparentFeature::AddPasses(SceneRenderer& renderer,
+                                                          const FrameContext& ctx,
+                                                          const RendererHandles& handles,
+                                                          const entt::registry& reg,
+                                                          uint32_t w, uint32_t h)
+{
+    SA_PROFILE_SCOPE_N("ForwardTransparent::AddPasses");
+    m_outputHandle = {};
+    if (!m_program || !m_copyProgram || !m_copyDescSet.IsValid()) return;
+
+    // Collect visible BLEND items with a per-frame view-depth sort key
+    // (clip.w = view-space distance for perspective projections).
+    std::vector<std::pair<float, const DrawItem*>> blendItems;
+    for (const DrawItem* it : renderer.m_visibleDrawItems) {
+        if (it->alphaMode != AlphaMode::Blend) continue;
+        const glm::vec3 c = 0.5f * (it->worldAABBMin + it->worldAABBMax);
+        const glm::vec4 clip = renderer.m_currentViewProj * glm::vec4(c, 1.f);
+        blendItems.emplace_back(clip.w, it);
+    }
+    if (blendItems.empty()) return;
+    std::sort(blendItems.begin(), blendItems.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });  // back-to-front
+
+    // Composite target — fresh transient; the TAA history must stay untouched.
+    // UnorderedAccess: this texture replaces handles.hdr downstream, and the
+    // compute post chain (Bloom composite RMW, Issue #92) binds handles.hdr as
+    // a storage image.
+    RGTextureHandle rgOut;
+    {
+        RHI::RHITextureDesc d{};
+        d.width     = w;
+        d.height    = h;
+        d.format    = RHI::RHIFormat::RGBA16F;
+        d.usage     = RHI::RHITextureUsage::RenderTarget | RHI::RHITextureUsage::Sampled
+                    | RHI::RHITextureUsage::UnorderedAccess;
+        d.debugName = "ForwardHDR";
+        rgOut = ctx.rg->CreateTexture("ForwardHDR", d);
+    }
+
+    // ── Pass 0: copy taaResolved → rgOut ─────────────────────────────────────
+    ctx.BindTexture(m_copyDescSet, 0, handles.taaResolved);
+
+    AttachmentKey copyKey{};
+    copyKey.colorCount      = 1;
+    copyKey.colorFormats[0] = RHI::RHIFormat::RGBA16F;
+    const RHI::RHIPipelineHandle copyPipe = m_copyProgram->GetOrCreatePipeline(
+        ctx.device, copyKey,
+        RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque, RHI::RHITopology::TriangleList,
+        /*depthTest=*/false, /*depthWrite=*/false, /*noVertexInput=*/true);
+
+    const RGTextureHandle rgTaaResolved = handles.taaResolved;
+    const RHI::RHIDescSetHandle copySet = m_copyDescSet;
+    ctx.rg->AddPass("ForwardCopy",
+        [rgTaaResolved, rgOut](RGPassBuilder& b) {
+            b.Read(rgTaaResolved);
+            b.Write(rgOut);
+        },
+        [copyPipe, copySet, rgOut, w, h]
+        (RHI::IRHICommandList& cmd, const RGResources& res)
+        {
+            RHI::RHIRenderPassDesc rpDesc{};
+            rpDesc.colorAttachmentCount = 1;
+            rpDesc.colorAttachments[0].texture     = res.Get(rgOut);
+            rpDesc.colorAttachments[0].clearOnLoad = true;   // transient, fully overwritten
+            rpDesc.width  = w;
+            rpDesc.height = h;
+            cmd.BeginRenderPass(rpDesc);
+            cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
+            cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
+            cmd.SetPipeline(copyPipe);
+            cmd.SetDescriptorSet(2, copySet);
+            cmd.Draw(3, 1, 0, 0);
+            cmd.EndRenderPass();
+        });
+
+    // ── Pass 1: blend transparents onto rgOut (depth read-only) ──────────────
+    AttachmentKey fwdKey{};
+    fwdKey.colorCount      = 1;
+    fwdKey.colorFormats[0] = RHI::RHIFormat::RGBA16F;
+    fwdKey.depthFormat     = kSceneDepthFormat;
+
+    auto makeState = [](bool doubleSided) {
+        PipelineRenderState st{};
+        st.blendMode  = RHI::RHIBlendMode::AlphaBlend;
+        st.depthWrite = false;
+        if (doubleSided) st.cullMode = RHI::RHICullMode::None;
+        return st;
+    };
+    RHI::RHIPipelineHandle pipes[4] = {};  // [skinned*2 + doubleSided]
+    pipes[0] = m_program->GetOrCreatePipeline(ctx.device, fwdKey, makeState(false));
+    pipes[1] = m_program->GetOrCreatePipeline(ctx.device, fwdKey, makeState(true));
+    if (m_skinnedProgram) {
+        pipes[2] = m_skinnedProgram->GetOrCreatePipeline(ctx.device, fwdKey, makeState(false));
+        pipes[3] = m_skinnedProgram->GetOrCreatePipeline(ctx.device, fwdKey, makeState(true));
+    }
+
+    const RGTextureHandle rgDepth = handles.depth;
+    const RHI::RHIDescSetHandle frameSet = ctx.frameSet;
+    const entt::registry* regPtr = &reg;
+
+    ctx.rg->AddPass("ForwardTransparent",
+        [rgOut, rgDepth](RGPassBuilder& b) {
+            // Alpha blending is a RMW of rgOut: declare the Read so Compile builds
+            // the RAW edge from ForwardCopy. Without it this pass has zero reads
+            // (ReadDepthStencil is recorded as a write) → in-degree 0 → Kahn's BFS
+            // hoists it to the frame start, and the whole post chain (AE/Bloom/
+            // Tonemap) then consumes a stale ForwardHDR. Read+Write on the same
+            // texture is barrier-skipped (ordering-only), same as Tonemap→swapchain.
+            b.Read(rgOut);
+            b.Write(rgOut);
+            b.ReadDepthStencil(rgDepth);
+        },
+        [items = std::move(blendItems), regPtr, frameSet, pipes, rgOut, rgDepth, w, h,
+         bindlessSet = renderer.m_matMgr->GetTextureHeap().GetDescSet()]
+        (RHI::IRHICommandList& cmd, const RGResources& res)
+        {
+            SA_PROFILE_SCOPE_N("ForwardTransparent::Execute");
+            RHI::RHIRenderPassDesc rpDesc{};
+            rpDesc.colorAttachmentCount = 1;
+            rpDesc.colorAttachments[0].texture     = res.Get(rgOut);
+            rpDesc.colorAttachments[0].clearOnLoad = false;  // composite over the copy
+            rpDesc.depthAttachment.texture     = res.Get(rgDepth);
+            rpDesc.depthAttachment.clearOnLoad = false;
+            rpDesc.depthAttachment.readOnly    = true;
+            rpDesc.hasDepth = true;
+            rpDesc.width    = w;
+            rpDesc.height   = h;
+
+            cmd.BeginRenderPass(rpDesc);
+            cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
+            cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
+
+            RHI::RHIPipelineHandle currentPipeline{};
+            RHI::RHIBufferHandle   currentVB{};
+            RHI::RHIBufferHandle   currentIB{};
+            bool frameSetBound = false;
+
+            for (const auto& [dist, itemPtr] : items) {
+                const auto& item = *itemPtr;
+                const RHI::RHIPipelineHandle pipe =
+                    pipes[(item.isSkinned ? 2 : 0) + (item.doubleSided ? 1 : 0)];
+                if (!pipe.IsValid()) continue;
+
+                const auto* wt = regPtr->try_get<WorldTransformComponent>(item.entity);
+                if (!wt) continue;
+                const glm::mat4 world = wt->matrix * item.subLocalTransform;
+
+                if (pipe.index != currentPipeline.index) {
+                    cmd.SetPipeline(pipe);
+                    currentPipeline = pipe;
+                    if (!frameSetBound) {
+                        if (bindlessSet.IsValid())
+                            cmd.SetDescriptorSet(0, bindlessSet);
+                        cmd.SetDescriptorSet(1, frameSet);
+                        frameSetBound = true;
+                    }
+                }
+                // BLEND is SSBO-path only (legacy-UBO downgraded at load).
+                cmd.SetDescriptorSet(2, item.material->GetDescSet(),
+                                     std::span<const uint32_t>{&item.materialUboOffset, 1});
+                if (item.isSkinned && item.skinDescSet.IsValid())
+                    cmd.SetDescriptorSet(3, item.skinDescSet);
+                if (item.vertexBuffer.index != currentVB.index) {
+                    cmd.SetVertexBuffer(0, item.vertexBuffer);
+                    currentVB = item.vertexBuffer;
+                }
+                if (item.indexBuffer.index != currentIB.index) {
+                    cmd.SetIndexBuffer(item.indexBuffer);
+                    currentIB = item.indexBuffer;
+                }
+                if (item.pushConstantSize > 0)
+                    cmd.SetPushConstants(&world, item.pushConstantSize,
+                                         RHI::RHIShaderStage::Vertex);
+                cmd.DrawIndexed(item.indexCount, 1, item.firstIndex,
+                                item.vertexOffset, 0);
+            }
+            cmd.EndRenderPass();
+        });
+
+    m_outputHandle = rgOut;
 }
 
 void SceneRenderer::DeferredLightingFeature::ReloadShaders(
@@ -3930,7 +4430,7 @@ void SceneRenderer::DebugOverlayFeature::AddPasses(
     AttachmentKey key{};
     key.colorCount      = 1;
     key.colorFormats[0] = ctx.device->GetSwapchainFormat();
-    key.depthFormat     = RHI::RHIFormat::D32F;
+    key.depthFormat     = kSceneDepthFormat;
 
     // Key for xray pass (no depth attachment).
     AttachmentKey xrayKey{};
@@ -4324,7 +4824,7 @@ void SceneRenderer::InfiniteGridFeature::AddPasses(
     AttachmentKey key{};
     key.colorCount      = 1;
     key.colorFormats[0] = ctx.device->GetSwapchainFormat();
-    key.depthFormat     = RHI::RHIFormat::D32F;
+    key.depthFormat     = kSceneDepthFormat;
 
     const RHI::RHIPipelineHandle pipeline = m_type->GetOrCreatePipeline(ctx.device, key);
     if (!pipeline.IsValid()) return;

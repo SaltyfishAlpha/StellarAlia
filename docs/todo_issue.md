@@ -9,9 +9,9 @@
 
 | 状态 | 数量 | 列表 |
 |---|---|---|
-| ✅ 已完成 | 38 | #29 #45 #46 #47 **#48** #58 #62-#67 #69 #72 #73 #74 #75 **#77** #78 #81 #82 #84 #85 **#86** **#88** **#89** **#90** **#91** **#92** **#94** #56b（旧#71热编译）#71 Phase 2 #71 Phase 3a/3b + Vulkan D/E/F/G/H + Cross-dir Vtx Shader + UI Bug 5 项 |
-| ❌ 未完成（带设计） | 15 | #36 #49 #55 #56 #57 #60 #61 #68 #70 #79 #80 #83 **#87** **#93** **#95** |
-| ❌ 未完成（短条目） | 11 | X-1 ~ X-8 + #54 + #73-A + #23 帧率优化伞 |
+| ✅ 已完成 | 39 | #29 #45 #46 #47 **#48** **#56** #58 #62-#67 #69 #72 #73 #74 #75 **#77** #78 #81 #82 #84 #85 **#86** **#88** **#89** **#90** **#91** **#92** **#94** #56b（旧#71热编译）#71 Phase 2 #71 Phase 3a/3b + Vulkan D/E/F/G/H + Cross-dir Vtx Shader + UI Bug 5 项 |
+| ❌ 未完成（带设计） | 14 | #36 #49 #55 #57 #60 #61 #68 #70 #79 #80 #83 **#87** **#93** **#95** |
+| ❌ 未完成（短条目） | 15 | X-1 ~ X-8 + #54 + #73-A + #23 帧率优化伞 + #96 #97 #98 #100（#56 拆出：Full 档/阴影升级+镂空/.saglsl 透明/OIT；#99 已并入 #101 完成） |
 
 **关键指标**：`ScriptApiFunctionTable::version = 7` — 表明脚本 API 已经过 v2→v3（Phase 2）→v4→v5（Phase 3a InputMap）→v6（#81 Transform 重命名）→v7（#47 PostProcess）共五轮扩展。
 
@@ -23,7 +23,7 @@
 > 顶部"待办issue"段曾有 #23 / #24 编号重复，已重排为唯一编号；原序号在末尾括注，便于追溯。
 
 ### 🔴 中优先级 — 渲染与帧率
-- **#23 帧率优化（伞 issue）** — 子任务覆盖 #55 LOD / #56 Stencil / #57 Meshlet / #61 ShaderVariant
+- **#23 帧率优化（伞 issue）** — 子任务覆盖 #55 LOD / #57 Meshlet / #61 ShaderVariant（#56 Stencil 已完成）
 - **#55 LOD 系统**（详细设计见下）
 - **#61 ShaderVariantCache**（详细设计见下）
 - **#68 ComponentSchema**（详细设计见下）
@@ -38,13 +38,15 @@
 - **#95 SSR Phase D：resolve 参数 UI + profiling**（#89 收尾拆出）
 - **#93 ScreenEffect LDR / Tonemap-compute**（#91 分出；@Out ldr 跨缓冲 + Tonemap→compute C1/C2/C3 待定）
 - **#49 Volumetric Fog**（极低）
-- **#56 Stencil Masking for Deferred Lighting**（详细设计见下）
 - **#57 GPU-Driven Meshlet Cluster Culling**（详细设计见下）
 - **#60 Mesh Split/Merge Cook 工具**（详细设计见下）
 - **#70 GameMode + 项目导出**（详细设计见下）
 
 ### 🟡 中优先级 — 脚本系统延伸
 - **#80 Script Field 复合类型（List<T> + 嵌套 struct）**（依赖 #75，详细设计见下）
+
+### 🟡 中优先级 — 资产/编辑器工作流
+- **#101 导入模型材质工作流：Extract / Remap / 资产级编辑 / per-slot 覆盖**（吸收 #99；详细设计见下）
 
 ### 🟢 极低优先级 / cleanup
 - **#79 `ScriptSystem::CaptureFieldValues` 接口空挂**
@@ -262,323 +264,9 @@ LOD 阈值说明（屏幕覆盖率）：
 
 ---
 
-## Issue #56 — 透明面片支持（Alpha-Test + Forward Blend）+ Deferred Stencil Masking
+## Issue #56 — 透明面片支持（Alpha-Test + Forward Blend）+ Deferred Stencil Masking ✅ DONE
+<!-- 三合一实现：alphaMode/doubleSided 数据管线（.samatc 顶层字段 + material_params_pbr.glsl 共享块 + alphaCutoff 反射参数）；RHI stencil/depthCompareOp + PipelineStateKey 全状态缓存 + D24_S8 双 view；MaskedOnly DepthPrepass（discard 仅预通道，GBuffer EQUAL + early_fragment_tests）+ DeferredLighting stencil==1 只读附件测试；ForwardTransparentFeature（copy-then-blend 防 TAA history 污染，TAA 后/AfterTAA 锚点前，shadow map 进 set=1 b7，PBR 数学抽 pbr_shading.glsl 双编译路径共享）；MaterialOverrideComponent per-entity 覆盖 + Drawer 下拉（undo/redo）。限制→新 issue：Full 档、masked 阴影、.saglsl @AlphaMode、OIT、材质资产级编辑 -->
 
-**优先级：中（原为纯 stencil 小优化；现扩展为透明面片总 issue —— 植物 alpha-test + 玻璃/水 forward blend，并整合 stencil masking）**
-
-> **2026-07-01 扩展**：本 issue 从"Stencil Masking"升级为**透明面片支持伞 issue**（吸收短条目 X-6「透明材质面片（植物等）」）。原 stencil 设计保留为 **Part B-stencil**；新增 alpha-test（Part C）与 forward 半透明（Part D）。三者共享同一套 RHI/深度/stencil 基建，故合并规划。
-
-### 背景与现状（源码核验，2026-07-01）
-
-| 事实 | 位置 |
-|------|------|
-| `RHIBlendMode{Opaque,AlphaBlend,Additive}` 已存在，pipeline blend 已实现 | `IRHIDevice.hpp:21`、`VulkanDevice.cpp:1768` |
-| glTF `alphaMode`/`alphaCutoff`/`doubleSided` 载入 `MaterialData` 后**在 cook 丢弃** | `GltfLoader.cpp:229`→`MeshData.hpp:54-56`；`tools/importer/MaterialImporter.cpp:22-65 CookMaterial` 未写出 |
-| `.samatc`(JSON) 仅含 params+textures | `MaterialManager.cpp:261-349 LoadMaterial` 无 alpha 反序列化 |
-| `MaterialType`/`MaterialTypeDesc` 的 `blendMode`/`cullMode` 硬编码 Opaque/Back | `MaterialType.hpp:77-82`、`MaterialManager.hpp:27-37` |
-| `DrawItem` 无 alpha/blend/doubleSided 字段 | `SceneRenderer.hpp:220-245` |
-| `deferred_geometry.frag` 无 discard；MaterialParams SSBO=set2、bindless globalTex=set0 | `assets/shaders/deferred_geometry.frag` |
-| 纯延迟管线，**无 forward/透明 pass**；DrawItem 排序仅按 pipeline+VB（无 blend 分组） | `SceneRenderer.cpp:989` |
-| `RHIPipelineDesc` 深度比较**硬编码 `LEQUAL`**，无 `depthCompareOp` 字段 | `VulkanDevice.cpp:1766` |
-| 深度格式 `D32F` | `SceneRenderer.cpp:758 gbKey.depthFormat` |
-| Descriptor set 约定（#72 后）：set0=bindless heap，set1=FrameUniforms+lights+IBL+LTC+shadowMatrix，set2=MaterialParams SSBO / GBuffer inputs，set3=skin | agent 核验 |
-| pass 顺序：Shadow→Skybox→GBuffer→VelocityPrepass→SSAO→DeferredLighting→SSR→SelectionMask→TAA→AutoExposure→Bloom→DoF→MotionBlur→Tonemap→PostFX→… | `architecture.md §Built-in Render Features` |
-| forward 透明可 **100% 复用 set0/set1**（相机/光源/阴影矩阵/IBL/LTC 全在 FrameUniforms），无需改 `FrameUniforms` | `FrameUniforms.hpp:11-36`、agent 核验 |
-
-### 总目标
-
-1. **Alpha-test（MASK，植物/树叶/铁丝网）**：镂空正确显示；用 **depth-prepass + GBuffer EQUAL 主通道**彻底解决 `discard` 导致的 early-Z 失效（现代引擎标准解），而非在 GBuffer frag 里裸 `discard`。
-2. **Forward 半透明（BLEND，玻璃/水/粒子面片）**：新增 forward 透明 pass，per-object back-to-front 排序，复用延迟光照着色数学，alpha-blend 叠加进已点亮 HDR。
-3. **Stencil masking（原 #56）**：depth-prepass / GBuffer 向 stencil 写 1，DeferredLighting 仅处理 stencil==1，背景与镂空区在固定功能阶段被拒绝。三者天然协同——prepass 写 stencil 即为 masking 数据源。
-
-### 总体架构（新 pass 顺序）
-
-```
-Shadow → Skybox
-  → [新] DepthPrepass        // opaque+mask 深度专用；写 depth + stencil=1；mask 采 albedo.a 做 discard
-  → GBuffer                  // depthCompareOp=EQUAL, depthWrite=OFF；零 overdraw，无 discard
-  → VelocityPrepass → SSAO
-  → DeferredLighting         // stencilTest==1；背景/镂空固定功能拒绝
-  → SSR → SelectionMask → TAA
-  → [新] ForwardTransparent  // BLEND 物体，back-to-front，depthTest LEQUAL / depthWrite OFF，alpha blend
-  → Bloom → DoF → MotionBlur → Tonemap → PostFX → …
-```
-
-关键点：`discard` 只出现在**廉价的 DepthPrepass mask frag**（一次 albedo.a 取样），昂贵的 GBuffer PBR 打包 frag 走 `depthCompareOp=EQUAL` + `early_fragment_tests`，被遮挡/被裁片元在着色前即被 early-Z 拒绝 → 从根上消除 discard 的 early-Z 失效与植被 overdraw；GBuffer frag 因此**无需 discard 变体**。
-
-### 设计
-
-#### Part A — 数据管线打通（alphaMode / alphaCutoff / doubleSided）
-
-链路：`MaterialData`(已有) → `CookMaterial` 写出 → `.samatc` → `LoadMaterial` 反序列化 → `MaterialInstance` 携带 → `BuildDrawList` 分类填 DrawItem。
-
-```cpp
-// 分类枚举（新，放 src/function/material/ 或 RHITypes 附近）
-enum class AlphaMode : uint8_t { Opaque = 0, Mask = 1, Blend = 2 };
-
-// MaterialImporter.cpp CookMaterial — 追加写出
-root["alphaMode"]   = mat.alphaMode;    // "OPAQUE"|"MASK"|"BLEND"
-root["alphaCutoff"] = mat.alphaCutoff;
-root["doubleSided"] = mat.doubleSided;
-
-// MaterialInstance 新增运行时渲染状态（per-instance，覆盖 type 默认）
-struct MaterialRenderState {
-    AlphaMode alphaMode   = AlphaMode::Opaque;
-    float     alphaCutoff = 0.5f;
-    bool      doubleSided = false;
-};
-// LoadMaterial 读 JSON 填 MaterialInstance::m_renderState；
-// alphaCutoff 同时进 MaterialParams SSBO（DepthPrepass mask frag discard 用）
-
-// DrawItem 扩展（SceneRenderer.hpp:220）
-AlphaMode alphaMode   = AlphaMode::Opaque;   // BuildDrawList 从 material 读
-bool      doubleSided = false;
-float     cameraDist  = 0.f;                 // ForwardTransparent 排序键（BLEND）
-```
-
-> `alphaCutoff` 需进 MaterialParams SSBO（尾部追加 float，保持 std430 对齐），`deferred_geometry.frag` 与新 prepass/forward frag 的 SSBO 布局同步。向后兼容：旧 `.samatc` 无 `alphaMode` 字段时默认 `"OPAQUE"`；旧 cook 需 Reimport 才带新字段（无需强制，缺失即 Opaque）。
-
-#### Part B-rhi — RHI 扩展（depthCompareOp + 深度格式 + pipeline state key）
-
-在原 stencil 枚举基础上，`RHIPipelineDesc` 追加深度比较函数字段：
-
-```cpp
-// IRHIDevice.hpp
-RHICompareOp depthCompareOp = RHICompareOp::LessOrEqual;  // 现硬编码 LEQUAL；GBuffer EQUAL 主通道需要
-```
-
-`VulkanDevice::CreatePipeline` 把 `ds.depthCompareOp = ToVkCompareOp(desc.depthCompareOp)`（替换 `VulkanDevice.cpp:1766` 写死的 `VK_COMPARE_OP_LESS_OR_EQUAL`）。`RHICompareOp` 与下方 stencil 设计共用同一枚举。
-
-**Pipeline state cache key 扩展**（关键）：当前 `ShaderProgram` 仅以 `AttachmentKey`(color/depth 格式) 缓存 pipeline。为支持同一 shader 的 {Opaque/Mask/Blend}×{单面/双面}×{EQUAL/LEQUAL}×{depthWrite on/off}×{stencil 配置} 多态 pipeline，需把渲染状态并入 key：
-
-```cpp
-struct PipelineStateKey {                 // 取代/扩展 AttachmentKey 作为 pipeline map key
-    AttachmentKey  attachments;
-    RHICullMode    cullMode;
-    RHIBlendMode   blendMode;
-    RHICompareOp   depthCompareOp;
-    bool           depthWrite;
-    uint32_t       stencilBits;           // 打包 stencilTest/Write/ref/op（见 Part B-stencil）
-};
-// MaterialType::GetOrCreatePipeline(device, PipelineStateKey)
-// BuildDrawList 按 DrawItem.MaterialRenderState 组装 key 取对应 pipeline
-```
-
-以下为原 **stencil** 具体改动（Part B-stencil，depth 格式 `D32F → D24_S8`）：
-
-#### 改动链
-
-```
-深度格式: D32F → D24_S8（stencil 通道已有 RHIFormat 定义，barrier 逻辑已正确）
-
-RHIPipelineDesc 扩展:
-  + stencilFormat, stencilTestEnable, stencilWriteEnable
-  + RHIStencilOpState front/back（failOp/passOp/compareOp/reference/masks）
-
-VulkanDevice::CreatePipeline:
-  + ds.stencilTestEnable = true (GBuffer 写; Lighting 读)
-  + renderingCI.stencilAttachmentFormat = ToVkFormat(desc.stencilFormat)
-
-ToVkImageLayout(DepthWrite):
-  当前返回 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL（depth-only）
-  → 改为 VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL（兼容 D32F 和 D24_S8）
-
-VulkanCommandList::BeginRenderPass depthAttachment.imageLayout:
-  同上，改为 VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-```
-
-#### RHIPipelineDesc / IRHIDevice.hpp 扩展
-
-```cpp
-// 新增枚举（IRHIDevice.hpp）
-enum class RHIStencilOp  : uint8_t { Keep, Zero, Replace, IncrClamp, DecrClamp,
-                                      Invert, IncrWrap, DecrWrap };
-enum class RHICompareOp  : uint8_t { Never, Less, Equal, LessOrEqual, Greater,
-                                      NotEqual, GreaterOrEqual, Always };
-
-struct RHIStencilOpState {
-    RHIStencilOp failOp     = RHIStencilOp::Keep;
-    RHIStencilOp passOp     = RHIStencilOp::Keep;
-    RHICompareOp compareOp  = RHICompareOp::Always;
-    uint8_t      reference    = 0;
-    uint8_t      compareMask  = 0xFF;
-    uint8_t      writeMask    = 0xFF;
-};
-
-struct RHIPipelineDesc {
-    // ... 现有字段不变 ...
-    RHIFormat         stencilFormat      = RHIFormat::Undefined; // Undefined = 无模板
-    bool              stencilTestEnable  = false;
-    bool              stencilWriteEnable = false;
-    RHIStencilOpState stencilFront;
-    RHIStencilOpState stencilBack;
-};
-```
-
-#### GBuffer pipeline 配置（`SceneRenderer.cpp` GBufferFeature::OnInit）
-
-```cpp
-pipelineDesc.stencilFormat      = RHIFormat::D24_S8;
-pipelineDesc.stencilWriteEnable = true;
-pipelineDesc.stencilFront = {
-    .passOp    = RHIStencilOp::Replace,
-    .compareOp = RHICompareOp::Always,
-    .reference = 1
-};
-```
-
-#### DeferredLighting pipeline 配置
-
-```cpp
-pipelineDesc.depthTest           = false;
-pipelineDesc.depthWrite          = false;
-pipelineDesc.stencilFormat       = RHIFormat::D24_S8;
-pipelineDesc.stencilTestEnable   = true;
-pipelineDesc.stencilFront = {
-    .compareOp = RHICompareOp::Equal,
-    .reference = 1
-};
-```
-
-#### Part C — Alpha-Test（MASK）：两档 DepthPrepassMode（对齐 UE `r.EarlyZPass`）
-
-**不做裸 discard**：在延迟 GBuffer 里直接 `discard` 会使 early-Z 退化到 late-Z、植被 overdraw 全额付费——没有现代引擎把它作为 masked 材质的实际路径，故不设该档。现实最低档就是 **MaskedOnly prepass**（UE `r.EarlyZPass` 亦以 masked prepass 为常态）。做成 `RendererConfig` 的运行时模式枚举：
-
-```cpp
-// RendererConfig 新增
-enum class DepthPrepassMode : uint8_t {
-    MaskedOnly,  // 默认：仅 MASK 走预通道（根治 discard 的 early-Z 失效）；opaque 仍直进 GBuffer
-    Full,        // 优化档：opaque+mask 全走预通道；GBuffer 全 EQUAL/depthWrite off，零 overdraw + stencil 统一
-};
-DepthPrepassMode depthPrepassMode = DepthPrepassMode::MaskedOnly;  // 默认；profiling 后可升 Full
-```
-
-两档行为对照：
-
-| 模式 | 预通道内容 | GBuffer 深度状态 | MASK 处理 | stencil 来源 | 顶点成本 |
-|------|-----------|-----------------|-----------|-------------|---------|
-| **MaskedOnly**（默认，先实现） | 仅 MASK 写 depth+stencil | opaque=LEQUAL/write；MASK=EQUAL/no-write | prepass discard；GBuffer 无 discard | opaque=GBuffer 写，MASK=prepass 写 | opaque ×1，MASK ×2 |
-| **Full**（后续优化） | opaque+mask 写 depth+stencil | 全 EQUAL, depthWrite off | prepass discard；GBuffer 无 discard | 全 prepass 写 | ×2 |
-
-`DepthPrepassFeature`（仿 `ShadowFeature` depth-only + `VelocityPrepassFeature` test-only）按模式决定塞哪些 DrawItem 进预通道 draw 列表；`GBufferFeature` 按模式对 opaque/mask 分别选 `depthCompareOp`/`depthWrite`。
-
-```
-DepthPrepass（depth+stencil 附件，MaskedOnly 只画 MASK / Full 画 opaque+mask）
-  frag=空(opaque, 仅 Full 档) / 采 albedo.a discard(mask)；stencil Replace=1；双面→cullMode None
-→ GBuffer（同一 depth+stencil 附件；已被 prepass 写过的几何走 EQUAL/depthWrite off；否则 LEQUAL/write）
-  MASK 几何 EQUAL + early_fragment_tests → 昂贵 PBR 打包 frag 只在最终可见像素运行，无 discard
-```
-
-**为何根治 early-Z**：`discard` 只在 prepass 的**一次 albedo.a 取样** frag 发生（late-Z 代价压到最低）；GBuffer 里 MASK 几何无 discard、不写深度 → early-Z EQUAL 在着色前拒绝被遮挡/被裁片元。这是 UE5 / Doom-2016 植被/masked 材质标准路径。
-
-**着色器**：
-- `depth_prepass.vert`（= `deferred_geometry.vert` 复用，输出 clip pos + uv）；skinned = `depth_prepass_skinned.vert`（复用骨骼路径 set3）
-- `depth_prepass_opaque.frag`（空 `void main(){}`，仅 Full 档用）
-- `depth_prepass_mask.frag`（读 set2 `t_BaseColor_Idx`+`alphaCutoff`，`if (a < cutoff) discard;`）
-- `deferred_geometry.frag` **不变**（两档均无需在 GBuffer 里 discard/加 cutout 变体）
-
-**VelocityPrepass 兼容**：其 `depthTest=true/depthWrite=false`(LEQUAL) 对已填充深度仍成立（可见片元深度==存储值），两档均无需改动。
-
-#### Part D — Forward 半透明（BLEND）
-
-新增 `ForwardTransparentFeature`，插在 `TAAFeature` 之后、`BloomFeature` 之前：
-
-```cpp
-class ForwardTransparentFeature final : public RenderFeature {
-    // OnInit: 注册 forward_transparent 程序（ProgramCache），set0/1 复用，set2=MaterialParams SSBO，set3=skin
-    // AddPasses:
-    //   1. 收集 alphaMode==Blend 的 DrawItem（BuildDrawList 已分好类）
-    //   2. 按 cameraDist 降序排序（back-to-front）
-    //   3. 单 pass：color=当前已解析 HDR(loadOp Load), depth=opaque 深度(只读测试)
-    //      pipeline: blendMode=AlphaBlend, depthCompareOp=LessOrEqual, depthWrite=OFF,
-    //                cullMode= doubleSided?None:Back, stencilTest=off
-    //   4. 逐 draw 绑 set0(bindless)/set1(frame)/set2(material)/[set3 skin]，DrawIndexed
-    ShaderProgram* m_program = nullptr;
-    ShaderProgram* m_skinnedProgram = nullptr;
-};
-```
-
-**着色器 `forward_transparent.frag`**：把 `deferred_geometry.frag` 的材质取样 + `deferred_lighting.frag` 的着色数学（direct 光照循环 + ShadowFactor PCF + IBL SH 漫反射 + split-sum 镜面）合并成单一前向 frag，输出 `vec4(color, albedo.a)`。着色代码可 `#include` 抽出的公共 `.glsl`（建议把 lighting 数学从 `deferred_lighting.frag` 提取到 `pbr_shading.glsl` 供两处共享，避免复制）。顶点 = `deferred_geometry.vert` 复用。
-
-**HDR handle 衔接**（关键集成点，仿 SSR/DoF 的 `m_outputHandle` 重定向）：透明 pass 需把半透明合成到 **TAA 已解析的不透明色**上，并让 Bloom 及后续都看到结果。实现：在 `handles.taaResolved`（=TAA 输出）上原地 `Load` 混合，然后 `handles.hdr = handles.taaResolved`；因 Bloom threshold 读 `taaResolved`、composite 读写 `hdr`，二者需指向同一合成结果——实现时按现有 feature 循环的 handle 重定向逐一核验（`SceneRenderer.cpp:1486-1500`）。
-
-**放 TAA 之后而非之前**：透明物无速度写入（不在 VelocityPrepass），置于 TAA 前会被历史重投影拖影；置于 TAA 后符合 UE translucency 惯例。代价：透明物不参与 TAA 抗锯齿、且不写深度 → DoF/MotionBlur 对其不精确（主流引擎同样取舍，可接受）。
-
-#### Part E — 编辑器 / 序列化
-
-- `MaterialData`→`.samatc` 已在 Part A；`SceneSerializer` 无需改（alpha 属于材质资产非场景）。
-- 编辑器材质 Inspector（若有材质编辑面板）暴露 alphaMode 下拉 + alphaCutoff slider + doubleSided 勾选；接 #68 ComponentSchema 的 Enum/Slider/Bool 字段类型。
-- `PerformancePanel`：DepthPrepass / ForwardTransparent 耗时；透明 draw 数量。
-
-### 实施步骤
-
-**Part A — 数据管线（可独立验证：Reimport 后 .samatc 含新字段）**
-- [ ] A1. `tools/importer/MaterialImporter.cpp CookMaterial` — 写出 `alphaMode`/`alphaCutoff`/`doubleSided`
-- [ ] A2. `MaterialInstance`/`MaterialType` — 新增 `MaterialRenderState`（alphaMode/cutoff/doubleSided）；`AlphaMode` 枚举
-- [ ] A3. `MaterialManager::LoadMaterial` — 反序列化上述字段填 `m_renderState`；`alphaCutoff` 进 MaterialParams SSBO
-- [ ] A4. `MeshData.hpp`/`deferred_geometry.frag` — MaterialParams SSBO 尾部加 `float alphaCutoff`（std430 对齐）
-- [ ] A5. `SceneRenderer.hpp DrawItem` — 加 `alphaMode`/`doubleSided`/`cameraDist`；`BuildDrawList` 从 material 填充
-
-**Part B — RHI（可独立验证：现有场景在 D24_S8 + 新 pipeline key 下渲染无回归）**
-- [ ] B1. `IRHIDevice.hpp` — `RHIStencilOp`/`RHICompareOp` 枚举 + `RHIStencilOpState`；`RHIPipelineDesc` 加 stencil 字段 + `depthCompareOp`
-- [ ] B2. `VulkanUtils.cpp` — `ToVkImageLayout(DepthWrite)` → `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`；新增 `ToVkCompareOp`/`ToVkStencilOp`
-- [ ] B3. `VulkanCommandList.cpp BeginRenderPass` — 深度附件 imageLayout 同步 `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`；支持 stencil clear/load
-- [ ] B4. `VulkanDevice.cpp CreatePipeline` — `ds.depthCompareOp=ToVkCompareOp(...)`（替换写死 LEQUAL）；填 stencil；`renderingCI.stencilAttachmentFormat`
-- [ ] B5. `ShaderProgram` pipeline cache — `AttachmentKey` → `PipelineStateKey`（含 cull/blend/depthCompareOp/depthWrite/stencil）；`GetOrCreatePipeline` 签名更新
-- [ ] B6. `SceneRenderer.cpp` — 深度纹理格式 `D32F → D24_S8`（gbKey + m_rgDepth）
-
-**Part C — Alpha-Test / MaskedOnly 档（先实现；可独立验证：植物镂空正确 + RenderDoc 确认 MASK 几何 GBuffer 无 discard/early-Z EQUAL 生效）**
-- [ ] C1. shaders — `depth_prepass.vert`(+skinned)、`depth_prepass_mask.frag`（`depth_prepass_opaque.frag` 留待 Full 档）
-- [ ] C2. `DepthPrepassFeature`（OnInit 注册程序 + skinDescLayout；AddPasses 仅画 MASK，写 depth+stencil=1，双面 cullMode None）
-- [ ] C3. `SceneRenderer::Init` — 在 GBuffer 之前插入 DepthPrepassFeature；`RendererConfig::depthPrepassMode` 默认 MaskedOnly
-- [ ] C4. `GBufferFeature` — MASK 几何 pipeline 用 `depthCompareOp=EQUAL, depthWrite=OFF` + `early_fragment_tests`；opaque 几何仍 `LEQUAL, depthWrite on`；depth/stencil loadOp=Load（保留 prepass 写入）
-- [ ] C5. `DeferredLightingFeature` — pipeline `stencilTestEnable=true, compareOp=Equal, reference=1`（原 stencil 设计）；opaque GBuffer 亦写 stencil=1
-- [ ] C6. BuildDrawList — 按 alphaMode/doubleSided 选 prepass 与 GBuffer 的 pipeline 变体
-
-**Part C-Full — Full 档（后续优化，可选；可独立验证：RenderDoc 确认 GBuffer 全场零 overdraw）**
-- [ ] CF1. `depth_prepass_opaque.frag`（空 frag）；DepthPrepassFeature 在 Full 档追加 opaque draw
-- [ ] CF2. `GBufferFeature` — Full 档全几何 `EQUAL/depthWrite off`，depth loadOp=Load；MaskedOnly/Full 分支切换
-
-**Part D — Forward 半透明（可独立验证：玻璃/水面片正确混合、被不透明遮挡）**
-- [ ] D1. 抽 `deferred_lighting.frag` 光照数学 → `assets/shaders/pbr_shading.glsl`（供延迟与前向共享）
-- [ ] D2. shaders — `forward_transparent.vert`(复用 deferred_geometry.vert)(+skinned)、`forward_transparent.frag`
-- [ ] D3. `ForwardTransparentFeature`（收集 BLEND + back-to-front 排序 + 单 pass forward 着色）
-- [ ] D4. `SceneRenderer::Init` — 在 TAAFeature 之后、BloomFeature 之前插入
-- [ ] D5. HDR handle 衔接 — 透明合成结果重定向 `handles.hdr`/`taaResolved`；核验 `SceneRenderer.cpp:1486-1500` 循环
-- [ ] D6. BuildDrawList — BLEND 物体不进 GBuffer/prepass draw 列表，单列进透明列表
-
-**Part E — 编辑器 / 收尾**
-- [ ] E1. 材质 Inspector — alphaMode 下拉 / alphaCutoff slider / doubleSided 勾选
-- [ ] E2. `PerformancePanel` — DepthPrepass / ForwardTransparent 耗时 + 透明 draw 计数
-- [ ] E3. demo_project — 加植物(MASK) + 玻璃(BLEND) 验证资产
-- [ ] E4. 验证（RenderDoc）：GBuffer 阶段无 discard、early-Z EQUAL 生效；lighting 背景/镂空无 fragment 调用；透明排序正确
-
-### 边界情况与约束
-
-| 场景 | 处理 |
-|------|------|
-| `D24_S8` 驱动支持 | RTX 3070 必支持；`VkFormatProperties::optimalTilingFeatures` 含 `DEPTH_STENCIL_ATTACHMENT_BIT`；否则回退 `D32F_S8` |
-| `D32F → D24_S8` 精度 | D24 精度略降；Sponza 规模不明显；如需保精度用 `D32F_S8`（多占 stencil 平面显存） |
-| DepthPrepass 顶点成本 | 默认 MaskedOnly：仅 MASK 几何 ×2 顶点（植被通常占比小），opaque 单遍。Full 档 opaque 亦 ×2，换 GBuffer 全场零 overdraw + 统一 stencil，profiling 后再升档 |
-| GBuffer EQUAL 深度必须逐位相等 | prepass 与 GBuffer 用**同一 vert shader + 同一 jitter VP**，保证深度 bit-exact；skinned 用同一骨骼矩阵 |
-| 透明物排序 | per-object 质心距离排序，穿插/自重叠仍有错误（延后 #OIT/WBOIT，见不做） |
-| 透明物无深度/速度 | 不写深度 → DoF/MotionBlur 不精确；不在 VelocityPrepass → 置 TAA 后避免拖影 |
-| 双面材质 | doubleSided → cullMode=None（prepass + GBuffer + forward 三处一致） |
-| 自定义 shading model | 所有 GBuffer MaterialType（PBR + 自定义）pipeline 均需 EQUAL/depthWrite off + stencil；prepass 用统一 depth-only 程序 |
-| ShadowFeature | shadow pipeline 无颜色/stencil 附件，无需改 |
-| 向后兼容 | `RHIPipelineDesc` 默认 `stencilTestEnable=false`/`depthCompareOp=LEQUAL`/`depthWrite=true`，现有 pipeline 行为不变；旧 `.samatc` 缺 alphaMode 视为 Opaque |
-| Reimport | `.samatc` 格式加字段，需 Reimport 才带 alpha（缺失即 Opaque，非破坏性） |
-
-**不做：** OIT / WBOIT / per-pixel linked-list（重叠透明穿插留后续独立 issue）；多层 stencil 值（只 0/1）；物体 ID 写 stencil；stencil shadow volumes；alpha-to-coverage（延迟单采样不适用）；透明物投射/接收精确阴影（初版透明不写 shadow map）。
-
-### 受益 issues
-
-- **#23 帧率优化**：大背景场景 Deferred Lighting 省 15–30%（stencil）；植被 GBuffer overdraw 归零（EQUAL 主通道）
-- **X-6 透明材质面片（植物等）** — 本 issue 直接吸收并实现
-- **#61 ShaderVariantCache**：alpha-cutout 从 GBuffer 变体位移除（改由 prepass 处理），变体系统更简洁
-- **#57 Meshlet**：depth-prepass 亦可作为 Hi-Z 遮挡剔除的深度来源
-
----
 
 ## Issue #57 — GPU-Driven Meshlet Cluster Culling
 
@@ -2485,3 +2173,184 @@ Phase 1 必须先做。Phase 2-7 中 P6 / P7 可与 P3-P5 并行（只要 Phase 
 - **PostProcess 参数暴露 + 序列化**：把当前硬编码的 SSR 去噪参数做成可调 —— resolve 空间半径、temporal 自适应计数上限(现 24)、方差裁剪 K(现 1.5)、每帧采样数(现 8-spp)。经 `PostProcessSettings` + `SceneSerializer` 双向 + `PostProcessPanel` UI（对齐现有 ssr* 字段模式）。
 - **性能 profiling**：8-spp × 5 pass 的实测开销（Tracy scope），与 #48 对比；按需给采样数/半径提供质量档位（低/中/高）。
 - **可选画质增强**：temporal 的 miss-帧 conf 兜底（防罕见闪烁）；neighborhood clamp 对移动反射物体的 ghosting 进一步调优；half-res trace + full-res resolve 省带宽。
+
+---
+
+## Issue #96 — DepthPrepassMode::Full 档（#56 拆出）
+
+**优先级：低（profiling 后再定；MaskedOnly 已根治 discard early-Z）**
+
+#56 的 CF1/CF2：`depth_prepass_opaque.frag`（空 frag）+ DepthPrepassFeature Full 档画 opaque+mask、GBuffer 全几何 EQUAL/depthWrite off → 全场零 overdraw + stencil 统一预写。`RendererConfig::depthPrepassMode` 枚举与 Full 回退警告已就位，只差两个实现点。顶点成本 ×2，需 Sponza 级场景 profiling 证明收益。
+
+---
+
+## Issue #97 — 阴影架构升级（CSM 级联 / VSM 方向）+ Masked 镂空阴影（合并 #56 拆出项）
+
+**优先级：中（现状=单张 2048 正交全场景 shadow map，远景精度与大场景覆盖都是瓶颈；masked 阴影实心是 #56 已知限制）**
+
+两件事合并做——镂空阴影的 pipeline 变体应建立在升级后的阴影 pass 结构上，避免在旧单图路径上做一遍再迁移：
+
+1. **架构升级**：单张 ortho map → **CSM 级联**（3-4 级，per-cascade 视锥拟合 + stable snapping 防闪烁；`lightSpaceMatrix` → 数组进 FrameUniforms，PCF 采样按深度选级）。VSM（虚拟化 shadow map，UE5 式 page table + 按需光栅化）列为远期方向，本 issue 只做 CSM。<!-- 用户提法为"VCM"，按 CSM/VSM 理解；实施前确认 -->
+2. **Masked 镂空阴影**（原 #97 内容）：`shadow_mask.frag`（include `material_params_pbr.glsl`，采 albedo.a discard，同 `depth_prepass_mask.frag` 模式）+ ShadowFeature 按 `item.alphaMode==Mask` 选 pipeline 变体（PipelineStateKey 已支持）+ shadow pass 补绑 set=0 bindless / set=2 材质（现不绑）。
+3. 复用基建：#56 的 `PipelineRenderState` 变体、set=1 binding=7 阴影采样入口（CSM 后变数组或 atlas）。
+
+---
+
+## Issue #98 — .saglsl 自定义材质 Mask/Blend 支持（#56 明确不做项）
+
+**优先级：低（等实际需求）**
+
+自定义 `.saglsl`（legacy UBO、任意 set=2 布局、专有 gbuffer frag）无法走 #56 的共享 prepass/forward frag。方案方向：新增 `@AlphaMode Mask|Blend` / `@AlphaCutoff` 注解，cook 从 gbuffer 段落生成 `<stem>.prepass.frag`（输出剥离 + cutoff discard）与 `<stem>.forward.frag`（gbuffer 采样 + 调用该模型 lighting 段落）。属独立 shader cook 扩展；现状 legacy UBO 材质标 Mask/Blend 会降级 Opaque + 警告。
+
+---
+
+## Issue #99 — 材质资产级编辑 ✅ 并入 #101（已实现）
+<!-- 与 #101（导入模型材质工作流）重复，#101 已吸收并实现：AssetsPanel::ExtractMaterials（mat_remap_<idx> .sameta 表）+ 可编辑 .samat Inspector（render state combos，AssetInspectors.hpp:31）。不再单独实施。 -->
+
+---
+
+## Issue #100 — 透明穿插正确性：OIT / WBOIT（#56 明确不做项）
+
+**优先级：低**
+
+#56 的 BLEND 为 per-object 质心 back-to-front 排序，互相穿插/自重叠的透明面片混合顺序仍会出错。候选：Weighted Blended OIT（单 pass 近似，最低成本）或 per-pixel linked list（精确，显存重）。依赖 #56 的 forward pass 与 PipelineStateKey 基建。
+
+---
+
+## Issue #101 — 导入模型材质工作流：Extract / Remap / 资产级编辑 / per-slot 覆盖
+
+**优先级：中（用户实际痛点：导入模型材质参数不可调；多材质大 mesh 工作流不可用）**
+**吸收 #99（材质资产级编辑）为本 issue 的 Step 7；#99 不再单独实施。**
+
+### 现状核验（2026-07-03 源码调研）
+
+**已存在的机制**（"多材质 mesh"的渲染与槽位基建其实是齐全的）：
+- `CookedSubMesh::defaultMaterialID`（v4，`src/resource/cook/CookedMesh.hpp:29`）— 每个 glTF primitive 一个 submesh，内嵌派生材质 UUID（`DeriveMaterialID(fileId, matIndex)`，`tools/importer/MaterialImporter.cpp:12`）
+- `MeshRendererComponent::materialSlots[]`（`Components.hpp:59`）— per-submesh 材质替换，`BuildDrawList` 三层 fallback：slot → defaultMaterialID → 全局默认（`SceneRenderer.cpp:814`）
+- `MeshRendererDrawer` 槽位 UI + `SceneSerializer` "materials" 数组 + 脚本 `MeshRenderer_SetSlotUUID(entity, slot, uuid)` 均已就位
+
+**四个缺口**（两个用户痛点的真正所在）：
+| # | 缺口 | 后果 |
+|---|------|------|
+| A | 导入材质 = cook_cache 里的派生 UUID `.samatc`（cook 产物；`CookMaterial` 文件存在即跳过），无 `.sameta`、不进 AssetRegistry、AssetsPanel 里**不可见**，MaterialAssetInspector（`editor/ui/AssetInspectors.cpp:74`）**只读** | 调参数唯一途径 = 改 DCC 源文件重导 |
+| B | 材质名断链：`.samesh` 不存材质名、`.samatc` 无 `name` 字段（`mat.name` 只打进 cook log） | 槽位 UI 只有裸 UUID，多材质模型（Sponza 级 25 槽）无法辨认哪个槽是哪个材质 |
+| C | 没有"从导入材质创建可编辑 `.samat`"的入口（`.samat` 目前只能手写 JSON） | `materialSlots[]` 机制空转，等于没有 |
+| D | `MaterialOverrideComponent` 整-entity 作用域（scalars/textures 作用于全部 submesh） | 无法只调某一个 submesh 的参数 |
+
+### 现代引擎对照
+
+| 引擎 | 导入材质 | 多材质 mesh | 实例覆盖 |
+|------|---------|------------|---------|
+| Unity | Model Importer → Materials tab：默认嵌入只读；**Extract Materials** 生成 `.mat` 资产；**Remapped Materials 表**存 importer 元数据 | `MeshRenderer.sharedMaterials` per-submesh | MaterialPropertyBlock |
+| UE | 导入直接生成可编辑 UMaterialInstance 资产 | StaticMesh **命名** Material Slots | Component 级 Override Materials 数组 |
+| Godot | 嵌入只读 + "Extract" 到 `.tres` | per-surface material | `surface_material_override` |
+
+**采纳 Unity 模型**：默认嵌入（派生 `.samatc` 保持只读）+ 显式 Extract 到项目资产 + `.sameta` remap 表。理由：不破坏现有派生 UUID 管线（旧场景零迁移）、"开箱即用"（不 Extract 也能渲染）、remap 存资产元数据 → 对**所有**使用该 mesh 的实体生效且 reimport 存续（对比：往每个实体的 materialSlots 塞 UUID 是场景级、不可复用）。
+
+### 设计
+
+```
+                    ┌───────── 不 Extract（默认，现状不变）─────────┐
+glb ──CookMesh──►  .samesh (CookedSubMesh.defaultMaterialID ──► 派生 .samatc, 只读)
+        │                                    ▲
+        │  .sameta: mat_remap_<idx>=<uuid>   │ remap 命中时替换
+        │                                    │
+        └── Extract Materials ──► assets/materials/<stem>_<name>.samat（可编辑源资产）
+                                        │ CookStandaloneMaterial
+                                        ▼
+                                  cook_cache/<newUUID>.samatc
+```
+
+#### A. 材质名贯通（可辨认性）
+
+- **`.samesh` v6**：`SameshFormat::Version = 6`；`FileHeader` 不变（48B），skin blob 之后追加 name 表：`uint32 nameCount` + 每项 `uint32 len + bytes`（per-submesh，与 `subMeshes` 平行）。`LoadCookedMesh` 按 `version >= 6` 读取，v5 及以下 name 为空 → **向后兼容，无需全量 reimport**。
+- `CookedMesh` 加 `std::vector<std::string> materialNames`；`MeshImporter::appendPrimitive` 填 glTF material name（空 → `"Material_<idx>"`）。
+- `.samatc` 加 `root["name"] = mat.name`（`CookMaterial` 已持有）。
+- `GPUSubMesh`（`src/resource/ResourceManager.hpp:31`）加 `std::string materialName` 贯通到运行时。
+
+> **既有 workaround 的清算**（2026-07-04 调研）：`MaterialOverrideDrawer.cpp:24-51` 的 `ReadMatTypeName` + `ResolveEffectiveType` 是同类问题的"文件查找"式绕过——popup 打开期间**每帧**打开材质源文件、逐行文本扫描 `"type"` 字段（非 JSON parse，依赖字段单行排版），且依赖 `AssetRegistry::FindByID` → 派生 `.samatc`（无 `.sameta`）整条路失效，Add Override popup 退化为"枚举所有 MaterialType 的全部参数"。
+> **对比结论：数据内嵌（cook 时落盘）优于文件查找**，理由：① `name` 的唯一来源是 glb 源文件，cook 时不落盘则事后任何文件查找都查不到（`type` 至少还在 `.samatc` 里，name 连查的地方都没有，除非全量重 parse glb）；② 文件查找是 editor-only，运行时/脚本 API/统计面板拿不到；③ 每帧磁盘 I/O + 手写文本扫描脆弱；④ registry 依赖使其对导入材质天然失效。内嵌代价极小：`.samatc` 是 JSON，加 key 零成本向后兼容（`j.value("name","")`）；`.samesh` v6 name 表已设计兼容读。
+> **顺带重构**：`ResolveEffectiveType` 改走 `matMgr->LoadMaterial(id, *ctx.resMgr)->GetType()`（按 UUID 经 VFS 解析 `.samatc`、实例有缓存、不依赖 registry、对派生材质同样有效），删除 `ReadMatTypeName` 文件扫描 —— 并入 Step 3。
+
+#### B. Material Extract（导入材质 → 可编辑 `.samat`）
+
+入口：AssetsPanel 中 `.glb/.gltf` 右键 → **"Extract Materials…"**（走 AssetsPresenter，MVP 模式）。行为（对该 glb 的每个 glTF 材质 idx）：
+
+1. 若 `.sameta` 已有 `mat_remap_<idx>` → 跳过（已 extract 过）
+2. 读 `cook_cache/<DeriveMaterialID(fileId, idx)>.samatc` JSON
+3. `IO::WriteJson` → `assets/materials/<glbStem>_<matName>.samat`（目标已存在 → 跳过 + log，MVP 不做改名对话框）
+4. 生成新 `.sameta`（**新随机 UUID**，type=Material）+ `CookStandaloneMaterial`
+5. 写回 glb 的 `.sameta`：`mat_remap_<idx>=<newUUID>`（辅助键 `mat_remap_name_<idx>=<gltfName>` 供错位校验）
+6. 全部完成后 `ReimportFile(glb)` force recook mesh（应用 remap）+ AssetsPanel 刷新
+
+#### C. Material Remap（cook 时应用）
+
+`CookMesh`（`tools/importer/MeshImporter.cpp:242`）开头 `MetaFile::Load(MetaPathFor(entry.sourcePath))` 收集 `mat_remap_<idx>` → `std::map<int, AssetID>`；`appendPrimitive` 中：
+
+```cpp
+sm.defaultMaterialID = remap.count(prim.materialIndex)
+    ? remap.at(prim.materialIndex)
+    : matIDs[prim.materialIndex];   // 原派生路径
+```
+
+per-node split 与合并 mesh 共用 `appendPrimitive` → 自动同时生效。remap 命中的材质**仍生成**派生 `.samatc`（旧场景/旧 `.samesh` 可能还引用派生 UUID，保留无害）。
+
+#### D. MaterialAssetInspector 可编辑（= #99 主体）
+
+- 仅对源文件为 `.samat` 的 Material 资产开放编辑（派生 `.samatc` 无 registry 条目，天然不可选中；Extract 即"使之可编辑"的唯一路径，语义同 Unity）。
+- 编辑控件复用 `ParamWidgets`（#88 的公共反射 param 控件层），`ParamDef[]/TextureDef[]` 从 `MaterialManager::FindType(root["type"])` 反射取；alphaMode 下拉 / doubleSided 勾选 / alphaCutoff slider（顶层字段）。
+- **Save 按钮**（非即时写盘）→ `IO::WriteJson` 写回 `.samat` 源 → `CookStandaloneMaterial(force)` → `MaterialManager::EvictInstance(AssetID)`（**新增**，定点失效缓存实例）→ `scene.MarkMaterialDirty()` 触发 BuildDrawList 重建。
+
+#### E. Per-slot MaterialOverrideComponent（Phase 2，实例级参数差异）
+
+```cpp
+struct MaterialSlotOverride {                      // Components.hpp
+    std::map<std::string, ParamValue> scalars;
+    std::map<std::string, AssetID>    textures;
+    int8_t alphaMode = -1, doubleSided = -1;       // -1 = 继承
+};
+struct MaterialOverrideComponent {
+    // ... 现有 entity-wide 字段全部保留（向后兼容）...
+    std::map<int32_t, MaterialSlotOverride> slotOverrides;   // NEW: key = submesh 索引
+};
+```
+
+- `BuildDrawList` 叠加次序：base blob → entity-wide scalars/textures → `slotOverrides[si]`（SSBO 路径天然支持——per-draw blob 本就按 submesh 独立分配；legacy UBO 路径 per-slot `CloneInstance`）。
+- `MaterialOverrideDrawer` 加 slot 区段（TreeNode per slot，标签用 A 的材质名）；`SceneSerializer` 加 `"slots"` 对象；undo/redo 复用现有命令模式。
+- 脚本 API 的 slot 参数变体**不在本 issue**（留 #71 延伸，需 bump ScriptApiFunctionTable version）。
+
+### 实施步骤
+
+- [ ] 1. **`.samesh` v6 材质名表**：`CookedMesh.hpp`（`materialNames` + Version=6 + 格式注释）、`CookedMesh.cpp` Save/Load（v5 兼容读）
+- [ ] 2. **导入侧填名**：`MeshImporter.cpp` appendPrimitive 填 `materialNames`；`MaterialImporter.cpp` `.samatc` 加 `"name"`；顺带修 `CookMaterial` 无 force 参数问题（force reimport 时 `.samatc` 不更新的现状 bug，`CookMesh` 的 force 透传）
+- [ ] 3. **运行时贯通**：`ResourceManager` `GPUSubMesh::materialName`；`MeshRendererDrawer` 槽位标签 `"[i] <名>"`；`MaterialOverrideDrawer::ResolveEffectiveType` 改走 `matMgr->LoadMaterial(id, *ctx.resMgr)->GetType()`，删除 `ReadMatTypeName` 每帧文件扫描（对派生材质同样生效，Add Override popup 不再退化为全类型枚举）
+- [ ] 4. **Remap 应用**：`CookMesh` 读 `.sameta` `mat_remap_<idx>` → `appendPrimitive` 替换 `defaultMaterialID`；验证 `ReimportFile` 不重写 `.sameta`（预期只读取；若有重写路径需保留 settings map）
+- [ ] 5. **Extract Materials**：AssetsPanel 右键项 + AssetsPresenter 实现（B 节 6 步流程）；验收：Sponza.glb Extract 后 assets/materials/ 出现命名 `.samat`，场景渲染不变
+- [ ] 6. **MaterialManager::EvictInstance(AssetID)**：定点缓存失效（含 legacy clone 路径的 deferred-destroy 安全）
+- [ ] 7. **MaterialAssetInspector 编辑模式**（吸收 #99）：ParamWidgets 复用 + alphaMode/doubleSided/alphaCutoff + Save→写回+recook+evict+MarkMaterialDirty；验收：改 extracted `.samat` 的 roughness，场景实时生效且重启存续
+- [ ] 8. **（Phase 2）per-slot override**：组件扩展 + `BuildDrawList` 叠加 + `SceneSerializer` + `MaterialOverrideDrawer` slot 区段 + undo 命令
+- [ ] 9. **文档**：`docs/architecture.md` 资产管线段（remap/extract 数据流）+ 组件表（slotOverrides）
+
+### 边界情况与约束
+
+| 场景 | 处理 |
+|------|------|
+| reimport 后 remap 存续 | remap 存 `.sameta` settings map；`ImportScanner` 只在缺失时新建 `.sameta` → 保留（Step 4 显式验证） |
+| DCC 重导出后 glTF 材质顺序变化 | remap 按 `materialIndex` 键 → 错位风险；用 `mat_remap_name_<idx>` 对比实际名，不符则 warn + 跳过该项 remap（宁可回退派生材质也不错贴） |
+| 旧 `.samesh`（v5）| name 为空，槽位 UI 退回显示 UUID；功能不受影响，reimport 后升 v6 |
+| 场景中已手动设置的 `materialSlots` | 优先级最高于 remap 后的 defaultMaterialID，行为不变 |
+| 多实体共享 extracted `.samat` | 编辑影响全部使用者 —— 与 Unity material asset 语义一致（预期行为）；实例差异走 MaterialOverride |
+| MaterialManager 缓存陈旧 | Step 6 EvictInstance；与 #54（reimport 缓存未失效）同根，基建顺带铺路但不在本 issue 全修 |
+| 真·单 primitive 大网格（DCC 合并时已丢材质边界）| glTF 一 primitive 一材质，引擎无从拆分 → 不做（DCC 侧问题；node 级拆分归 #60） |
+| legacy UBO `.saglsl` 材质放进 slot | 走现有 CloneInstance 路径，无新约束 |
+| `.samat` 编辑的 undo | MVP 不命令化（资产编辑非场景状态，Save 显式确认已是防误）；后续可加 |
+
+**不做**：独立材质编辑器窗口（雏形 = Inspector 内编辑）；非 PBR 类型（自定义 `.saglsl`）材质的 Extract（`.samatc` 仅 PBR 生成）；glTF 写回；per-slot 脚本 API（→ #71 延伸）。
+
+### 受益 issues
+
+- **#99**：被 Step 7 吸收，实现后标 done
+- **#54**：`EvictInstance` 为 reimport 缓存失效提供定点工具
+- **#71（MaterialOverrideProxy）**：per-slot 组件语义就绪后，脚本 API 只需加 slot 参数变体
+- **#60（Mesh Split/Merge）**：材质名贯通后 split 输出的槽位可辨认
+- **X-6（透明植物面片）**：Extract 后可直接把导入材质 alphaMode 改 MASK，无需 DCC 重导

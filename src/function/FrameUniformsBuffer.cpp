@@ -74,6 +74,16 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
         bd.name    = "t_LtcAmp";
         refl.bindings.push_back(bd);
     }
+    // Issue #56: directional shadow map for forward passes (appended — never
+    // renumber existing bindings).
+    {
+        RHI::ShaderBindingDesc bd;
+        bd.set     = 1; bd.binding = 7;
+        bd.type    = RHI::RHIDescriptorType::Texture2D;
+        bd.stages  = RHI::RHIShaderStage::All;
+        bd.name    = "t_ShadowMap";
+        refl.bindings.push_back(bd);
+    }
 
     // Issue #72 Step 6.5: FrameUniforms is set=1 in the new layout (set=0 reserved
     // for BindlessTextureHeap so it can stay bound for the whole command buffer).
@@ -134,6 +144,7 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
         device->WriteDescriptorTexture(m_descSets[i], 4, m_iblCubePlaceholder); // skyboxMap (cube)
         device->WriteDescriptorTexture(m_descSets[i], 5, m_iblPlaceholder);     // t_LtcMat (2D)
         device->WriteDescriptorTexture(m_descSets[i], 6, m_iblPlaceholder);     // t_LtcAmp (2D)
+        device->WriteDescriptorTexture(m_descSets[i], 7, m_iblPlaceholder);     // t_ShadowMap (Issue #56)
     }
 
     SA_LOG_INFO("FrameUniformsBuffer: initialized ({} frames)", MAX_FRAMES);
@@ -164,6 +175,13 @@ void FrameUniformsBuffer::SetIBLTextures(RHI::RHITextureHandle brdfLut,
         m_device->WriteDescriptorTexture(m_descSets[i], 3, safeCube3);
         m_device->WriteDescriptorTexture(m_descSets[i], 4, safeCube4);
     }
+}
+
+void FrameUniformsBuffer::SetShadowMap(RHI::RHITextureHandle shadowMap) {
+    // Handle is created once at Init and persists — one write covers all frames.
+    const auto safe = shadowMap.IsValid() ? shadowMap : m_iblPlaceholder;
+    for (uint32_t i = 0; i < MAX_FRAMES; ++i)
+        m_device->WriteDescriptorTexture(m_descSets[i], 7, safe);
 }
 
 void FrameUniformsBuffer::SetLtcTextures(RHI::RHITextureHandle ltcMat,

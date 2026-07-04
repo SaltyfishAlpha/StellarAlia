@@ -65,6 +65,17 @@ void MaterialManager::ClearProjectInstances() {
     m_cachedInstances.clear();
 }
 
+bool MaterialManager::EvictInstance(const AssetID& id) {
+    auto it = m_cachedInstances.find(HashID(id));
+    if (it == m_cachedInstances.end()) return false;
+    // ~MaterialInstance frees its desc set / UBO through the RHI deferred-destroy
+    // queue — no WaitIdle (which would flush the queue mid-frame, invalidating
+    // the in-recording command buffer).
+    m_cachedInstances.erase(it);
+    SA_LOG_INFO("MaterialManager: evicted cached instance {}", id.ToString());
+    return true;
+}
+
 void MaterialManager::ClearProjectTypes() {
     std::vector<std::string> toRemove;
     for (auto& [name, type] : m_types) {
@@ -292,6 +303,27 @@ MaterialManager::LoadMaterial(const AssetID& id, Resource::ResourceManager& resM
     auto inst = CreateInstance(typeName);
     if (!inst) return nullptr;
 
+    // ── Pipeline-state fields (Issue #56) — missing fields = opaque legacy asset ──
+    {
+        const std::string am = root.value("alphaMode", "OPAQUE");
+        MaterialRenderState rs;
+        if      (am == "MASK")  rs.alphaMode = AlphaMode::Mask;
+        else if (am == "BLEND") rs.alphaMode = AlphaMode::Blend;
+        rs.doubleSided = root.value("doubleSided", false);
+
+        // Mask/Blend rely on the shared MaterialParams SSBO layout (prepass /
+        // forward frags reuse the per-draw blob) — legacy-UBO types can't take
+        // that path, so they render opaque.
+        if (rs.alphaMode != AlphaMode::Opaque &&
+            !inst->GetType()->usesMaterialParamsSSBO) {
+            SA_LOG_WARN("MaterialManager: material {} ({}) requests alphaMode={} "
+                        "but type is legacy-UBO — falling back to OPAQUE",
+                        id.ToString(), typeName, am);
+            rs.alphaMode = AlphaMode::Opaque;
+        }
+        inst->m_renderState = rs;
+    }
+
     // ── Apply scalar params (type-driven from reflection metadata) ────────────
     if (root.contains("params")) {
         const auto& p = root["params"];
@@ -356,8 +388,9 @@ MaterialManager::CloneInstance(const MaterialInstance* src) const {
     clone->m_mgr = const_cast<MaterialManager*>(this);
     WireSSBODescriptor(*clone);
     // Copy the UBO parameter blob wholesale — same layout, same values.
-    clone->m_uboBlob    = src->m_uboBlob;
-    clone->m_paramDirty = true;
+    clone->m_uboBlob     = src->m_uboBlob;
+    clone->m_renderState = src->m_renderState;
+    clone->m_paramDirty  = true;
     if (src->m_type->usesMaterialParamsSSBO) {
         clone->m_texAssetIndices = src->m_texAssetIndices;
     } else {

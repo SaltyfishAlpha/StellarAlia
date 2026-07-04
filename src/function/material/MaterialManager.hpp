@@ -110,6 +110,13 @@ public:
     [[nodiscard]] MaterialInstance*
     LoadMaterial(const AssetID& id, Resource::ResourceManager& resMgr);
 
+    // Evict one cached instance so the next LoadMaterial re-reads the .samatc
+    // (Issue #101 — material asset edited / re-cooked). The instance's desc set
+    // / UBO are freed via the RHI deferred-destroy queue (mid-frame safe). The
+    // caller must also MarkMaterialDirty so DrawItems drop the stale pointer
+    // before the next render. Returns false when the id was not cached.
+    bool EvictInstance(const AssetID& id);
+
     // Return an independent copy of src with the same type, parameters, and
     // textures. The caller owns the returned instance.
     // Use this when per-entity parameter overrides are needed on top of a shared

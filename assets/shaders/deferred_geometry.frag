@@ -5,27 +5,13 @@
 #include "shading_models.glsl"     // assets/shaders/common/
 #include "shading_model_ids.glsl"  // generated/shading_model_ids.glsl
 
-// ── set=2 Material parameters (Issue #72: SSBO + bindless texture indices) ───
-// Block name MUST be `MaterialParams` — MaterialManager detects it to enable the
-// per-frame ring + BindlessTextureHeap path. Fields ending in `_Idx` (uint) are
-// bindless heap indices into set=0 globalTex[].
-layout(std430, set = 2, binding = 0) readonly buffer MaterialParams {
-    vec4  baseColorFactor;          // @Color4("Base Color") = 1,1,1,1
-    float roughnessFactor;          // @Range(0.0, 1.0, "Roughness") = 0.5
-    float metallicFactor;           // @Range(0.0, 1.0, "Metallic") = 0.0
-    float normalScale;              // @Float("Normal Scale") = 1.0
-    float occlusionStrength;        // @Range(0.0, 1.0, "Occlusion Strength") = 1.0
-    vec3  emissiveFactor;           // @Color3("Emissive Color") = 0,0,0
-    float emissiveIntensity;        // @Range(0.0, 50.0, "Emissive Intensity") = 1.0
-    uint  t_BaseColor_Idx;          // @Texture("Albedo Map")
-    uint  t_Normal_Idx;             // @Texture("Normal Map")
-    uint  t_MetallicRoughness_Idx;  // @Texture("Metallic Roughness")
-    uint  t_Occlusion_Idx;          // @Texture("Occlusion Map")
-    uint  t_Emissive_Idx;           // @Texture("Emissive Map")
-} u_Mat;
+// Issue #56: no discard in this shader — force early-Z so the MASK variant
+// (depthCompareOp=EQUAL, prepass-filled depth) rejects occluded/cut-out texels
+// before this fragment runs.
+layout(early_fragment_tests) in;
 
-// ── set=0 Global bindless texture heap (Issue #72) ───────────────────────────
-layout(set = 0, binding = 0) uniform sampler2D globalTex[];
+// ── set=2 MaterialParams + set=0 bindless heap (shared, Issue #56) ───────────
+#include "material_params_pbr.glsl"
 
 // ── Inputs from vertex stage ──────────────────────────────────────────────────
 layout(location = 0) in vec3 v_WorldPos;

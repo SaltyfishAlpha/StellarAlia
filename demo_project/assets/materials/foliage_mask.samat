@@ -1,0 +1,13 @@
+{
+  "type": "PBR",
+  "version": 1,
+  "alphaMode": "MASK",
+  "doubleSided": true,
+  "params": {
+    "baseColorFactor": [0.3, 0.65, 0.25, 1.0],
+    "roughnessFactor": 0.8,
+    "metallicFactor": 0.0,
+    "alphaCutoff": 0.5
+  },
+  "textures": {}
+}

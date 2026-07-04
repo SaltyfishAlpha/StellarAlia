@@ -52,7 +52,16 @@ public:
                           const RHI::ShaderReflection& fragRefl);
 
     // Returns (creating if necessary) a pipeline configured for the given
-    // attachment formats and render state.
+    // attachment formats and render state. Issue #56: the cache key includes
+    // the FULL render state — the same shader can serve multiple permutations
+    // (alpha modes, double-sided, EQUAL depth, stencil).
+    RHI::RHIPipelineHandle GetOrCreatePipeline(
+        RHI::IRHIDevice*           device,
+        const AttachmentKey&       key,
+        const PipelineRenderState& state);
+
+    // Legacy convenience overload — packs the loose flags into a
+    // PipelineRenderState. Existing callers compile unchanged.
     // noVertexInput: set true for fullscreen-triangle passes (skybox, post-fx)
     //   that generate vertex positions in the vertex shader without a VBO.
     RHI::RHIPipelineHandle GetOrCreatePipeline(
@@ -86,7 +95,10 @@ private:
     RHI::RHIDescLayoutHandle m_set3Layout;        // slot 3
     RHI::ShaderReflection    m_merged;
 
-    std::unordered_map<AttachmentKey, RHI::RHIPipelineHandle, AttachmentKeyHash> m_pipelineCache;
+    // Issue #56: keyed by attachments + full render state (was AttachmentKey only,
+    // which returned the wrong pipeline when one shader was requested with
+    // different cull/blend/depth/stencil states).
+    std::unordered_map<PipelineStateKey, RHI::RHIPipelineHandle, PipelineStateKeyHash> m_pipelineCache;
 };
 
 } // namespace StellarAlia

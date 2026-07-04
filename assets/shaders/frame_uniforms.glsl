@@ -79,4 +79,9 @@ layout(set = 1, binding = 5) uniform sampler2D t_LtcMat;
 //            uv = (NdotV, roughness) → (GGX norm, Fresnel, sphere horizon clip, unused)
 layout(set = 1, binding = 6) uniform sampler2D t_LtcAmp;
 
+// binding=7  Directional shadow map (D32, appended Issue #56).
+//            Forward passes sample it from here; deferred lighting keeps its
+//            own copy at set=2 binding=4. Appended — never renumber above.
+layout(set = 1, binding = 7) uniform sampler2D t_ShadowMap;
+
 #endif // SA_FRAME_UNIFORMS_GLSL

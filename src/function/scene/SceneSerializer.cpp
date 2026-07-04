@@ -36,7 +36,10 @@
 //       "materialOverride": {
 //           "materialAsset": "uuid...",          // optional: replaces mesh-default material
 //           "scalars":  { "roughnessFactor": 0.3, "emissiveFactor": [1,0.5,0] },
-//           "textures": { "t_BaseColor": "uuid..." }
+//           "textures": { "t_BaseColor": "uuid..." },
+//           "slots": {                           // Issue #101: per-submesh overrides
+//               "0": { "scalars": {...}, "textures": {...}, "alphaMode": 1 }
+//           }
 //       },
 //       // (Backward compat: "pbrSurface" + "materialParams" are migrated on load)
 //       "staticGeometry": true
@@ -391,28 +394,51 @@ nlohmann::json SceneSerializer::SerializeToJson(const Scene& scene) {
 
         // MaterialOverrideComponent
         if (const auto* mo = reg.try_get<MaterialOverrideComponent>(e)) {
+            auto serializeScalars = [](const std::map<std::string, ParamValue>& scalars) {
+                json out = json::object();
+                for (const auto& [name, val] : scalars) {
+                    std::visit([&](const auto& v) {
+                        using T = std::decay_t<decltype(v)>;
+                        if constexpr (std::is_same_v<T, float>)
+                            out[name] = v;
+                        else if constexpr (std::is_same_v<T, glm::vec2>)
+                            out[name] = { v.x, v.y };
+                        else if constexpr (std::is_same_v<T, glm::vec3>)
+                            out[name] = { v.x, v.y, v.z };
+                        else if constexpr (std::is_same_v<T, glm::vec4>)
+                            out[name] = { v.x, v.y, v.z, v.w };
+                    }, val);
+                }
+                return out;
+            };
+            auto serializeTextures = [](const std::map<std::string, AssetID>& textures) {
+                json out = json::object();
+                for (const auto& [name, id] : textures)
+                    if (id.IsValid()) out[name] = AssetToStr(id);
+                return out;
+            };
+
             json moj;
             if (mo->materialAsset.IsValid())
                 moj["materialAsset"] = AssetToStr(mo->materialAsset);
-            json scalarsJ = json::object();
-            for (const auto& [name, val] : mo->scalars) {
-                std::visit([&](const auto& v) {
-                    using T = std::decay_t<decltype(v)>;
-                    if constexpr (std::is_same_v<T, float>)
-                        scalarsJ[name] = v;
-                    else if constexpr (std::is_same_v<T, glm::vec2>)
-                        scalarsJ[name] = { v.x, v.y };
-                    else if constexpr (std::is_same_v<T, glm::vec3>)
-                        scalarsJ[name] = { v.x, v.y, v.z };
-                    else if constexpr (std::is_same_v<T, glm::vec4>)
-                        scalarsJ[name] = { v.x, v.y, v.z, v.w };
-                }, val);
+            moj["scalars"]  = serializeScalars(mo->scalars);
+            moj["textures"] = serializeTextures(mo->textures);
+            // Issue #56: pipeline-state overrides (omitted = inherit).
+            if (mo->alphaMode   >= 0) moj["alphaMode"]   = static_cast<int>(mo->alphaMode);
+            if (mo->doubleSided >= 0) moj["doubleSided"] = static_cast<int>(mo->doubleSided);
+            // Issue #101: per-submesh overrides, keyed by slot index string.
+            if (!mo->slotOverrides.empty()) {
+                json slotsJ = json::object();
+                for (const auto& [slot, ovr] : mo->slotOverrides) {
+                    json sj;
+                    sj["scalars"]  = serializeScalars(ovr.scalars);
+                    sj["textures"] = serializeTextures(ovr.textures);
+                    if (ovr.alphaMode   >= 0) sj["alphaMode"]   = static_cast<int>(ovr.alphaMode);
+                    if (ovr.doubleSided >= 0) sj["doubleSided"] = static_cast<int>(ovr.doubleSided);
+                    slotsJ[std::to_string(slot)] = std::move(sj);
+                }
+                moj["slots"] = std::move(slotsJ);
             }
-            moj["scalars"] = std::move(scalarsJ);
-            json texturesJ = json::object();
-            for (const auto& [name, id] : mo->textures)
-                if (id.IsValid()) texturesJ[name] = AssetToStr(id);
-            moj["textures"] = std::move(texturesJ);
             ej["materialOverride"] = std::move(moj);
         }
 
@@ -805,24 +831,45 @@ bool SceneSerializer::DeserializeFromJson(Scene& scene, const nlohmann::json& ro
         if (ej.contains("materialOverride")) {
             const auto& moj = ej["materialOverride"];
             MaterialOverrideComponent mo;
-            if (moj.contains("materialAsset"))
-                mo.materialAsset = StrToAsset(moj["materialAsset"].get<std::string>());
-            if (moj.contains("scalars")) {
-                for (const auto& [name, val] : moj["scalars"].items()) {
+
+            auto parseScalars = [](const json& src, std::map<std::string, ParamValue>& dst) {
+                for (const auto& [name, val] : src.items()) {
                     if (val.is_number())
-                        mo.scalars[name] = val.get<float>();
+                        dst[name] = val.get<float>();
                     else if (val.is_array()) {
                         const size_t n = val.size();
-                        if      (n == 2) mo.scalars[name] = glm::vec2{val[0].get<float>(), val[1].get<float>()};
-                        else if (n == 3) mo.scalars[name] = JsonToVec3(val);
-                        else if (n == 4) mo.scalars[name] = JsonToVec4(val);
+                        if      (n == 2) dst[name] = glm::vec2{val[0].get<float>(), val[1].get<float>()};
+                        else if (n == 3) dst[name] = JsonToVec3(val);
+                        else if (n == 4) dst[name] = JsonToVec4(val);
                     }
                 }
-            }
-            if (moj.contains("textures")) {
-                for (const auto& [name, val] : moj["textures"].items()) {
+            };
+            auto parseTextures = [](const json& src, std::map<std::string, AssetID>& dst) {
+                for (const auto& [name, val] : src.items()) {
                     const AssetID id = StrToAsset(val.get<std::string>());
-                    if (id.IsValid()) mo.textures[name] = id;
+                    if (id.IsValid()) dst[name] = id;
+                }
+            };
+
+            if (moj.contains("materialAsset"))
+                mo.materialAsset = StrToAsset(moj["materialAsset"].get<std::string>());
+            if (moj.contains("scalars"))  parseScalars(moj["scalars"], mo.scalars);
+            if (moj.contains("textures")) parseTextures(moj["textures"], mo.textures);
+            // Issue #56: pipeline-state overrides (missing = inherit = -1).
+            mo.alphaMode   = static_cast<int8_t>(moj.value("alphaMode",   -1));
+            mo.doubleSided = static_cast<int8_t>(moj.value("doubleSided", -1));
+            // Issue #101: per-submesh overrides.
+            if (moj.contains("slots") && moj["slots"].is_object()) {
+                for (const auto& [slotKey, sj] : moj["slots"].items()) {
+                    int32_t slot = -1;
+                    try { slot = std::stoi(slotKey); } catch (...) { continue; }
+                    if (slot < 0) continue;
+                    MaterialSlotOverride ovr;
+                    if (sj.contains("scalars"))  parseScalars(sj["scalars"], ovr.scalars);
+                    if (sj.contains("textures")) parseTextures(sj["textures"], ovr.textures);
+                    ovr.alphaMode   = static_cast<int8_t>(sj.value("alphaMode",   -1));
+                    ovr.doubleSided = static_cast<int8_t>(sj.value("doubleSided", -1));
+                    mo.slotOverrides[slot] = std::move(ovr);
                 }
             }
             reg.emplace<MaterialOverrideComponent>(e, std::move(mo));

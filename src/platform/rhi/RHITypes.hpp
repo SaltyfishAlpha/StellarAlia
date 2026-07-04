@@ -185,6 +185,11 @@ struct RHIDepthAttachment {
     bool             clearOnLoad  = true;
     float            clearDepth   = 1.f;
     uint8_t          clearStencil = 0;
+    // Issue #56: bind in DEPTH_STENCIL_READ_ONLY layout — for passes that
+    // stencil-test while simultaneously sampling the depth plane (deferred
+    // lighting). Texture must be in DepthRead state (RGPassBuilder::
+    // ReadDepthStencil) and the pipeline must not write depth/stencil.
+    bool             readOnly     = false;
 };
 
 struct RHIRenderPassDesc {

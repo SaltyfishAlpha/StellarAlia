@@ -103,6 +103,11 @@ public:
     // WriteDepth: expects the texture in DepthWrite state.
     void WriteDepth(RGTextureHandle tex);
 
+    // ReadDepthStencil (Issue #56): expects the texture in DepthRead state
+    // (DEPTH_STENCIL_READ_ONLY) — lets a pass bind depth+stencil as a read-only
+    // attachment (stencil test) while simultaneously sampling the depth plane.
+    void ReadDepthStencil(RGTextureHandle tex);
+
     // WriteUAV: expects the texture in UnorderedAccess (storage image) state.
     // Use this for compute pass outputs.
     void WriteUAV(RGTextureHandle tex);

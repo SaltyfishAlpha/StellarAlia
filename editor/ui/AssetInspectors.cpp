@@ -1,12 +1,22 @@
 #include "ui/AssetInspectors.hpp"
 #include "ui/EditorIconCache.hpp"
+#include "EditorContext.hpp"
+#include "core/io/FileIO.hpp"
+#include "function/material/MaterialManager.hpp"
+#include "function/scene/Scene.hpp"
+#include "importer/MaterialImporter.hpp"
+#include "resource/MetaFile.hpp"
+#include "ui/drawers/DrawerHelpers.hpp"
+#include "ui/drawers/ParamWidgets.hpp"
 
 #include <imgui.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <variant>
 
 namespace fs = std::filesystem;
 using json   = nlohmann::json;
@@ -71,54 +81,200 @@ void TextAssetInspector::Draw(const fs::path& path) {
 
 // ─── MaterialAssetInspector ──────────────────────────────────────────────────
 
+MaterialAssetInspector::MaterialAssetInspector()  = default;
+MaterialAssetInspector::~MaterialAssetInspector() = default;
+
+// Overwrite a seeded ParamValue (variant alternative chosen by the ParamDef)
+// from the .samat JSON value: number → float, array → vecN component-wise.
+static ParamValue JsonToParamValue(const json& v, ParamValue seed) {
+    std::visit([&](auto& val) {
+        using T = std::decay_t<decltype(val)>;
+        if constexpr (std::is_same_v<T, float>) {
+            if (v.is_number()) val = v.get<float>();
+        } else {
+            if (v.is_array()) {
+                const int n = static_cast<int>(sizeof(T) / sizeof(float));
+                for (int i = 0; i < n && i < static_cast<int>(v.size()); ++i)
+                    (&val.x)[i] = v[i].get<float>();
+            }
+        }
+    }, seed);
+    return seed;
+}
+
+static json ParamValueToJson(const ParamValue& pv) {
+    return std::visit([](const auto& val) -> json {
+        using T = std::decay_t<decltype(val)>;
+        if constexpr (std::is_same_v<T, float>) {
+            return val;
+        } else {
+            json arr = json::array();
+            const int n = static_cast<int>(sizeof(T) / sizeof(float));
+            for (int i = 0; i < n; ++i) arr.push_back((&val.x)[i]);
+            return arr;
+        }
+    }, pv);
+}
+
+void MaterialAssetInspector::DrawReadOnly(const json& j) const {
+    ImGui::Text("Alpha Mode:   %s", j.value("alphaMode", "OPAQUE").c_str());
+    ImGui::Text("Double Sided: %s", j.value("doubleSided", false) ? "true" : "false");
+
+    if (j.contains("params") && j["params"].is_object()) {
+        ImGui::SeparatorText("Parameters");
+        for (const auto& [key, val] : j["params"].items()) {
+            if (val.is_number_float() || val.is_number_integer()) {
+                ImGui::Text("  %-26s %.4f", key.c_str(), val.get<float>());
+            } else if (val.is_array() && !val.empty()) {
+                std::string s = "[";
+                for (size_t i = 0; i < val.size(); ++i) {
+                    if (i) s += ", ";
+                    char tmp[16];
+                    std::snprintf(tmp, sizeof(tmp), "%.3f", val[i].get<float>());
+                    s += tmp;
+                }
+                s += "]";
+                ImGui::Text("  %-26s %s", key.c_str(), s.c_str());
+            }
+        }
+    }
+
+    if (j.contains("textures") && j["textures"].is_object()) {
+        ImGui::SeparatorText("Textures");
+        for (const auto& [key, val] : j["textures"].items()) {
+            const std::string uuid = val.is_string() ? val.get<std::string>() : std::string{};
+            if (uuid.empty()) {
+                ImGui::TextDisabled("  %-26s (none)", key.c_str());
+            } else {
+                ImGui::Text("  %-26s %s", key.c_str(), uuid.c_str());
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", uuid.c_str());
+            }
+        }
+    }
+}
+
+void MaterialAssetInspector::Save(const fs::path& path) {
+    if (!m_doc || !IO::WriteJson(path, *m_doc)) return;
+
+    Import::MetaFile meta;
+    if (Import::MetaFile::Load(Import::MetaFile::MetaPathFor(path), meta) &&
+        meta.uuid.IsValid() && m_ctx)
+    {
+        if (!m_ctx->projectDir.empty())
+            Import::CookStandaloneMaterial(path, meta.uuid,
+                                           m_ctx->projectDir / "cook_cache", /*force=*/true);
+        if (m_ctx->matMgr) m_ctx->matMgr->EvictInstance(meta.uuid);
+        if (m_ctx->scene)  m_ctx->scene->MarkMaterialDirty();
+    }
+    m_dirty = false;
+}
+
 void MaterialAssetInspector::Draw(const fs::path& path) {
     DrawFileHeader(path, "Material");
+
+    if (path != m_lastPath) {
+        m_lastPath = path;
+        m_dirty    = false;
+        auto doc = std::make_unique<json>();
+        m_doc = IO::ReadJson(path, *doc) ? std::move(doc) : nullptr;
+    }
+    if (!m_doc) { ImGui::TextDisabled("(cannot read/parse file)"); return; }
+    json& j = *m_doc;
+
+    const std::string type = j.value("type", "PBR");
+    const std::string name = j.value("name", "");
+    ImGui::Text("Shader: %s", type.c_str());
+    if (!name.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%s)", name.c_str());
+    }
     ImGui::Separator();
 
-    std::ifstream f(path);
-    if (!f) { ImGui::TextDisabled("(cannot read file)"); return; }
-
-    try {
-        const auto j = json::parse(f);
-
-        const std::string type = j.value("type", "?");
-        ImGui::Text("Shader: %s", type.c_str());
-
-        if (j.contains("params") && j["params"].is_object()) {
-            ImGui::SeparatorText("Parameters");
-            for (const auto& [key, val] : j["params"].items()) {
-                if (val.is_number_float() || val.is_number_integer()) {
-                    ImGui::Text("  %-26s %.4f", key.c_str(), val.get<float>());
-                } else if (val.is_array() && !val.empty()) {
-                    std::string s = "[";
-                    for (size_t i = 0; i < val.size(); ++i) {
-                        if (i) s += ", ";
-                        char tmp[16];
-                        std::snprintf(tmp, sizeof(tmp), "%.3f", val[i].get<float>());
-                        s += tmp;
-                    }
-                    s += "]";
-                    ImGui::Text("  %-26s %s", key.c_str(), s.c_str());
-                }
-            }
-        }
-
-        if (j.contains("textures") && j["textures"].is_object()) {
-            ImGui::SeparatorText("Textures");
-            for (const auto& [key, val] : j["textures"].items()) {
-                const std::string uuid = val.is_string() ? val.get<std::string>() : std::string{};
-                if (uuid.empty()) {
-                    ImGui::TextDisabled("  %-26s (none)", key.c_str());
-                } else {
-                    ImGui::Text("  %-26s %s", key.c_str(), uuid.c_str());
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("%s", uuid.c_str());
-                }
-            }
-        }
-    } catch (const std::exception& e) {
-        ImGui::TextColored({1.f, 0.4f, 0.4f, 1.f}, "Parse error: %s", e.what());
+    MaterialType* mtype = (m_ctx && m_ctx->matMgr) ? m_ctx->matMgr->GetType(type) : nullptr;
+    if (!mtype) {
+        ImGui::TextDisabled("(shader type not registered — read-only)");
+        DrawReadOnly(j);
+        return;
     }
+
+    bool changed = false;
+
+    // ── Render state (Issue #56 top-level fields; missing = legacy opaque) ──
+    {
+        static const char* kModes[] = {"OPAQUE", "MASK", "BLEND"};
+        const std::string am = j.value("alphaMode", "OPAQUE");
+        int cur = 0;
+        for (int i = 0; i < 3; ++i)
+            if (am == kModes[i]) cur = i;
+        int sel = cur;
+        if (ImGui::Combo("Alpha Mode", &sel, kModes, 3) && sel != cur) {
+            j["alphaMode"] = kModes[sel];
+            changed = true;
+        }
+        bool ds = j.value("doubleSided", false);
+        if (ImGui::Checkbox("Double Sided", &ds)) {
+            j["doubleSided"] = ds;
+            changed = true;
+        }
+    }
+
+    // ── Parameters — reflection-ordered; only keys present in the asset ─────
+    if (j.contains("params") && j["params"].is_object()) {
+        ImGui::SeparatorText("Parameters");
+        for (const auto& def : mtype->params) {
+            if (def.name.empty() || def.name[0] == '_') continue;
+            auto it = j["params"].find(def.name);
+            if (it == j["params"].end()) continue;
+
+            ImGui::PushID(def.name.c_str());
+            const char* lbl = def.displayName.empty()
+                              ? def.name.c_str() : def.displayName.c_str();
+            ImGui::TextUnformatted(lbl);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(std::max(30.f, ImGui::GetContentRegionAvail().x));
+            ParamValue pv = JsonToParamValue(*it, DefaultParamValue(def));
+            if (DrawReflectedParam(def, pv, "##v")) {
+                *it = ParamValueToJson(pv);
+                changed = true;
+            }
+            ImGui::PopID();
+        }
+        for (const auto& [key, val] : j["params"].items())
+            if (!mtype->FindParam(key))
+                ImGui::TextDisabled("  %s (not in shader reflection)", key.c_str());
+    }
+
+    // ── Textures — asset pickers writing UUID strings back to the doc ───────
+    if (j.contains("textures") && j["textures"].is_object()) {
+        ImGui::SeparatorText("Textures");
+        for (auto& [key, val] : j["textures"].items()) {
+            ImGui::PushID(key.c_str());
+            const TextureDef* td = mtype->FindTexture(key);
+            const char* lbl = (td && !td->displayName.empty())
+                              ? td->displayName.c_str() : key.c_str();
+            AssetID id = AssetID::FromString(val.is_string() ? val.get<std::string>()
+                                                             : std::string{});
+            if (DrawAssetIDField(lbl, id, "Texture", m_ctx->assetReg, m_ctx->iconCache)) {
+                val = id.IsValid() ? id.ToString() : std::string{};
+                changed = true;
+            }
+            ImGui::PopID();
+        }
+    }
+
+    if (changed) m_dirty = true;
+
+    ImGui::Separator();
+    ImGui::BeginDisabled(!m_dirty);
+    const bool doSave = ImGui::Button("Save");
+    ImGui::SameLine();
+    const bool doRevert = ImGui::Button("Revert");
+    ImGui::EndDisabled();
+    if (doSave)
+        Save(path);
+    else if (doRevert)
+        m_lastPath.clear();   // force reload from disk next frame
 }
 
 // ─── SceneAssetInspector ─────────────────────────────────────────────────────

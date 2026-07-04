@@ -15,7 +15,9 @@
 #include "importer/MaterialImporter.hpp"
 #include "importer/InputMapImporter.hpp"
 #include "function/material/MaterialManager.hpp"
+#include "function/scene/Scene.hpp"
 #include "resource/EntityTemplateRegistry.hpp"
+#include "resource/ResourceManager.hpp"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -204,6 +206,8 @@ AssetsPanel::AssetsPanel(EditorContext& ctx, AssetsPresenter& presenter)
     , m_app(ctx.app)
     , m_registry(ctx.assetReg)
     , m_matMgr(ctx.matMgr)
+    , m_resMgr(ctx.resMgr)
+    , m_scene(ctx.scene)
     , m_diagnostics(ctx.diagnostics)
     , m_input(ctx.input)
     , m_selectionCtx(ctx.selection)
@@ -678,9 +682,25 @@ void AssetsPanel::CreateNewDir(const fs::path& parent) {
 
 void AssetsPanel::DeletePath(const fs::path& path) {
     const bool wasDir = fs::is_directory(path);   // check before removal
+
+    // Read the sidecar before it is removed — Material deletion must also drop
+    // the cooked .samatc (otherwise the cook-cache copy keeps rendering) and
+    // evict the cached instance so meshes fall back visibly.
+    Import::MetaFile meta;
+    if (!wasDir)
+        Import::MetaFile::Load(Import::MetaFile::MetaPathFor(path), meta);
+
     if (!IO::Remove(path)) return;                // file or recursive dir; logs on failure
     if (!wasDir)
         IO::Remove(Import::MetaFile::MetaPathFor(path));  // drop sidecar (no-op if absent)
+
+    if (meta.type == "Material" && meta.uuid.IsValid()) {
+        if (!m_cookCacheDir.empty())
+            IO::Remove(fs::path(m_cookCacheDir) / (meta.uuid.ToString() + ".samatc"));
+        if (m_matMgr) m_matMgr->EvictInstance(meta.uuid);
+        if (m_scene)  m_scene->MarkMaterialDirty();
+    }
+
     SA_LOG_INFO("AssetsPanel: deleted '{}'", path.filename().string());
     m_filePaneDirty = true;
     if (m_selectedPath == path) SetSelectedPath({});
@@ -1267,8 +1287,11 @@ void AssetsPanel::DrawFilePane() {
             const bool hasMeta   = fs::exists(ctxMeta);
             const bool isSascene = (ext == ".sascene");
             const bool isSaglsl  = (ext == ".saglsl");
+            const bool isGltf    = (ext == ".glb" || ext == ".gltf");
             if (ImGui::BeginPopupContextItem("##file_ctx")) {
                 if (hasMeta && ImGui::MenuItem("Reimport")) ReimportFile(p);
+                if (isGltf && hasMeta && ImGui::MenuItem("Extract Materials"))
+                    ExtractMaterials(p);
                 if (isSascene && ImGui::MenuItem("Load Scene") && m_onSceneLoad)
                     m_onSceneLoad(p);
                 if (ext == ".cs" && ImGui::MenuItem("Recompile"))
@@ -1619,6 +1642,156 @@ void AssetsPanel::ReimportFile(const fs::path& srcPath) {
     SA_LOG_INFO("AssetsPanel::ReimportFile — done '{}'", srcPath.filename().string());
     if (m_registry) m_registry->Scan(m_assetsRoot, {});
     if (m_onImport) m_onImport();
+}
+
+void AssetsPanel::ExtractMaterials(const fs::path& glbPath) {
+    if (m_cookCacheDir.empty()) {
+        SA_LOG_WARN("AssetsPanel::ExtractMaterials — no cook cache dir configured");
+        return;
+    }
+
+    const fs::path metaPath = Import::MetaFile::MetaPathFor(glbPath);
+    Import::MetaFile meta;
+    if (!Import::MetaFile::Load(metaPath, meta) || !meta.uuid.IsValid()) {
+        SA_LOG_WARN("AssetsPanel::ExtractMaterials — no .sameta for '{}'",
+                    glbPath.filename().string());
+        return;
+    }
+
+    auto sanitize = [](std::string s) {
+        for (char& c : s)
+            if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' ||
+                c == '"' || c == '<'  || c == '>' || c == '|' || c == ' ')
+                c = '_';
+        return s;
+    };
+
+    const fs::path cookDir(m_cookCacheDir);
+
+    // Destination directory — user-chosen when NFD is available (must stay
+    // inside the assets root so the registry indexes the results), otherwise
+    // assets/materials.
+    fs::path matDir = m_assetsRoot / "materials";
+#ifdef SA_HAS_NFD
+    if (NFD_Init() == NFD_OKAY) {
+        const std::string defDirStr =
+            (fs::exists(matDir) ? matDir : m_assetsRoot).string();
+        nfdchar_t* outPath = nullptr;
+        const nfdresult_t res = NFD_PickFolderU8(
+            &outPath, reinterpret_cast<const nfdu8char_t*>(defDirStr.c_str()));
+        if (res == NFD_OKAY && outPath) {
+            const fs::path chosen(outPath);
+            NFD_FreePathU8(outPath);
+            NFD_Quit();
+            std::error_code ec;
+            const fs::path canonChosen = fs::weakly_canonical(chosen, ec);
+            const fs::path canonRoot   = fs::weakly_canonical(m_assetsRoot, ec);
+            const auto mismatch = std::mismatch(canonRoot.begin(), canonRoot.end(),
+                                                canonChosen.begin(), canonChosen.end());
+            if (mismatch.first != canonRoot.end()) {
+                SA_LOG_WARN("AssetsPanel::ExtractMaterials — '{}' is outside the "
+                            "assets root, aborted", chosen.string());
+                return;
+            }
+            matDir = canonChosen;
+        } else {
+            NFD_Quit();
+            if (res == NFD_CANCEL) return;   // user cancelled — abort extraction
+        }
+    }
+#endif
+
+    const std::string stem = glbPath.stem().string();
+
+    int extracted = 0, skipped = 0;
+    bool metaChanged = false;
+
+    // Derived .samatc files are contiguous by glTF material index — stop at the
+    // first missing one. Zero iterations means the mesh was never cooked.
+    for (int32_t mi = 0; mi < 256; ++mi) {
+        const AssetID  derived    = Import::DeriveMaterialID(meta.uuid, mi);
+        const fs::path samatcPath = cookDir / (derived.ToString() + ".samatc");
+        if (!fs::exists(samatcPath)) break;
+
+        const std::string idxStr = std::to_string(mi);
+        // Skip only when the recorded remap target still exists — a deleted
+        // extracted .samat (gone from the registry) must be re-extractable.
+        const std::string existing = meta.GetString("mat_remap_" + idxStr);
+        if (!existing.empty()) {
+            const AssetID target = AssetID::FromString(existing);
+            if (target.IsValid() && m_registry && m_registry->FindByID(target)) {
+                ++skipped;
+                continue;
+            }
+            SA_LOG_INFO("AssetsPanel::ExtractMaterials — remap target for #{} is gone, "
+                        "re-extracting", mi);
+        }
+
+        nlohmann::json j;
+        if (!IO::ReadJson(samatcPath, j)) { ++skipped; continue; }
+        const std::string rawName = j.value("name", "");
+        const std::string display = rawName.empty() ? ("Material_" + idxStr) : rawName;
+
+        const fs::path samatPath = matDir / (stem + "_" + sanitize(display) + ".samat");
+        if (fs::exists(samatPath)) {
+            SA_LOG_WARN("AssetsPanel::ExtractMaterials — '{}' already exists, skipped",
+                        samatPath.filename().string());
+            ++skipped;
+            continue;
+        }
+
+        IO::EnsureDir(matDir);
+        if (!IO::Copy(samatcPath, samatPath, /*overwrite=*/false)) { ++skipped; continue; }
+
+        const Import::AssetEntry newEntry = Import::EnsureMeta(samatPath, "Material");
+        Import::CookStandaloneMaterial(samatPath, newEntry.meta.uuid, cookDir, /*force=*/true);
+
+        meta.settings["mat_remap_"      + idxStr] = newEntry.meta.uuid.ToString();
+        // Raw glTF name (may be empty) — CookMesh uses it to detect index shifts
+        // after a DCC re-export and skips the remap on mismatch.
+        meta.settings["mat_remap_name_" + idxStr] = rawName;
+        metaChanged = true;
+        ++extracted;
+    }
+
+    if (extracted == 0 && skipped == 0) {
+        SA_LOG_WARN("AssetsPanel::ExtractMaterials — no cooked materials for '{}' "
+                    "(reimport the mesh first)", glbPath.filename().string());
+        return;
+    }
+
+    if (metaChanged) {
+        Import::MetaFile::Save(metaPath, meta);
+        ReimportFile(glbPath);   // recook .samesh(+ node meshes) with remap applied
+
+        // Evict the cached meshes so the new defaultMaterialIDs are picked up on
+        // the next BuildDrawList. Skinned meshes keep skin descriptor sets bound
+        // to the old buffers — leave them cached (remap applies on next load).
+        if (m_resMgr) {
+            auto evictIfStatic = [this](const AssetID& id) {
+                const Resource::GPUMesh* gm = m_resMgr->PeekMesh(id);
+                if (!gm) return;   // not cached — nothing to refresh
+                if (gm->IsSkinned()) {
+                    SA_LOG_WARN("AssetsPanel::ExtractMaterials — mesh {} is skinned; "
+                                "reload the scene to apply the remap", id.ToString());
+                    return;
+                }
+                m_resMgr->EvictMesh(id);
+            };
+            evictIfStatic(meta.uuid);
+            nlohmann::json manifest;
+            if (IO::ReadJson(cookDir / (meta.uuid.ToString() + ".sanode"), manifest) &&
+                manifest.contains("nodes"))
+                for (const auto& nj : manifest["nodes"])
+                    if (nj.contains("mesh_id"))
+                        evictIfStatic(AssetID::FromString(nj["mesh_id"].get<std::string>()));
+        }
+        if (m_scene) m_scene->MarkMaterialDirty();
+        m_filePaneDirty = true;
+    }
+
+    SA_LOG_INFO("AssetsPanel::ExtractMaterials — '{}': {} extracted, {} skipped",
+                glbPath.filename().string(), extracted, skipped);
 }
 
 void AssetsPanel::ReimportDir(const fs::path& dir) {

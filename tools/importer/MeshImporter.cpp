@@ -1,5 +1,6 @@
 #include "importer/MeshImporter.hpp"
 #include "importer/MaterialImporter.hpp"
+#include "importer/TextureImporter.hpp"
 
 #include "resource/cook/CookedMesh.hpp"
 #include "resource/cook/CookedSkeleton.hpp"
@@ -48,6 +49,14 @@ static bool NeedsRecook(const AssetEntry& entry, const fs::path& outPath) {
     if (fs::exists(entry.metaPath) && fs::last_write_time(entry.metaPath) > outTime)
         return true;
     return false;
+}
+
+static std::string MaterialDisplayName(const SceneData& scene, int32_t matIndex) {
+    if (matIndex < 0) return {};
+    if (matIndex < static_cast<int32_t>(scene.materials.size()) &&
+        !scene.materials[matIndex].name.empty())
+        return scene.materials[matIndex].name;
+    return "Material_" + std::to_string(matIndex);
 }
 
 static std::string SanitizeName(std::string s) {
@@ -194,6 +203,8 @@ static void CookPerNodeMeshes(const AssetEntry&           entry,
                         prim.materialIndex < static_cast<int32_t>(matIDs.size()))
                         sm.defaultMaterialID = matIDs[prim.materialIndex];
                     cooked.subMeshes.push_back(sm);
+                    cooked.materialNames.push_back(
+                        MaterialDisplayName(scene, prim.materialIndex));
 
                     const size_t vbBytes    = prim.vertices.size() * sizeof(Vertex);
                     const size_t prevVbSize = cooked.vertexData.size();
@@ -262,22 +273,39 @@ bool CookMesh(const AssetEntry& entry, const fs::path& cookCacheDir, bool force)
     GenerateSkeletonSidecars(entry.sourcePath, entry.meta.uuid, scene);
     GenerateAnimSidecars(entry.sourcePath, entry.meta.uuid, scene);
 
+    // ── Image classification helpers (Issue #101 fix) ─────────────────────────
+    // glTF dictates color space by usage: baseColor/emissive are sRGB, data maps
+    // (normal / metallic-roughness / occlusion) are linear.
+    auto usageSrgb = [&](int32_t imgIdx) {
+        for (const auto& mat : scene.materials)
+            if (mat.baseColorTexture.imageIndex == imgIdx ||
+                mat.emissiveTexture.imageIndex  == imgIdx)
+                return true;
+        return false;
+    };
+    // URI-referenced images resolve to a real file next to the source — those
+    // become their own Texture assets (registry-visible name, shared .satex)
+    // instead of derived-UUID embedded cooks.
+    auto externalImagePath = [&](int32_t i) -> fs::path {
+        if (i < 0 || i >= static_cast<int32_t>(scene.images.size())) return {};
+        const std::string& p = scene.images[i].path;
+        if (p.empty()) return {};
+        std::error_code ec;
+        const fs::path abs = entry.sourcePath.parent_path() / p;
+        return fs::exists(abs, ec) ? abs : fs::path{};
+    };
+
     // ── Cook embedded images → .satex ─────────────────────────────────────────
     for (int32_t imgIdx = 0; imgIdx < static_cast<int32_t>(scene.images.size()); ++imgIdx) {
         const ImageData& img = scene.images[imgIdx];
         if (img.pixels.empty()) continue;
+        if (!externalImagePath(imgIdx).empty()) continue;  // cooked as file asset below
 
         const AssetID   texId  = DeriveImageID(entry.meta.uuid, imgIdx);
         const fs::path  texOut = cookCacheDir / (texId.ToString() + ".satex");
         if (fs::exists(texOut)) continue;
 
-        bool isSrgb = false;
-        for (const auto& mat : scene.materials) {
-            if (mat.baseColorTexture.imageIndex == imgIdx ||
-                mat.emissiveTexture.imageIndex  == imgIdx) {
-                isSrgb = true; break;
-            }
-        }
+        const bool isSrgb = usageSrgb(imgIdx);
 
         CookedTexture cooked;
         cooked.id        = texId;
@@ -301,12 +329,56 @@ bool CookMesh(const AssetEntry& entry, const fs::path& cookCacheDir, bool force)
     // ── Cook materials → .samat ───────────────────────────────────────────────
     auto resolveImageID = [&](int32_t i) -> AssetID {
         if (i < 0 || i >= static_cast<int32_t>(scene.images.size())) return AssetID::Invalid();
-        return DeriveImageID(entry.meta.uuid, i);
+
+        const fs::path extPath = externalImagePath(i);
+        if (extPath.empty())
+            return DeriveImageID(entry.meta.uuid, i);
+
+        AssetEntry texEntry = EnsureMeta(extPath, "Texture");
+        // The scan default (srgb=1) is wrong for data maps — correct the
+        // sidecar to the usage-derived value and force a recook on mismatch.
+        const bool srgb = usageSrgb(i);
+        bool forceTex = false;
+        if (texEntry.meta.GetBool("srgb", true) != srgb) {
+            texEntry.meta.settings["srgb"] = srgb ? "1" : "0";
+            MetaFile::Save(texEntry.metaPath, texEntry.meta);
+            forceTex = true;
+            std::cout << "[Cook] TEX   srgb=" << (srgb ? 1 : 0) << " (by usage) for "
+                      << extPath.filename() << '\n';
+        }
+        CookTexture(texEntry, cookCacheDir, forceTex);
+        return texEntry.meta.uuid;
     };
     std::vector<AssetID> matIDs(scene.materials.size());
     for (int32_t mi = 0; mi < static_cast<int32_t>(scene.materials.size()); ++mi) {
         matIDs[mi] = DeriveMaterialID(entry.meta.uuid, mi);
-        CookMaterial(scene.materials[mi], matIDs[mi], resolveImageID, cookCacheDir);
+        CookMaterial(scene.materials[mi], matIDs[mi], resolveImageID, cookCacheDir, force);
+    }
+
+    // ── Apply material remap from .sameta (Issue #101 extract workflow) ────────
+    // Replaces the derived UUID with a user .samat asset per glTF material index.
+    // Applied AFTER CookMaterial so the derived .samatc is still produced under
+    // its own UUID (older .samesh files may still reference it).
+    for (int32_t mi = 0; mi < static_cast<int32_t>(matIDs.size()); ++mi) {
+        const std::string key = "mat_remap_" + std::to_string(mi);
+        const std::string val = entry.meta.GetString(key);
+        if (val.empty()) continue;
+
+        // Guard against DCC re-exports shuffling the material array: if the
+        // recorded name no longer matches, fall back to the derived material
+        // rather than remapping to the wrong asset.
+        const std::string expect = entry.meta.GetString("mat_remap_name_" + std::to_string(mi));
+        if (!expect.empty() && expect != scene.materials[mi].name) {
+            std::cerr << "[Cook] WARN  " << key << " name mismatch ('" << expect
+                      << "' vs '" << scene.materials[mi].name << "') — remap skipped\n";
+            continue;
+        }
+
+        const AssetID remapped = AssetID::FromString(val);
+        if (remapped.IsValid()) {
+            matIDs[mi] = remapped;
+            std::cout << "[Cook] REMAP material #" << mi << " → " << val << '\n';
+        }
     }
 
     // ── Cook skeletons → .saskelc ─────────────────────────────────────────────
@@ -373,6 +445,7 @@ bool CookMesh(const AssetEntry& entry, const fs::path& cookCacheDir, bool force)
             prim.materialIndex < static_cast<int32_t>(matIDs.size()))
             sm.defaultMaterialID = matIDs[prim.materialIndex];
         cooked.subMeshes.push_back(sm);
+        cooked.materialNames.push_back(MaterialDisplayName(scene, prim.materialIndex));
 
         const size_t vbBytes = prim.vertices.size() * sizeof(Vertex);
         cooked.vertexData.resize(cooked.vertexData.size() + vbBytes);

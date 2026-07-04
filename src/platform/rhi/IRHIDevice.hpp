@@ -21,6 +21,23 @@ enum class RHICullMode   : uint8_t { None, Back, Front };
 enum class RHIBlendMode  : uint8_t { Opaque, AlphaBlend, Additive };
 enum class RHITopology   : uint8_t { TriangleList, TriangleStrip, LineList };
 
+// Issue #56 — depth compare + fixed-function stencil.
+enum class RHICompareOp  : uint8_t { Never, Less, Equal, LessOrEqual, Greater,
+                                     NotEqual, GreaterOrEqual, Always };
+enum class RHIStencilOp  : uint8_t { Keep, Zero, Replace, IncrClamp, DecrClamp,
+                                     Invert, IncrWrap, DecrWrap };
+
+struct RHIStencilOpState {
+    RHIStencilOp failOp      = RHIStencilOp::Keep;
+    RHIStencilOp passOp      = RHIStencilOp::Keep;
+    RHICompareOp compareOp   = RHICompareOp::Always;
+    uint8_t      reference   = 0;
+    uint8_t      compareMask = 0xFF;
+    uint8_t      writeMask   = 0xFF;
+
+    bool operator==(const RHIStencilOpState&) const noexcept = default;
+};
+
 struct RHIPipelineDesc {
     RHIShaderHandle     vertShader;
     RHIShaderHandle     fragShader;
@@ -45,6 +62,18 @@ struct RHIPipelineDesc {
     RHITopology         topology         = RHITopology::TriangleList;
     bool                depthTest        = true;
     bool                depthWrite       = true;
+    // Issue #56: was hardcoded LESS_OR_EQUAL in the backend. EQUAL is used by
+    // the GBuffer main pass for prepass-filled (MASK) geometry.
+    RHICompareOp        depthCompareOp   = RHICompareOp::LessOrEqual;
+
+    // Issue #56: fixed-function stencil. The stencil attachment format is derived
+    // from depthFormat (D24_S8 → same) so every pipeline sharing a depth+stencil
+    // attachment stays render-pass compatible without per-caller bookkeeping.
+    // Defaults keep every existing pipeline bit-identical.
+    bool                stencilTestEnable  = false;
+    bool                stencilWriteEnable = false;
+    RHIStencilOpState   stencilFront;
+    RHIStencilOpState   stencilBack;
 
     // When true, vertex input is skipped (gl_VertexIndex fullscreen-tri trick)
     bool                noVertexInput    = false;
@@ -146,9 +175,14 @@ public:
 
     virtual void FreeDescriptorSet(RHIDescSetHandle ds) = 0;
 
+    // depthStencilReadLayout (Issue #56): write the descriptor with
+    // DEPTH_STENCIL_READ_ONLY layout — for sampling the depth plane of an
+    // image that is simultaneously bound as a read-only depth/stencil
+    // attachment (deferred lighting stencil masking).
     virtual void WriteDescriptorTexture(RHIDescSetHandle ds,
                                         uint32_t         binding,
-                                        RHITextureHandle texture) = 0;
+                                        RHITextureHandle texture,
+                                        bool             depthStencilReadLayout = false) = 0;
 
     // Writes texture to a specific array element of a descriptor binding.
     // Used by the bindless texture heap (set=3 binding=0, fixed-size array).

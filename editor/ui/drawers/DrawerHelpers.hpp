@@ -7,6 +7,7 @@
 #include "command/commands/FieldCommands.hpp"
 #include "command/commands/ComponentCommands.hpp"
 #include "ui/AssetDragPayload.hpp"
+#include "ui/EditorIconCache.hpp"
 
 #include <entt/entt.hpp>
 #include <imgui.h>
@@ -32,9 +33,12 @@ inline void DrawAssetID(const char* label, const AssetID& id) {
 // Interactive AssetID picker.
 // Returns true if the id was changed.
 // filterType — "Mesh", "Texture", etc.; nullptr or "" = show all.
+// iconCache  — when set, popup entries with image sources get a thumbnail
+//              (Issue #101: texture pickers on material / override drawers).
 inline bool DrawAssetIDField(const char* label, AssetID& id,
                              const char* filterType,
-                             const Resource::AssetRegistry* registry)
+                             const Resource::AssetRegistry* registry,
+                             EditorIconCache* iconCache = nullptr)
 {
     if (!registry) {
         DrawAssetID(label, id);
@@ -97,6 +101,7 @@ inline bool DrawAssetIDField(const char* label, AssetID& id,
         ImGui::BeginChild("##list", ImVec2(280, 200), false);
 
         const std::string_view ft = filterType ? filterType : "";
+        int thumbLoadBudget = 4;   // new thumbnail uploads per frame — avoids a hitch on first open
         for (const auto* e : registry->EntriesByType(ft)) {
             if (filter[0] != '\0') {
                 std::string haystack = e->name;
@@ -107,8 +112,28 @@ inline bool DrawAssetIDField(const char* label, AssetID& id,
                 if (haystack.find(needle) == std::string::npos)
                     continue;
             }
+
+            ImTextureID thumb = ImTextureID(0);
+            if (iconCache) {
+                const bool cached = iconCache->IsThumbnailCached(e->sourcePath);
+                if (cached || (thumbLoadBudget > 0 && iconCache->CanLoadThumbnail())) {
+                    thumb = iconCache->GetThumbnailForPath(e->sourcePath);
+                    if (!cached && thumb) --thumbLoadBudget;
+                }
+            }
+
             const bool selected = (e->id == id);
-            if (ImGui::Selectable(e->name.c_str(), selected)) {
+            constexpr float kThumbSz = 24.f;
+            if (thumb) {
+                ImGui::Image(thumb, ImVec2(kThumbSz, kThumbSz));
+                ImGui::SameLine();
+            } else if (iconCache) {
+                ImGui::Dummy(ImVec2(kThumbSz, kThumbSz));   // keep names aligned
+                ImGui::SameLine();
+            }
+            if (ImGui::Selectable(e->name.c_str(), selected,
+                                  ImGuiSelectableFlags_None,
+                                  ImVec2(0, iconCache ? kThumbSz : 0.f))) {
                 id      = e->id;
                 changed = true;
                 filter[0] = '\0';

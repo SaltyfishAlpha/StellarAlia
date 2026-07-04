@@ -138,14 +138,31 @@ static std::string ExtractVarName(const std::string& decl) {
 }
 
 // Parse a GLSL source file and return a map of variable name → annotation.
-static std::unordered_map<std::string, GLSLAnnotation>
-ParseGLSLAnnotations(const fs::path& path) {
-    std::unordered_map<std::string, GLSLAnnotation> result;
+// Follows #include "..." directives (resolved relative to the including file):
+// annotated blocks shared via include (e.g. material_params_pbr.glsl, Issue #56)
+// must still reach the .refl — SPIR-V carries no comments.
+static void ParseGLSLAnnotationsInto(const fs::path& path,
+                                     std::unordered_map<std::string, GLSLAnnotation>& result,
+                                     int depth) {
+    if (depth > 8) return;
     std::ifstream f(path);
-    if (!f) return result;
+    if (!f) return;
 
     std::string line;
     while (std::getline(f, line)) {
+        const size_t incPos = line.find("#include");
+        if (incPos != std::string::npos) {
+            const size_t q0 = line.find('"', incPos);
+            const size_t q1 = (q0 == std::string::npos) ? std::string::npos
+                                                        : line.find('"', q0 + 1);
+            if (q1 != std::string::npos) {
+                const fs::path inc =
+                    path.parent_path() / line.substr(q0 + 1, q1 - q0 - 1);
+                if (fs::exists(inc)) ParseGLSLAnnotationsInto(inc, result, depth + 1);
+            }
+            continue;
+        }
+
         const size_t commentPos = line.find("//");
         if (commentPos == std::string::npos) continue;
         const std::string comment = line.substr(commentPos + 2);
@@ -158,6 +175,12 @@ ParseGLSLAnnotations(const fs::path& path) {
         if (varName.empty()) continue;
         result[varName] = ann;
     }
+}
+
+static std::unordered_map<std::string, GLSLAnnotation>
+ParseGLSLAnnotations(const fs::path& path) {
+    std::unordered_map<std::string, GLSLAnnotation> result;
+    ParseGLSLAnnotationsInto(path, result, 0);
     return result;
 }
 

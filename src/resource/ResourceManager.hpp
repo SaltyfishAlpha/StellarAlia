@@ -38,6 +38,9 @@ struct GPUSubMesh {
     // v4: UUID of the .samat asset for this submesh (invalid when no material)
     AssetID   defaultMaterialID;
 
+    // v6: glTF material name for editor display (empty for pre-v6 cooked meshes)
+    std::string materialName;
+
     // Mesh-local AABB computed from vertex positions at load time.
     glm::vec3 boundsMin = glm::vec3( 1e30f);
     glm::vec3 boundsMax = glm::vec3(-1e30f);
@@ -81,6 +84,16 @@ public:
     // Calls WaitIdle internally — safe to call mid-frame during a project switch.
     // Preserves m_white1x1 and m_fileTextures (engine/editor-level resources).
     void ClearProjectAssets();
+
+    // Look up a mesh in the GPU cache WITHOUT loading it. Returns nullptr when
+    // the mesh is not cached.
+    [[nodiscard]] const GPUMesh* PeekMesh(const AssetID& id) const;
+
+    // Evict one mesh from the GPU + CPU caches (Issue #101 — material extract /
+    // remap changes the cooked defaultMaterialID, so the mesh must reload).
+    // GPU buffers go through the RHI deferred-destroy queue (mid-frame safe).
+    // No-op if the mesh is not cached.
+    void EvictMesh(const AssetID& id);
 
     // Destroy all GPU resources. Call before the device is destroyed.
     void Shutdown();

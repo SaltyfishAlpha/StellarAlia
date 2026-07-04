@@ -222,7 +222,8 @@ public:
 
     void WriteDescriptorTexture(RHIDescSetHandle ds,
                                 uint32_t         binding,
-                                RHITextureHandle texture) override {
+                                RHITextureHandle texture,
+                                bool /*depthStencilReadLayout*/ = false) override {
         SA_LOG_INFO("[DEV] WriteDescriptor  ds={} binding={} <- texture={}",
                     ds.index, binding, texture.index);
     }

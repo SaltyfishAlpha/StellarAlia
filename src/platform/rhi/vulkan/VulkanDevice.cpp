@@ -109,8 +109,9 @@ VulkanDevice::~VulkanDevice() {
         if (!e.valid || e.swapchain) continue;
         for (auto v : e.mipViews)
             if (v) vkDestroyImageView(m_device, v, nullptr);
-        if (e.view)  vkDestroyImageView(m_device, e.view, nullptr);
-        if (e.alloc) vmaDestroyImage(m_allocator, e.image, e.alloc);
+        if (e.view)             vkDestroyImageView(m_device, e.view, nullptr);
+        if (e.sampledDepthView) vkDestroyImageView(m_device, e.sampledDepthView, nullptr);
+        if (e.alloc)            vmaDestroyImage(m_allocator, e.image, e.alloc);
     }
 
     if (m_samplerLinearRepeat)  vkDestroySampler(m_device, m_samplerLinearRepeat,  nullptr);
@@ -583,8 +584,9 @@ void VulkanDevice::FlushPendingFree(uint32_t slot) {
     for (auto& img : pf.images) {
         for (auto v : img.mipViews)
             if (v) vkDestroyImageView(m_device, v, nullptr);
-        if (img.view)  vkDestroyImageView(m_device, img.view, nullptr);
-        if (img.alloc) vmaDestroyImage(m_allocator, img.image, img.alloc);
+        if (img.view)             vkDestroyImageView(m_device, img.view, nullptr);
+        if (img.sampledDepthView) vkDestroyImageView(m_device, img.sampledDepthView, nullptr);
+        if (img.alloc)            vmaDestroyImage(m_allocator, img.image, img.alloc);
     }
     pf.images.clear();
 }
@@ -750,7 +752,14 @@ RHITextureHandle VulkanDevice::AllocTextureSlot(VkImage image, VkImageView view,
                                                  const RHITextureDesc& desc,
                                                  bool isSwapchain) {
     RHITextureHandle h{static_cast<uint32_t>(m_textures.size())};
-    m_textures.push_back({image, view, alloc, desc, true, isSwapchain});
+    TextureEntry entry{};
+    entry.image     = image;
+    entry.view      = view;
+    entry.alloc     = alloc;
+    entry.desc      = desc;
+    entry.valid     = true;
+    entry.swapchain = isSwapchain;
+    m_textures.push_back(std::move(entry));
     return h;
 }
 
@@ -1049,11 +1058,23 @@ RHITextureHandle VulkanDevice::CreateTexture(const RHITextureDesc& desc) {
     VkImageView view = VK_NULL_HANDLE;
     vkCreateImageView(m_device, &viewCI, nullptr, &view);
 
+    // Issue #56: depth+stencil main view is attachment-only (sampling a
+    // DEPTH|STENCIL view is invalid) — create a DEPTH-only sibling for
+    // sampled-image descriptors.
+    VkImageView sampledDepthView = VK_NULL_HANDLE;
+    if (aspect & VK_IMAGE_ASPECT_STENCIL_BIT) {
+        VkImageViewCreateInfo depthViewCI = viewCI;
+        depthViewCI.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        vkCreateImageView(m_device, &depthViewCI, nullptr, &sampledDepthView);
+    }
+
     // Normalize: store arrayLayers=6 for cubemaps so Upload/Readback helpers
     // reading entry.desc.arrayLayers always see the real GPU layer count.
     RHITextureDesc storedDesc = desc;
     if (desc.cubemap) storedDesc.arrayLayers = 6;
-    return AllocTextureSlot(img, view, alloc, storedDesc, /*swapchain=*/false);
+    const RHITextureHandle h = AllocTextureSlot(img, view, alloc, storedDesc, /*swapchain=*/false);
+    if (h.IsValid()) m_textures[h.index].sampledDepthView = sampledDepthView;
+    return h;
 }
 
 void VulkanDevice::UploadTextureData(RHITextureHandle handle,
@@ -1238,14 +1259,16 @@ void VulkanDevice::DestroyTexture(RHITextureHandle handle) {
     if (!entry.valid || entry.swapchain) return;
     // Issue #72 Step 7.5: defer until fence for current slot fires.
     PendingImage pi;
-    pi.image    = entry.image;
-    pi.alloc    = entry.alloc;
-    pi.view     = entry.view;
-    pi.mipViews = std::move(entry.mipViews);
+    pi.image            = entry.image;
+    pi.alloc            = entry.alloc;
+    pi.view             = entry.view;
+    pi.sampledDepthView = entry.sampledDepthView;
+    pi.mipViews         = std::move(entry.mipViews);
     m_pendingFree[m_frameIdx].images.push_back(std::move(pi));
-    entry.image = VK_NULL_HANDLE;
-    entry.alloc = VK_NULL_HANDLE;
-    entry.view  = VK_NULL_HANDLE;
+    entry.image            = VK_NULL_HANDLE;
+    entry.alloc            = VK_NULL_HANDLE;
+    entry.view             = VK_NULL_HANDLE;
+    entry.sampledDepthView = VK_NULL_HANDLE;
     entry.mipViews.clear();
     entry.valid = false;
 }
@@ -1435,15 +1458,20 @@ void VulkanDevice::FreeDescriptorSet(RHIDescSetHandle handle) {
 
 void VulkanDevice::WriteDescriptorTexture(RHIDescSetHandle dsHandle,
                                            uint32_t binding,
-                                           RHITextureHandle textureHandle) {
+                                           RHITextureHandle textureHandle,
+                                           bool depthStencilReadLayout) {
     if (!dsHandle.IsValid()      || dsHandle.index      >= m_descSets.size())      return;
     if (!textureHandle.IsValid() || textureHandle.index >= m_textures.size())      return;
     if (!m_textures[textureHandle.index].valid)                                    return;
 
+    const auto& texEntry = m_textures[textureHandle.index];
     VkDescriptorImageInfo imgInfo{};
     imgInfo.sampler     = m_samplerLinearRepeat;  // default sampler; allow per-binding override later
-    imgInfo.imageView   = m_textures[textureHandle.index].view;
-    imgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    imgInfo.imageView   = texEntry.sampledDepthView ? texEntry.sampledDepthView
+                                                    : texEntry.view;
+    imgInfo.imageLayout = depthStencilReadLayout
+                              ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                              : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkWriteDescriptorSet write{};
     write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -1463,9 +1491,11 @@ void VulkanDevice::WriteDescriptorTextureArray(RHIDescSetHandle dsHandle,
     if (!textureHandle.IsValid() || textureHandle.index >= m_textures.size()) return;
     if (!m_textures[textureHandle.index].valid)                               return;
 
+    const auto& texEntry = m_textures[textureHandle.index];
     VkDescriptorImageInfo imgInfo{};
     imgInfo.sampler     = m_samplerLinearRepeat;
-    imgInfo.imageView   = m_textures[textureHandle.index].view;
+    imgInfo.imageView   = texEntry.sampledDepthView ? texEntry.sampledDepthView
+                                                    : texEntry.view;
     imgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkWriteDescriptorSet write{};
@@ -1767,12 +1797,54 @@ RHIPipelineHandle VulkanDevice::CreatePipeline(const RHIPipelineDesc& desc) {
     ms.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
-    // Depth/stencil
+    // Depth/stencil (Issue #56: compareOp + fixed-function stencil from desc)
+    const auto toVkCompareOp = [](RHICompareOp op) {
+        switch (op) {
+            case RHICompareOp::Never:          return VK_COMPARE_OP_NEVER;
+            case RHICompareOp::Less:           return VK_COMPARE_OP_LESS;
+            case RHICompareOp::Equal:          return VK_COMPARE_OP_EQUAL;
+            case RHICompareOp::Greater:        return VK_COMPARE_OP_GREATER;
+            case RHICompareOp::NotEqual:       return VK_COMPARE_OP_NOT_EQUAL;
+            case RHICompareOp::GreaterOrEqual: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+            case RHICompareOp::Always:         return VK_COMPARE_OP_ALWAYS;
+            default:                           return VK_COMPARE_OP_LESS_OR_EQUAL;
+        }
+    };
+    const auto toVkStencilOp = [](RHIStencilOp op) {
+        switch (op) {
+            case RHIStencilOp::Zero:      return VK_STENCIL_OP_ZERO;
+            case RHIStencilOp::Replace:   return VK_STENCIL_OP_REPLACE;
+            case RHIStencilOp::IncrClamp: return VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+            case RHIStencilOp::DecrClamp: return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
+            case RHIStencilOp::Invert:    return VK_STENCIL_OP_INVERT;
+            case RHIStencilOp::IncrWrap:  return VK_STENCIL_OP_INCREMENT_AND_WRAP;
+            case RHIStencilOp::DecrWrap:  return VK_STENCIL_OP_DECREMENT_AND_WRAP;
+            default:                      return VK_STENCIL_OP_KEEP;
+        }
+    };
+    const auto toVkStencilState = [&](const RHIStencilOpState& s) {
+        VkStencilOpState o{};
+        o.failOp      = toVkStencilOp(s.failOp);
+        o.passOp      = toVkStencilOp(s.passOp);
+        o.depthFailOp = toVkStencilOp(s.failOp); // RHI has no separate depth-fail op
+        o.compareOp   = toVkCompareOp(s.compareOp);
+        o.compareMask = s.compareMask;
+        // Vulkan has no stencilWriteEnable flag — write off = writeMask 0.
+        o.writeMask   = desc.stencilWriteEnable ? s.writeMask : 0u;
+        o.reference   = s.reference;
+        return o;
+    };
+
     VkPipelineDepthStencilStateCreateInfo ds{};
     ds.sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     ds.depthTestEnable  = desc.depthTest  ? VK_TRUE : VK_FALSE;
     ds.depthWriteEnable = desc.depthWrite ? VK_TRUE : VK_FALSE;
-    ds.depthCompareOp   = VK_COMPARE_OP_LESS_OR_EQUAL;
+    ds.depthCompareOp   = toVkCompareOp(desc.depthCompareOp);
+    if (desc.stencilTestEnable || desc.stencilWriteEnable) {
+        ds.stencilTestEnable = VK_TRUE;
+        ds.front             = toVkStencilState(desc.stencilFront);
+        ds.back              = toVkStencilState(desc.stencilBack);
+    }
 
     // Blend
     std::vector<VkPipelineColorBlendAttachmentState> blendAttachments(
@@ -1821,6 +1893,12 @@ RHIPipelineHandle VulkanDevice::CreatePipeline(const RHIPipelineDesc& desc) {
     renderingCI.colorAttachmentCount    = static_cast<uint32_t>(colorFmts.size());
     renderingCI.pColorAttachmentFormats = colorFmts.data();
     renderingCI.depthAttachmentFormat   = ToVkFormat(desc.depthFormat);
+    // Issue #56: stencil-bearing depth formats always declare the stencil
+    // attachment — must match BeginRenderPass, which attaches stencil iff the
+    // depth image has a stencil aspect (render-pass compatibility for ALL
+    // pipelines sharing the attachment, stencil users or not).
+    if (desc.depthFormat == RHIFormat::D24_S8)
+        renderingCI.stencilAttachmentFormat = renderingCI.depthAttachmentFormat;
 
     VkGraphicsPipelineCreateInfo pipelineCI{};
     pipelineCI.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;

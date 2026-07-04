@@ -97,7 +97,11 @@ void InspectorPanel::RegisterAssetDrawers() {
                      ".sainputmap"})
         m_assetDrawers[ext] = std::make_unique<TextAssetInspector>();
 
-    m_assetDrawers[".samat"]   = std::make_unique<MaterialAssetInspector>();
+    {
+        auto matInsp = std::make_unique<MaterialAssetInspector>();
+        matInsp->SetContext(m_ctx);
+        m_assetDrawers[".samat"] = std::move(matInsp);
+    }
     m_assetDrawers[".sascene"] = std::make_unique<SceneAssetInspector>();
 
     for (auto ext : {".gltf", ".glb", ".fbx", ".obj"})

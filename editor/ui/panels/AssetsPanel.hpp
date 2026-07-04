@@ -16,7 +16,9 @@
 namespace StellarAlia          { class Application; }
 namespace StellarAlia          { class MaterialManager; }
 namespace StellarAlia          { class InputSystem; }
+namespace StellarAlia          { class Scene; }
 namespace StellarAlia::Resource { class AssetRegistry; }
+namespace StellarAlia::Resource { class ResourceManager; }
 namespace StellarAlia::Editor   { class EditorIconCache; }
 namespace StellarAlia::Editor   { class EntityTemplateRegistry; }
 
@@ -113,6 +115,11 @@ private:
     // .glb path from the registry before delegating to CookAnimSidecar.
     void ReimportFile(const std::filesystem::path& srcPath);
 
+    // Issue #101 — copy each derived .samatc of a .glb/.gltf into an editable
+    // .samat asset under assets/materials/, record mat_remap_<idx> in the glb's
+    // .sameta, then force-recook the mesh so submeshes reference the new assets.
+    void ExtractMaterials(const std::filesystem::path& glbPath);
+
     // Force-recook every asset under dir (recursive).
     void ReimportDir(const std::filesystem::path& dir);
 
@@ -131,6 +138,8 @@ private:
     Application*              m_app            = nullptr;
     Resource::AssetRegistry*  m_registry       = nullptr;
     MaterialManager*          m_matMgr         = nullptr;
+    Resource::ResourceManager* m_resMgr        = nullptr;
+    Scene*                    m_scene          = nullptr;
     EditorDiagnostics*        m_diagnostics    = nullptr;
     InputSystem*              m_input          = nullptr;
     EditorSelection*          m_selectionCtx   = nullptr;

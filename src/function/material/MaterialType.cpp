@@ -83,13 +83,24 @@ MaterialType::CreateInstance(RHI::IRHIDevice*      device,
 
 RHI::RHIPipelineHandle MaterialType::GetOrCreatePipeline(RHI::IRHIDevice*     device,
                                                            const AttachmentKey& key) {
-    return shader->GetOrCreatePipeline(device, key,
-                                       defaultCullMode,
-                                       defaultBlendMode,
-                                       defaultTopology,
-                                       defaultDepthTest,
-                                       defaultDepthWrite,
-                                       noVertexInput);
+    return shader->GetOrCreatePipeline(device, key, DefaultRenderState());
+}
+
+RHI::RHIPipelineHandle MaterialType::GetOrCreatePipeline(RHI::IRHIDevice*           device,
+                                                           const AttachmentKey&       key,
+                                                           const PipelineRenderState& state) {
+    return shader->GetOrCreatePipeline(device, key, state);
+}
+
+PipelineRenderState MaterialType::DefaultRenderState() const noexcept {
+    PipelineRenderState s{};
+    s.cullMode      = defaultCullMode;
+    s.blendMode     = defaultBlendMode;
+    s.topology      = defaultTopology;
+    s.depthTest     = defaultDepthTest;
+    s.depthWrite    = defaultDepthWrite;
+    s.noVertexInput = noVertexInput;
+    return s;
 }
 
 } // namespace StellarAlia

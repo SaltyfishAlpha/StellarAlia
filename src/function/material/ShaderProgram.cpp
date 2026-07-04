@@ -95,7 +95,23 @@ RHI::RHIPipelineHandle ShaderProgram::GetOrCreatePipeline(
     bool                 depthWrite,
     bool                 noVertexInput)
 {
-    auto it = m_pipelineCache.find(key);
+    PipelineRenderState state{};
+    state.cullMode      = cullMode;
+    state.blendMode     = blendMode;
+    state.topology      = topology;
+    state.depthTest     = depthTest;
+    state.depthWrite    = depthWrite;
+    state.noVertexInput = noVertexInput;
+    return GetOrCreatePipeline(device, key, state);
+}
+
+RHI::RHIPipelineHandle ShaderProgram::GetOrCreatePipeline(
+    RHI::IRHIDevice*           device,
+    const AttachmentKey&       key,
+    const PipelineRenderState& state)
+{
+    const PipelineStateKey cacheKey{key, state};
+    auto it = m_pipelineCache.find(cacheKey);
     if (it != m_pipelineCache.end()) return it->second;
 
     RHI::RHIPipelineDesc pipeDesc{};
@@ -136,12 +152,17 @@ RHI::RHIPipelineHandle ShaderProgram::GetOrCreatePipeline(
         pipeDesc.colorFormats[i] = key.colorFormats[i];
     pipeDesc.depthFormat = key.depthFormat;
 
-    pipeDesc.cullMode      = cullMode;
-    pipeDesc.blendMode     = blendMode;
-    pipeDesc.topology      = topology;
-    pipeDesc.depthTest     = depthTest;
-    pipeDesc.depthWrite    = depthWrite;
-    pipeDesc.noVertexInput = noVertexInput;
+    pipeDesc.cullMode           = state.cullMode;
+    pipeDesc.blendMode          = state.blendMode;
+    pipeDesc.topology           = state.topology;
+    pipeDesc.depthTest          = state.depthTest;
+    pipeDesc.depthWrite         = state.depthWrite;
+    pipeDesc.depthCompareOp     = state.depthCompareOp;
+    pipeDesc.noVertexInput      = state.noVertexInput;
+    pipeDesc.stencilTestEnable  = state.stencilTestEnable;
+    pipeDesc.stencilWriteEnable = state.stencilWriteEnable;
+    pipeDesc.stencilFront       = state.stencilFront;
+    pipeDesc.stencilBack        = state.stencilBack;
     pipeDesc.debugName  = "ShaderProgram::Pipeline";
 
     auto pipeline = device->CreatePipeline(pipeDesc);
@@ -150,7 +171,7 @@ RHI::RHIPipelineHandle ShaderProgram::GetOrCreatePipeline(
         return {};
     }
 
-    m_pipelineCache[key] = pipeline;
+    m_pipelineCache[cacheKey] = pipeline;
     return pipeline;
 }
 

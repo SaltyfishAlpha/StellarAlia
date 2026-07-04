@@ -48,6 +48,17 @@ bool SaveCookedMesh(const CookedMesh& mesh, const std::string& path) {
         f.write(reinterpret_cast<const char*>(mesh.skinData.data()),
                 static_cast<std::streamsize>(mesh.skinData.size()));
 
+    // v6: material name table — always submesh_count entries (missing names = empty)
+    const uint32_t nameCount = hdr.submesh_count;
+    f.write(reinterpret_cast<const char*>(&nameCount), sizeof(nameCount));
+    for (uint32_t i = 0; i < nameCount; ++i) {
+        const std::string& name =
+            i < mesh.materialNames.size() ? mesh.materialNames[i] : std::string{};
+        const uint32_t len = static_cast<uint32_t>(name.size());
+        f.write(reinterpret_cast<const char*>(&len), sizeof(len));
+        f.write(name.data(), static_cast<std::streamsize>(len));
+    }
+
     return f.good();
 }
 
@@ -57,7 +68,8 @@ bool LoadCookedMesh(const std::string& path, CookedMesh& out) {
 
     SameshFormat::FileHeader hdr{};
     f.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
-    if (!f || hdr.magic != SameshFormat::Magic || hdr.version != SameshFormat::Version)
+    if (!f || hdr.magic != SameshFormat::Magic ||
+        hdr.version < SameshFormat::MinVersion || hdr.version > SameshFormat::Version)
         return false;
 
     out.id.hi         = hdr.uuid_hi;
@@ -96,6 +108,21 @@ bool LoadCookedMesh(const std::string& path, CookedMesh& out) {
         out.skinData.resize(hdr.skin_data_size);
         f.read(reinterpret_cast<char*>(out.skinData.data()),
                static_cast<std::streamsize>(hdr.skin_data_size));
+    }
+
+    out.materialNames.clear();
+    if (hdr.version >= 6) {
+        uint32_t nameCount = 0;
+        f.read(reinterpret_cast<char*>(&nameCount), sizeof(nameCount));
+        if (!f || nameCount != hdr.submesh_count) return false;
+        out.materialNames.resize(nameCount);
+        for (auto& name : out.materialNames) {
+            uint32_t len = 0;
+            f.read(reinterpret_cast<char*>(&len), sizeof(len));
+            if (!f || len > 4096) return false;  // sanity cap against corrupt files
+            name.resize(len);
+            if (len) f.read(name.data(), static_cast<std::streamsize>(len));
+        }
     }
 
     return f.good() || f.eof();

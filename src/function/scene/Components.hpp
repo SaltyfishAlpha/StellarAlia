@@ -129,10 +129,27 @@ struct AreaLightComponent {
 //
 using ParamValue = std::variant<float, glm::vec2, glm::vec3, glm::vec4>;
 
+// Issue #101: overrides scoped to a single sub-mesh (keyed by submesh index in
+// MaterialOverrideComponent::slotOverrides). Applied on top of the entity-wide
+// fields, so a slot entry only needs the params that differ.
+struct MaterialSlotOverride {
+    std::map<std::string, ParamValue> scalars;
+    std::map<std::string, AssetID>    textures;
+    int8_t                            alphaMode   = -1;   // -1 = inherit
+    int8_t                            doubleSided = -1;
+};
+
 struct MaterialOverrideComponent {
     AssetID                           materialAsset;
     std::map<std::string, ParamValue> scalars;
     std::map<std::string, AssetID>    textures;
+    // Issue #56: per-entity pipeline-state overrides. -1 = inherit from the
+    // material asset; alphaMode 0/1/2 = Opaque/Mask/Blend (AlphaMode enum),
+    // doubleSided 0/1 = off/on. int8 sentinels keep serialization trivial.
+    int8_t                            alphaMode   = -1;
+    int8_t                            doubleSided = -1;
+    // Issue #101: per-submesh overrides layered after the entity-wide ones.
+    std::map<int32_t, MaterialSlotOverride> slotOverrides;
 };
 
 // ── Animation ─────────────────────────────────────────────────────────────────

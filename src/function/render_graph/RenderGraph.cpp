@@ -103,6 +103,14 @@ void RGPassBuilder::WriteDepth(RGTextureHandle tex) {
     m_writes.push_back({tex, RHI::RHIResourceState::DepthWrite});
 }
 
+void RGPassBuilder::ReadDepthStencil(RGTextureHandle tex) {
+    // Recorded as a "write" so the barrier path transitions to the explicit
+    // DepthRead state (the plain read path hardcodes ShaderRead). No content
+    // is modified; ordering against the depth producer comes from the pass's
+    // other read edges.
+    m_writes.push_back({tex, RHI::RHIResourceState::DepthRead});
+}
+
 void RGPassBuilder::WriteUAV(RGTextureHandle tex) {
     m_writes.push_back({tex, RHI::RHIResourceState::UnorderedAccess});
 }

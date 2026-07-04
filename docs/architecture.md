@@ -426,16 +426,34 @@ CookedMesh {
         vertexOffset, vertexCount
         indexOffset,  indexCount
         materialIndex          // index into original glTF material array
-        AssetID defaultMaterialID  // → .samat
+        AssetID defaultMaterialID  // → .samat (or the mat_remap_<idx> target, Issue #101)
         glm::mat4 localTransform   // pre-baked node world transform
     }
+    vector<string>  materialNames  // v6: per-submesh glTF material name (editor labels)
     vector<uint8_t> vertexData   // Vertex: pos3 normal3 tangent4 uv2 (48 bytes)
     vector<uint8_t> indexData
     vector<uint8_t> skinData     // SkinVertex[]: uvec4 joints + vec4 weights (32 bytes/vert); empty for static meshes
 }
 // IsSkinned() → !skinData.empty()
-// Format version 5+ includes skinData blob
+// Format version 5+ includes skinData blob; v6 appends the material name table
+// (readers accept v5 with empty names — no forced reimport, and the version
+// mismatch makes NeedsRecook upgrade the file on the next scan anyway)
 ```
+
+### Imported-Material Workflow — Extract & Remap (Issue #101)
+
+glTF materials cook to derived-UUID `.samatc` files (read-only cook products, not in the
+AssetRegistry). To edit them, the AssetsPanel context menu on a `.glb/.gltf` offers
+**Extract Materials**: each derived `.samatc` is copied to an editable
+`assets/materials/<glbStem>_<matName>.samat` source asset (fresh UUID + `.sameta`), the
+mapping is recorded in the glb's `.sameta` as `mat_remap_<idx>=<uuid>` (+
+`mat_remap_name_<idx>` for DCC re-export shift detection), and the mesh is force-recooked
+so every `CookedSubMesh.defaultMaterialID` points at the extracted asset — asset-level, so
+all entities using the mesh follow, and the remap survives reimports (`EnsureMeta` never
+rewrites an existing `.sameta`). `MaterialAssetInspector` edits `.samat` sources in place
+(reflected param widgets + render-state combos; Save → write-back + `CookStandaloneMaterial`
++ `MaterialManager::EvictInstance` + `MarkMaterialDirty`). Derived `.samatc` stay read-only;
+extraction is the only editing path (Unity model).
 
 ### Cooked Skeleton — `.saskel`
 
@@ -514,7 +532,7 @@ storage. `Scene` wraps an `entt::registry` and exposes `View<C...>()`.
 | `AnimatedTransformComponent` | Per-frame animated local pose; overrides `TransformComponent` when present |
 | `StaticMeshComponent` | `meshAsset` (→ .samesh) — mesh identity only |
 | `MeshRendererComponent` | `materialSlots[]` (→ .samat per sub-mesh) + `castShadow` / `receiveShadow` — shared by static and skinned mesh entities |
-| `MaterialOverrideComponent` | Unified material override: optional `materialAsset` + named `scalars` + named `textures` |
+| `MaterialOverrideComponent` | Unified material override: optional `materialAsset` + named `scalars` + named `textures` + per-submesh `slotOverrides` (Issue #101) |
 | `SkinnedMeshComponent` | Per-entity GPU skinning state: `meshAsset`, `skinMatricesBuffer` (curr pose) + `skinMatricesBufferPrev` (prev pose, Issue #84), `skinDescSet` + `velocityDescSet`, `boneCount`, `ready`, `poseSeeded`, `lastEvalClipId`; mesh geometry (`vertexBuffer`/`indexBuffer`/`skinDataBuffer`) lives in `GPUMesh` (ResourceManager) |
 | `PrevTransformComponent` | Issue #84 — captures last-frame `WorldTransformComponent.matrix` for per-object motion vector reconstruction. Auto-emplaced by `Scene::CreateEntity`; `seeded` flag guards first-frame velocity to be zero |
 | `AnimatorComponent` | `clipAsset` (→ .saanim), `time`, `speed`, `looping`, `playing` |
@@ -575,8 +593,11 @@ struct MaterialOverrideComponent {
     AssetID                           materialAsset;  // invalid = use mesh-default or slot
     std::map<std::string, ParamValue> scalars;        // named UBO param overrides
     std::map<std::string, AssetID>    textures;       // named texture slot overrides
+    std::map<int32_t, MaterialSlotOverride> slotOverrides;  // Issue #101: per-submesh layer
 };
 // ParamValue = variant<float, vec2, vec3, vec4>
+// MaterialSlotOverride = {scalars, textures, alphaMode, doubleSided} — applied on
+// top of the entity-wide fields for one submesh index (base → entity → slot).
 ```
 
 ### ColorGradingSettings
@@ -1455,10 +1476,23 @@ descriptors (covers the 4096-slot bindless heap + per-MaterialType legacy bindin
 
 ```
 set=0  BindlessTextureHeap   ← bound 1× per cmd buffer (engine-wide stable)
-set=1  FrameUniforms          ← bound 1× per pass
+set=1  FrameUniforms          ← bound 1× per pass (binding=7 appended Issue #56:
+                                 t_ShadowMap for forward passes, written once at Init)
 set=2  MaterialParams SSBO    ← per-draw via dynamic offset into MaterialParamRing
 set=3  Skin / per-object      ← per-skinned-draw (only on skinned pipelines)
 ```
+
+The PBR `MaterialParams` block declaration is shared via `material_params_pbr.glsl`
+(Issue #56) — `deferred_geometry.frag`, `depth_prepass_mask.frag`, and
+`forward_transparent.frag` consume the SAME per-draw blob (`DrawItem::
+materialUboOffset`), so the include is the single source of truth for the byte
+layout (tail member `alphaCutoff`, default 0.5 via annotation). ShaderReflectTool's
+annotation parser follows `#include` (SPIR-V carries no comments). `.samatc` gained
+top-level `alphaMode`/`doubleSided` pipeline-state fields (missing = opaque legacy);
+`MaterialInstance` carries them as `MaterialRenderState` (Mask/Blend are SSBO-path
+only — legacy-UBO assets downgrade to Opaque with a warning). Per-entity overrides
+live on `MaterialOverrideComponent` (`alphaMode`/`doubleSided` int8, -1 = inherit),
+edited via the Material Override drawer (undoable) and serialized with the scene.
 
 Lower set index = more stable. Vulkan layout compatibility cascades from set=0 upward,
 so placing the most stable resource (bindless heap) at set=0 means it survives all
@@ -1531,7 +1565,12 @@ Compiled VS+FS pair. Manages:
   - slot 1 = `m_frameLayout` — passed in via `Desc::frameLayout`
   - slot 2 = `m_materialLayout` — derived from reflection set=2 (or empty if shader has no set=2)
   - slot 3 = `m_set3Layout` — derived from reflection set=3 (skin, only set when shader uses set=3)
-- Pipeline cache: `AttachmentKey → RHIPipelineHandle` (lazy, per RT format combo)
+- Pipeline cache: `PipelineStateKey → RHIPipelineHandle` (Issue #56 — key = AttachmentKey
+  **plus the full fixed-function state** `PipelineRenderState` {cull/blend/topology/
+  depthCompareOp/depthTest/depthWrite/stencil}, so one shader serves
+  {Opaque/Mask}×{single/double-sided}×{LEQUAL/EQUAL}×{stencil} permutations.
+  Legacy loose-flag `GetOrCreatePipeline` overload retained; explicit-state overload
+  + `MaterialType::DefaultRenderState()` for variant composition)
 
 ### SSBO_DYN promotion
 
@@ -1918,7 +1957,7 @@ GPU (ImmediateCompute):
 | RT0 | `RGBA8_UNORM` | albedo.rgb + occlusion.a |
 | RT1 | `RGBA16_SFLOAT` | oct-encoded normal (RG) + roughness (B) + metallic (A) |
 | RT2 | `RGBA16_SFLOAT` | data.rgb + encoded shading-model ID (A) |
-| Depth | `D32_SFLOAT` | View-space depth; Lighting pass reconstructs world position via `invViewProj × NDC` |
+| Depth | `D24_UNORM_S8_UINT` (Issue #56) | Depth + stencil: geometry writes stencil=1, DeferredLighting stencil-tests ==1 (background/cut-outs rejected fixed-function). Lighting reconstructs world position via `invViewProj × NDC`. Stencil formats carry two VkImageViews — DEPTH\|STENCIL for attachments, depth-only for sampling (`TextureEntry::sampledDepthView`). Shadow map stays D32F |
 
 **RT2.a** encodes the shading model ID via `EncodeShadingFlags(modelID)` / `DecodeShadingModelID(a)`.
 `SHADING_MODEL_PBR = 0`; custom evaluators are assigned IDs ≥ 1 in stable alphabetical order.
@@ -1931,13 +1970,15 @@ Normal encoding uses **Octahedral Normal Encoding** (OctEncode/OctDecode).
 |---------|-----------|--------|--------|
 | `ShadowFeature` | `config.shadowEnabled` | shadow map (D32, 2048²) | `shadow.vert/.frag` (+ `shadow_skinned.vert` for skinned) |
 | `SkyboxFeature` | always | HDR buffer (transient) | `skybox.vert/.frag` |
-| `GBufferFeature` | always | RT0/RT1/RT2 + depth | `deferred_geometry.vert/.frag` (+ `deferred_geometry_skinned.vert` for skinned) |
+| `DepthPrepassFeature` (Issue #56) | always | Owns the frame's depth+stencil clear (GBuffer therefore always Loads), then draws MASK (alpha-test) geometry: one albedo.a sample + `discard`, depth + stencil=1 written fixed-function. `RendererConfig::depthPrepassMode` (MaskedOnly default; Full = TODO, falls back with warn) | `deferred_geometry(.vert\|_skinned.vert)` + `depth_prepass_mask.frag` |
+| `GBufferFeature` | always | RT0/RT1/RT2 + depth (loadOp=Load). Opaque = LEQUAL/depthWrite; MASK = EQUAL/no-write + `early_fragment_tests` (no discard — prepass already resolved cut-outs); all write stencil=1; BLEND items skipped (forward path). Per-item pipeline variants composed in BuildDrawList via `PipelineRenderState` | `deferred_geometry.vert/.frag` (+ `deferred_geometry_skinned.vert` for skinned) |
 | `VelocityPrepassFeature` (Issue #84) | enabled when `MotionBlurFeature::m_enabled` OR `TAAFeature::m_enabled` (Issue #85) | Per-object writes to `handles.velocity` (RG16F): each visible draw rasterises curr & prev clip-space positions. `gl_Position` uses jittered VP (matches GBuffer depth); the velocity output uses unjittered `currUnjitteredViewProj` × `prevViewProj` so TAA can reproject without jitter compensation. Skinned variant samples curr/prev bone matrices via set=3 bindings 0/2 (`velocityDescSet`) | `velocity_prepass.vert/.frag` (+ `velocity_prepass_skinned.vert` for skinned) |
 | `SSAOFeature` | always registered; disabled → fills ssaoTex with 1.0 | half-res R8 AO → blurred into `ssaoTex` | `ssao.frag` + `ssao_blur.frag` |
-| `DeferredLightingFeature` | always | HDR (transient RGBA16F) | `deferred_lighting.frag` |
+| `DeferredLightingFeature` | always | HDR (transient RGBA16F). Issue #56: depth+stencil bound as a **read-only attachment** (stencil test ==1) while the depth plane is simultaneously sampled — `RGPassBuilder::ReadDepthStencil` + `RHIDepthAttachment::readOnly` + descriptor written with DEPTH_STENCIL_READ_ONLY layout. PBR math lives in shared `pbr_shading.glsl`; local shadow sampler renamed `t_GShadowMap` | `deferred_lighting.frag` |
 | `SSRFeature` (Issue #48 / #89) | always registered; skips if `pp.ssrEnabled==false` | 5 compute passes: HiZ_Copy + HiZ_SPD (min pyramid) → SSR_Trace (8-spp GGX, screen-space Hi-Z DDA) → SSR_Resolve (bilateral) → SSR_Temporal (velocity-reprojected adaptive accumulation + variance clip) → composite replaces IBL env-probe specular into `SSR_Composite`; sets `handles.hdr`. See [Screen Space Reflections](#screen-space-reflections-issue-48-phase-1--89-phase-2) | `ssr.comp`, `hiz_copy/hiz_spd.comp`, `ssr_resolve/ssr_temporal.comp` |
 | `SelectionMaskFeature` | always | R8 silhouette mask | `selection_mask.vert/.frag` (+ `selection_mask_skinned.vert` for skinned) |
 | `TAAFeature` | always registered; disabled → passes `handles.hdr` through | TAA-resolved into ping-pong history; `handles.taaResolved` | `taa_resolve.frag` |
+| `ForwardTransparentFeature` (Issue #56) | skips (invalid `m_outputHandle`) when no visible BLEND item | ① copies `taaResolved` into a fresh transient (`ForwardHDR`) — never blends into the TAA ping-pong history in place, ② draws BLEND items back-to-front (per-frame clip.w sort) with AlphaBlend, depth read-only/no-write, PBR-only shading (shadow map via set=1 binding=7). Redirects `handles.hdr = handles.taaResolved = ForwardHDR`; the AfterTAA ScreenEffect anchor is placed after it. BLEND casts no shadow, writes no velocity, not in GBuffer | `deferred_geometry(.vert\|_skinned.vert)` + `forward_transparent.frag`; `fullscreen_tri` + `forward_copy.frag` |
 | `AutoExposureFeature` | always registered; skips if `pp.autoExposureEnabled==false` | 256-bin log-lum histogram → weighted percentile EV → exponential-smoothing exposure; 1-frame CPU readback via staging; reads `handles.hdr` (pre-TAA content) | `postfx_histogram.comp`, `postfx_exposure_adapt.comp` |
 | `BloomFeature` | always registered; skips if `pp.bloomEnabled==false` | threshold reads `taaResolved`; composite writes back to `handles.hdr` | `bloom_*.frag` |
 | `DoFFeature` | always registered; skips if `pp.dofEnabled==false` | CoC from depth → separable near/far Gaussian blur (H+V × 2) → smoothstep composite; sets `handles.hdr` to DoF output | `dof_coc.frag`, `dof_blur.frag`, `dof_composite.frag` |
@@ -1958,6 +1999,7 @@ struct RendererConfig {
     bool     shadowEnabled = true;
     uint32_t shadowMapSize = 2048;
     int      bloomMipCount = 3;   // engine-level startup default; runtime changes via PostProcessSettings::bloomMipLevels
+    DepthPrepassMode depthPrepassMode = DepthPrepassMode::MaskedOnly;  // Issue #56; Full = TODO
 };
 ```
 
@@ -2231,9 +2273,12 @@ EditorMode::LoadProject()
   ├─ ShaderCook::HasSaeffectFiles() / CookEffects()   ← Issue #88, independent of dispatch:
   │     parse .saeffect (@Effect/@Stage/@Inject/@In/@Out), compile <stem>.saeffect.{frag,comp}
   │     → .spv + .refl, SetMeta effect/stage/inject/in/out (same standard .refl mechanism)
-  ├─ ShaderCook::RecompileDeferredLighting()  ← only if dispatch changed;
+  ├─ ShaderCook::RecompileDeferredLighting()  ← whenever the project has ≥1 model
+  │     (modelCount > 0 — so engine-side shader edits are picked up on every load);
   │     recompile deferred_lighting.frag with the project dispatch (glslc subprocess)
-  │     using -I ENGINE_SHADER_SRC_DIR -I cook_cache/generated/shaders/
+  │     using -I ENGINE_SHADER_SRC_DIR -I cook_cache/generated/shaders/.
+  │     Issue #56: the PBR fallback math lives in pbr_shading.glsl, which MUST stay
+  │     in ENGINE_SHADER_SRC_DIR so this runtime compile path resolves it
   ├─ ClearProjectAssets() / ClearProjectInstances()  ← WaitIdle inside
   └─ ApplyProjectShaderTypes(cookedShaderDir)   ← self-WaitIdle (safe between frames or at RenderFrame top)
        ├─ MaterialManager::ClearProjectTypes()

@@ -96,6 +96,15 @@ public:
     // Use this from RenderFeature::AddPasses — no need to repeat cull/blend/depth flags.
     RHI::RHIPipelineHandle GetOrCreatePipeline(RHI::IRHIDevice*     device,
                                                 const AttachmentKey& key);
+
+    // Issue #56: explicit-state overload for alpha-mode / stencil pipeline
+    // permutations. Start from DefaultRenderState(), tweak, pass in.
+    RHI::RHIPipelineHandle GetOrCreatePipeline(RHI::IRHIDevice*           device,
+                                                const AttachmentKey&       key,
+                                                const PipelineRenderState& state);
+
+    // The type's defaults packed into a PipelineRenderState.
+    [[nodiscard]] PipelineRenderState DefaultRenderState() const noexcept;
 };
 
 } // namespace StellarAlia

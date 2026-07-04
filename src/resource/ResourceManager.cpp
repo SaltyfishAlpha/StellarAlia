@@ -88,6 +88,32 @@ void ResourceManager::ClearProjectAssets() {
                 nTex, nMesh);
 }
 
+const GPUMesh* ResourceManager::PeekMesh(const AssetID& id) const {
+    auto it = m_meshes.find(HashID(id));
+    return it != m_meshes.end() ? &it->second : nullptr;
+}
+
+void ResourceManager::EvictMesh(const AssetID& id) {
+    const uint64_t key = HashID(id);
+    m_cookedMeshes.erase(key);
+
+    auto it = m_meshes.find(key);
+    if (it == m_meshes.end()) return;
+
+    // No WaitIdle here: DestroyBuffer is deferred (Issue #72 Step 7.5 per-frame
+    // queue), and WaitIdle would flush that queue immediately — destroying
+    // buffers the in-recording command buffer still references (mid-frame evict
+    // from the editor invalidates the whole frame otherwise).
+    if (m_device) {
+        GPUMesh& mesh = it->second;
+        if (mesh.vertexBuffer.IsValid())   m_device->DestroyBuffer(mesh.vertexBuffer);
+        if (mesh.indexBuffer.IsValid())    m_device->DestroyBuffer(mesh.indexBuffer);
+        if (mesh.skinDataBuffer.IsValid()) m_device->DestroyBuffer(mesh.skinDataBuffer);
+    }
+    m_meshes.erase(it);
+    SA_LOG_INFO("ResourceManager: evicted mesh {}", id.ToString());
+}
+
 // ─── LoadTexture ─────────────────────────────────────────────────────────────
 
 RHI::RHITextureHandle ResourceManager::LoadTexture(const AssetID& id) {
@@ -283,7 +309,8 @@ const GPUMesh* ResourceManager::LoadMesh(const AssetID& id) {
     gpu.vertexCount    = cooked.vertexCount;
     gpu.indexCount     = cooked.indexCount;
     gpu.subMeshes.reserve(cooked.subMeshes.size());
-    for (const auto& sm : cooked.subMeshes) {
+    for (size_t si = 0; si < cooked.subMeshes.size(); ++si) {
+        const auto& sm = cooked.subMeshes[si];
         GPUSubMesh gsm;
         gsm.firstIndex         = sm.indexOffset;
         gsm.indexCount         = sm.indexCount;
@@ -291,6 +318,8 @@ const GPUMesh* ResourceManager::LoadMesh(const AssetID& id) {
         gsm.materialIndex      = sm.materialIndex;
         gsm.localTransform     = sm.localTransform;
         gsm.defaultMaterialID  = sm.defaultMaterialID;
+        if (si < cooked.materialNames.size())
+            gsm.materialName = cooked.materialNames[si];
 
         // Compute mesh-local AABB from vertex positions before GPU upload.
         // Vertex layout: 48 bytes/vertex, first 12 bytes = vec3 position.

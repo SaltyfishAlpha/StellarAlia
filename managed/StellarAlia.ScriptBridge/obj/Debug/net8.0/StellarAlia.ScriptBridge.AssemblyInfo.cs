@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("StellarAlia.ScriptBridge")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+3284d52f67d5ff66e8ba63fa1de57ecaef19e016")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+c68e3b2fec26b6745483ebdb688124a54fe6ca94")]
 [assembly: System.Reflection.AssemblyProductAttribute("StellarAlia.ScriptBridge")]
 [assembly: System.Reflection.AssemblyTitleAttribute("StellarAlia.ScriptBridge")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

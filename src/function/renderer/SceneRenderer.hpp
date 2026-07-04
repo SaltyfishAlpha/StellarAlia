@@ -39,6 +39,12 @@ namespace StellarAlia {
 // Pass via SceneRenderer::Desc::config before calling Init().
 // All fields have sensible defaults; only override what you need.
 // ─────────────────────────────────────────────────────────────────────────────
+// Issue #56 — which geometry runs through the depth prepass.
+enum class DepthPrepassMode : uint8_t {
+    MaskedOnly,  // default: only MASK (alpha-test) geometry; opaque goes straight to GBuffer
+    Full,        // opaque+mask prewritten, GBuffer all-EQUAL (zero overdraw) — NOT YET IMPLEMENTED
+};
+
 struct RendererConfig {
     // ── Shadow pass ───────────────────────────────────────────────────────────
     bool     shadowEnabled  = true;   // directional shadow map pass
@@ -47,6 +53,10 @@ struct RendererConfig {
     // ── Bloom pass ────────────────────────────────────────────────────────────
     // bloomEnabled / bloom params are in WorldSettings::pp (runtime hot-swap).
     int  bloomMipCount      = 3;      // pyramid depth [2, kMaxBloomMips]; requires rebuild to change
+
+    // ── Depth prepass (Issue #56) ─────────────────────────────────────────────
+    // Full falls back to MaskedOnly with a warning until CF1/CF2 land.
+    DepthPrepassMode depthPrepassMode = DepthPrepassMode::MaskedOnly;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -217,6 +227,11 @@ public:
                                             float maxDist = 1e30f) const;
 
 private:
+    // Issue #56: scene depth carries a stencil plane (deferred-lighting stencil
+    // masking). Shadow map stays D32F. Swap to D32F_S8 here if D24 precision
+    // ever becomes a problem.
+    static constexpr RHI::RHIFormat kSceneDepthFormat = RHI::RHIFormat::D24_S8;
+
     struct DrawItem {
         entt::entity                      entity;
         glm::mat4                         subLocalTransform;
@@ -232,6 +247,12 @@ private:
         // Issue #72: dynamic offset into MaterialParamRing for the per-draw blob.
         // Only meaningful when item.material->GetType()->usesMaterialParamsSSBO.
         uint32_t                          materialUboOffset = 0;
+        // Issue #56: transparency classification from the material asset.
+        // Static per material — safe to bake here (draw list is rebuilt on
+        // material dirty). Back-to-front distance is per-frame and therefore
+        // computed at collection time in ForwardTransparentFeature, not here.
+        AlphaMode                         alphaMode   = AlphaMode::Opaque;
+        bool                              doubleSided = false;
         // Entity-local AABB (subLocalTransform applied). Used by BVH culling.
         // skipCull = true for skinned meshes (animated AABB not computed).
         glm::vec3                         localAABBMin { 1e30f};
@@ -276,6 +297,21 @@ private:
         glm::vec3                     m_backgroundColor = { 0.08f, 0.08f, 0.08f };
     private:
         MaterialType* m_type = nullptr;
+    };
+
+    // Issue #56 — depth prepass. Always emits one depth-only pass that clears
+    // depth+stencil (GBuffer therefore always Loads), then draws MASK geometry
+    // with the alpha-test discard frag, writing depth + stencil=1. Vertex
+    // shaders are the deferred_geometry pair — bit-exact depth vs GBuffer.
+    class DepthPrepassFeature final : public RenderFeature {
+    public:
+        void OnInit(const FeatureInitContext& ctx) override;
+        void AddPasses(SceneRenderer& renderer, const FrameContext& ctx,
+                       const RendererHandles& handles, const entt::registry& reg,
+                       uint32_t w, uint32_t h) override;
+    private:
+        ShaderProgram* m_maskProgram        = nullptr;  // deferred_geometry.vert + depth_prepass_mask.frag
+        ShaderProgram* m_maskSkinnedProgram = nullptr;  // deferred_geometry_skinned.vert + same frag
     };
 
     // Registers the "PBR" material type (deferred_geometry shaders) and default
@@ -336,6 +372,30 @@ private:
     private:
         MaterialType*         m_type = nullptr;
         RHI::RHIDescSetHandle m_gbDescSet;
+    };
+
+    // Issue #56 — forward translucency (BLEND materials). Runs after TAA and
+    // before the AfterTAA ScreenEffect anchor:
+    //   1. copies taaResolved into a fresh transient (never blend into the TAA
+    //      ping-pong history in place — next frame reads it as history),
+    //   2. draws BLEND items back-to-front with alpha blending, depth read-only.
+    // Whole feature skips (m_outputHandle invalid) when no BLEND item is visible.
+    class ForwardTransparentFeature final : public RenderFeature {
+        friend class SceneRenderer;
+    public:
+        void OnInit(const FeatureInitContext& ctx) override;
+        void AddPasses(SceneRenderer& renderer, const FrameContext& ctx,
+                       const RendererHandles& handles, const entt::registry& reg,
+                       uint32_t w, uint32_t h) override;
+
+        // Set when the feature ran; RenderFrame redirects hdr + taaResolved here.
+        RGTextureHandle m_outputHandle;
+
+    private:
+        ShaderProgram*        m_program        = nullptr;  // deferred_geometry.vert + forward_transparent.frag
+        ShaderProgram*        m_skinnedProgram = nullptr;  // deferred_geometry_skinned.vert + same frag
+        ShaderProgram*        m_copyProgram    = nullptr;  // fullscreen_tri + forward_copy.frag
+        RHI::RHIDescSetHandle m_copyDescSet;               // copy set=2 (t_Source)
     };
 
     // Screen Space Reflections (Issue #48): single compute pass after
@@ -781,6 +841,7 @@ private:
     BloomFeature*         m_bloomFeature   = nullptr;
     SSAOFeature*          m_ssaoFeature    = nullptr;
     TAAFeature*           m_taaFeature     = nullptr;
+    ForwardTransparentFeature* m_forwardTransparentFeature = nullptr;  // Issue #56
     AutoExposureFeature*  m_aeFeature      = nullptr;
     DoFFeature*           m_dofFeature     = nullptr;
     MotionBlurFeature*    m_motionBlurFeature = nullptr;

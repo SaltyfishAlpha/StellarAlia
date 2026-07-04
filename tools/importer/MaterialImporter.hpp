@@ -17,7 +17,8 @@ AssetID DeriveMaterialID(const AssetID& meshId, int32_t matIndex);
 bool CookMaterial(const Resource::MaterialData& mat,
                   const AssetID& matID,
                   const std::function<AssetID(int32_t imageIndex)>& resolveTexID,
-                  const fs::path& cookCacheDir);
+                  const fs::path& cookCacheDir,
+                  bool force = false);
 
 // Cook a standalone .mat source file → cookCacheDir/<id>.samat.
 bool CookStandaloneMaterial(const fs::path& sourcePath,

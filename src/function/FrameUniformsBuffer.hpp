@@ -19,6 +19,7 @@ namespace StellarAlia {
 //   binding=4  t_SkyboxMap      (samplerCube — full-resolution HDR for skybox)
 //   binding=5  t_LtcMat         (sampler2D 64×64 — LTC inverse-M matrix LUT)
 //   binding=6  t_LtcAmp         (sampler2D 64×64 — LTC amplitude/GGX-norm LUT)
+//   binding=7  t_ShadowMap      (sampler2D — directional shadow map, Issue #56)
 //
 // Usage per frame:
 //   fub.Upload(frameIndex, frameData, lightData);
@@ -48,6 +49,10 @@ public:
     void SetIBLTextures(RHI::RHITextureHandle brdfLut,
                         RHI::RHITextureHandle prefilteredEnv,
                         RHI::RHITextureHandle skyboxMap);
+
+    // Issue #56: write the directional shadow map to binding=7 (forward passes
+    // sample it from the frame set). Call once after the shadow map is created.
+    void SetShadowMap(RHI::RHITextureHandle shadowMap);
 
     // Upload LTC LUT textures (bindings 5 and 6).
     // Call once after Init(); placeholder 1×1 white is used until then.

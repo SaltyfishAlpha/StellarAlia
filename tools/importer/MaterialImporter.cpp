@@ -22,9 +22,10 @@ AssetID DeriveMaterialID(const AssetID& meshId, int32_t matIndex) {
 bool CookMaterial(const Resource::MaterialData& mat,
                   const AssetID& matID,
                   const std::function<AssetID(int32_t)>& resolveTexID,
-                  const fs::path& cookCacheDir) {
+                  const fs::path& cookCacheDir,
+                  bool force) {
     const fs::path outPath = cookCacheDir / (matID.ToString() + ".samatc");
-    if (fs::exists(outPath)) return true;
+    if (!force && fs::exists(outPath)) return true;
 
     auto texUUID = [&](int32_t imgIdx) -> std::string {
         if (imgIdx < 0) return "";
@@ -35,6 +36,11 @@ bool CookMaterial(const Resource::MaterialData& mat,
     json root;
     root["version"] = 1;
     root["type"]    = "PBR";
+    root["name"]    = mat.name;   // glTF material name; display-only
+
+    // Pipeline-state fields (Issue #56) — top-level, not shader params.
+    root["alphaMode"]   = mat.alphaMode;      // "OPAQUE" | "MASK" | "BLEND"
+    root["doubleSided"] = mat.doubleSided;
 
     root["params"]["baseColorFactor"]   = {mat.baseColorFactor.x, mat.baseColorFactor.y,
                                            mat.baseColorFactor.z, mat.baseColorFactor.w};
@@ -46,6 +52,7 @@ bool CookMaterial(const Resource::MaterialData& mat,
                                             mat.emissiveFactor.y,
                                             mat.emissiveFactor.z};
     root["params"]["emissiveIntensity"] = 1.0f;
+    root["params"]["alphaCutoff"]       = mat.alphaCutoff;
 
     root["textures"]["t_BaseColor"]         = texUUID(mat.baseColorTexture.imageIndex);
     root["textures"]["t_Normal"]            = texUUID(mat.normalTexture.imageIndex);

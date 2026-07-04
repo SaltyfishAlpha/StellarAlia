@@ -46,6 +46,7 @@ struct CookedMesh {
     uint32_t indexStride  = 4;    // bytes per index  (uint32_t)
 
     std::vector<CookedSubMesh> subMeshes;
+    std::vector<std::string>   materialNames; // v6: per-submesh glTF material name (parallel to subMeshes); empty when loaded from v5 files
     std::vector<uint8_t>       vertexData;  // vertexCount * vertexStride bytes
     std::vector<uint8_t>       indexData;   // indexCount  * indexStride  bytes
     std::vector<uint8_t>       skinData;    // vertexCount * sizeof(SkinVertex) bytes; empty = static
@@ -54,20 +55,25 @@ struct CookedMesh {
     bool IsSkinned()  const { return !skinData.empty(); }
 };
 
-// ─── .samesh binary layout (v5) ──────────────────────────────────────────────
+// ─── .samesh binary layout (v6) ──────────────────────────────────────────────
 //
 //  FileHeader              (48 bytes)
 //  SubMeshEntry[count]     (104 bytes each)
 //  vertex data blob
 //  index  data blob
 //  skin   data blob        (only if skin_data_size > 0; vertexCount × 32 bytes)
+//  material name table     (v6+: uint32 count, then per name uint32 len + bytes;
+//                           count == submesh_count, parallel to SubMeshEntry[])
 //
 // v4 → v5: FileHeader._pad replaced by skin_data_size (0 = static mesh).
 //           Skin data blob appended after index blob.
+// v5 → v6: material name table appended after skin blob (header unchanged;
+//           readers accept v5 with empty names — no forced reimport).
 //
 namespace SameshFormat {
     static constexpr uint32_t Magic   = 0x48534D53u; // 'SMSH' LE
-    static constexpr uint32_t Version = 5u;          // v5: optional skin data blob
+    static constexpr uint32_t Version = 6u;          // v6: material name table
+    static constexpr uint32_t MinVersion = 5u;       // oldest readable version
 
 #pragma pack(push, 1)
     struct FileHeader {

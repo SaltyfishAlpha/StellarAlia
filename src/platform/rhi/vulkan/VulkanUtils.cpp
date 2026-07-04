@@ -45,8 +45,10 @@ VkImageLayout ToVkImageLayout(RHIResourceState state) noexcept {
         case RHIResourceState::Undefined:       return VK_IMAGE_LAYOUT_UNDEFINED;
         case RHIResourceState::Common:          return VK_IMAGE_LAYOUT_GENERAL;
         case RHIResourceState::RenderTarget:    return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        case RHIResourceState::DepthWrite:      return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-        case RHIResourceState::DepthRead:       return VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+        // Issue #56: DEPTH_STENCIL_* variants — valid for depth-only formats too,
+        // and required when a D24_S8 barrier covers both aspects.
+        case RHIResourceState::DepthWrite:      return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        case RHIResourceState::DepthRead:       return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
         case RHIResourceState::ShaderRead:      return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         case RHIResourceState::UnorderedAccess: return VK_IMAGE_LAYOUT_GENERAL;
         case RHIResourceState::CopySrc:         return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;

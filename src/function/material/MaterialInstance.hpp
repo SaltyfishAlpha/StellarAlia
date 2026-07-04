@@ -6,6 +6,7 @@
 #include <glm/glm.hpp>
 
 #include "function/material/AttachmentKey.hpp"
+#include "function/material/MaterialRenderState.hpp"
 #include "platform/rhi/IRHICommandList.hpp"
 #include "platform/rhi/IRHIDevice.hpp"
 
@@ -75,6 +76,9 @@ public:
     // this as the baseline before applying per-entity overrides in SSBO path.
     [[nodiscard]] const std::vector<uint8_t>& GetParamBlob() const { return m_uboBlob; }
 
+    // Issue #56: pipeline-state overrides from the material asset (.samatc).
+    [[nodiscard]] const MaterialRenderState& GetRenderState() const { return m_renderState; }
+
 private:
     friend class MaterialType;
     friend class MaterialManager;
@@ -90,6 +94,7 @@ private:
     // packed MaterialParams blob — ParamDef fields + TextureDef _Idx fields ready
     // for ring upload. In legacy UBO path, it mirrors only the param UBO contents.
     std::vector<uint8_t>           m_uboBlob;
+    MaterialRenderState            m_renderState;    // Issue #56
     bool                           m_paramDirty = true;
     RHI::RHIBufferHandle           m_ubo;            // legacy UBO path only; empty in SSBO path
     RHI::RHIDescSetHandle          m_descSet;        // set=1

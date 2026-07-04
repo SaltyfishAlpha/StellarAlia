@@ -2,6 +2,7 @@
 #include "EditorContext.hpp"
 #include "function/scene/Components.hpp"
 #include "function/scene/Scene.hpp"
+#include "resource/ResourceManager.hpp"
 #include "ui/drawers/DrawerHelpers.hpp"
 
 #include <imgui.h>
@@ -37,10 +38,29 @@ bool MeshRendererDrawer::TryDraw(entt::registry& reg, entt::entity entity,
     else
         std::snprintf(slotLabel, sizeof(slotLabel), "Material Slots (%zu)", mr->materialSlots.size());
 
+    // Resolve the entity's mesh so slots can be labeled with the cooked
+    // per-submesh material name (v6 .samesh; empty for older cooked files).
+    const Resource::GPUMesh* gpuMesh = nullptr;
+    if (ctx.resMgr) {
+        AssetID meshId;
+        if (const auto* smc = reg.try_get<StaticMeshComponent>(entity))
+            meshId = smc->meshAsset;
+        else if (const auto* skc = reg.try_get<SkinnedMeshComponent>(entity))
+            meshId = skc->meshAsset;
+        if (meshId.IsValid()) gpuMesh = ctx.resMgr->LoadMesh(meshId);
+    }
+
     if (ImGui::TreeNode("matslots_mr", "%s", slotLabel)) {
         for (size_t i = 0; i < mr->materialSlots.size(); ++i) {
-            char lbl[16];
-            std::snprintf(lbl, sizeof(lbl), "[%zu]", i);
+            char lbl[80];
+            const char* matName =
+                (gpuMesh && i < gpuMesh->subMeshes.size() &&
+                 !gpuMesh->subMeshes[i].materialName.empty())
+                ? gpuMesh->subMeshes[i].materialName.c_str() : "";
+            if (matName[0])
+                std::snprintf(lbl, sizeof(lbl), "[%zu] %s", i, matName);
+            else
+                std::snprintf(lbl, sizeof(lbl), "[%zu]", i);
             changed |= DrawAssetIDField(lbl, mr->materialSlots[i], "Material", ctx.assetReg);
         }
         if (ImGui::SmallButton("+ Add Slot")) {
