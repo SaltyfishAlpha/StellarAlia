@@ -74,11 +74,9 @@ bool MaterialOverrideDrawer::TryDraw(entt::registry& reg, entt::entity entity,
     if (!mat) return false;
     bool open = ImGui::CollapsingHeader("Material Override",
                     HeaderFlags(ImGuiTreeNodeFlags_DefaultOpen));
-    if (RemoveButton("x##rem_mo")) {
-        reg.remove<MaterialOverrideComponent>(entity);
-        scene.MarkMaterialDirty();
+    if (RemoveComponentButton<MaterialOverrideComponent>("x##rem_mo", reg, entity, ctx,
+            "Remove Material Override", [&scene]{ scene.MarkMaterialDirty(); }))
         return true;
-    }
     if (!open) return true;
 
     const Resource::AssetRegistry* registry = ctx.assetReg;
@@ -113,7 +111,20 @@ bool MaterialOverrideDrawer::TryDraw(entt::registry& reg, entt::entity entity,
             if (ImGui::SmallButton("-##rmS")) toRemove = paramName;
             ImGui::PopID();
         }
-        if (!toRemove.empty()) { mat->scalars.erase(toRemove); changed = true; }
+        if (!toRemove.empty()) {
+            if (ctx.cmdMgr) {
+                const std::string key      = toRemove;
+                const ParamValue  savedVal = mat->scalars[key];
+                ctx.cmdMgr->Execute(std::make_unique<CallbackCommand>(
+                    "Remove Material Param",
+                    [entity, key](EditorContext& c){ if (auto* m = c.registry->try_get<MaterialOverrideComponent>(entity)) { m->scalars.erase(key); c.scene->MarkMaterialDirty(); } },
+                    [entity, key, savedVal](EditorContext& c){ if (auto* m = c.registry->try_get<MaterialOverrideComponent>(entity)) { m->scalars[key] = savedVal; c.scene->MarkMaterialDirty(); } }),
+                    ctx);
+            } else {
+                mat->scalars.erase(toRemove);
+            }
+            changed = true;
+        }
     }
 
     if (!mat->textures.empty()) {
@@ -132,7 +143,20 @@ bool MaterialOverrideDrawer::TryDraw(entt::registry& reg, entt::entity entity,
             }
             ImGui::PopID();
         }
-        if (!toRemoveTex.empty()) { mat->textures.erase(toRemoveTex); changed = true; }
+        if (!toRemoveTex.empty()) {
+            if (ctx.cmdMgr) {
+                const std::string key      = toRemoveTex;
+                const AssetID     savedTex = mat->textures[key];
+                ctx.cmdMgr->Execute(std::make_unique<CallbackCommand>(
+                    "Remove Texture Override",
+                    [entity, key](EditorContext& c){ if (auto* m = c.registry->try_get<MaterialOverrideComponent>(entity)) { m->textures.erase(key); c.scene->MarkMaterialDirty(); } },
+                    [entity, key, savedTex](EditorContext& c){ if (auto* m = c.registry->try_get<MaterialOverrideComponent>(entity)) { m->textures[key] = savedTex; c.scene->MarkMaterialDirty(); } }),
+                    ctx);
+            } else {
+                mat->textures.erase(toRemoveTex);
+            }
+            changed = true;
+        }
     }
 
     if (ImGui::SmallButton("+ Add Override"))
@@ -148,7 +172,17 @@ bool MaterialOverrideDrawer::TryDraw(entt::registry& reg, entt::entity entity,
                                   ? param.name.c_str()
                                   : param.displayName.c_str();
                 if (ImGui::Selectable(lbl)) {
-                    mat->scalars[param.name] = DefaultParamValue(param);
+                    const std::string key    = param.name;
+                    const ParamValue  defVal = DefaultParamValue(param);
+                    if (ctx.cmdMgr) {
+                        ctx.cmdMgr->Execute(std::make_unique<CallbackCommand>(
+                            "Add Material Param",
+                            [entity, key, defVal](EditorContext& c){ if (auto* m = c.registry->try_get<MaterialOverrideComponent>(entity)) { m->scalars[key] = defVal; c.scene->MarkMaterialDirty(); } },
+                            [entity, key](EditorContext& c){ if (auto* m = c.registry->try_get<MaterialOverrideComponent>(entity)) { m->scalars.erase(key); c.scene->MarkMaterialDirty(); } }),
+                            ctx);
+                    } else {
+                        mat->scalars[key] = defVal;
+                    }
                     changed = true;
                     ImGui::CloseCurrentPopup();
                 }
@@ -174,7 +208,16 @@ bool MaterialOverrideDrawer::TryDraw(entt::registry& reg, entt::entity entity,
                                       ? tex.name.c_str()
                                       : tex.displayName.c_str();
                     if (ImGui::Selectable(lbl)) {
-                        mat->textures[tex.name] = AssetID::Invalid();
+                        const std::string key = tex.name;
+                        if (ctx.cmdMgr) {
+                            ctx.cmdMgr->Execute(std::make_unique<CallbackCommand>(
+                                "Add Texture Override",
+                                [entity, key](EditorContext& c){ if (auto* m = c.registry->try_get<MaterialOverrideComponent>(entity)) { m->textures[key] = AssetID::Invalid(); c.scene->MarkMaterialDirty(); } },
+                                [entity, key](EditorContext& c){ if (auto* m = c.registry->try_get<MaterialOverrideComponent>(entity)) { m->textures.erase(key); c.scene->MarkMaterialDirty(); } }),
+                                ctx);
+                        } else {
+                            mat->textures[key] = AssetID::Invalid();
+                        }
                         changed = true;
                         ImGui::CloseCurrentPopup();
                     }
@@ -189,7 +232,16 @@ bool MaterialOverrideDrawer::TryDraw(entt::registry& reg, entt::entity entity,
                                           ? tex.name.c_str()
                                           : tex.displayName.c_str();
                         if (ImGui::Selectable(lbl)) {
-                            mat->textures[tex.name] = AssetID::Invalid();
+                            const std::string key = tex.name;
+                            if (ctx.cmdMgr) {
+                                ctx.cmdMgr->Execute(std::make_unique<CallbackCommand>(
+                                    "Add Texture Override",
+                                    [entity, key](EditorContext& c){ if (auto* m = c.registry->try_get<MaterialOverrideComponent>(entity)) { m->textures[key] = AssetID::Invalid(); c.scene->MarkMaterialDirty(); } },
+                                    [entity, key](EditorContext& c){ if (auto* m = c.registry->try_get<MaterialOverrideComponent>(entity)) { m->textures.erase(key); c.scene->MarkMaterialDirty(); } }),
+                                    ctx);
+                            } else {
+                                mat->textures[key] = AssetID::Invalid();
+                            }
                             changed = true;
                             ImGui::CloseCurrentPopup();
                         }

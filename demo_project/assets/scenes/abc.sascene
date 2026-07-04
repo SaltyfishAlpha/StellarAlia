@@ -1,28 +1,27 @@
 {
   "entities": [
     {
+      "camera": {
+        "far": 500.0,
+        "fovY": 1.0471999645233154,
+        "near": 0.10000000149011612,
+        "priority": 0
+      },
       "id": 0,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
       "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "RandomCube",
+      "scene_local_id": 47,
+      "tag": "Camera",
       "transform": {
         "position": [
-          -3.5888195037841797,
-          -3.337109088897705,
-          0.35044145584106445
+          0.0,
+          0.0,
+          5.0
         ],
         "rotation": [
-          0.028132140636444092,
-          -0.8156570196151733,
-          -0.5509973764419556,
-          0.17410904169082642
+          1.0,
+          0.0,
+          0.0,
+          0.0
         ],
         "scale": [
           1.0,
@@ -33,682 +32,83 @@
     },
     {
       "id": 1,
+      "materialOverride": {
+        "materialAsset": "d3f4abb0-0000-4000-0000-000000000001",
+        "scalars": {
+          "baseColorFactor": [
+            0.13235294818878174,
+            0.13235294818878174,
+            0.13235294818878174,
+            1.0
+          ],
+          "metallicFactor": 0.0,
+          "roughnessFactor": 0.1899999976158142
+        },
+        "textures": {}
+      },
       "meshRenderer": {
         "castShadow": true,
         "materials": [],
         "receiveShadow": true
       },
       "parent": -1,
+      "scene_local_id": 48,
       "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
+        "mesh": "c0be0000-0000-4000-0000-000000000002"
       },
-      "tag": "RandomCube",
+      "tag": "Plane",
       "transform": {
         "position": [
-          3.823836326599121,
-          3.4795455932617188,
-          1.8974723815917969
+          0.0,
+          0.0,
+          0.0
         ],
         "rotation": [
-          -0.4298824369907379,
-          -0.7041513323783875,
-          0.07328655570745468,
-          -0.5603581070899963
+          1.0,
+          0.0,
+          0.0,
+          0.0
         ],
         "scale": [
-          1.0,
-          1.0,
-          1.0
+          7.069999694824219,
+          7.069999694824219,
+          7.069999694824219
         ]
       }
     },
     {
+      "areaLight": {
+        "color": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "emissiveScale": 2.0,
+        "height": 1.0,
+        "intensity": 8.0,
+        "twoSided": true,
+        "width": 2.0
+      },
       "id": 2,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
       "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "RandomCube",
-      "transform": {
-        "position": [
-          -0.536649227142334,
-          0.1154022216796875,
-          1.5739102363586426
-        ],
-        "rotation": [
-          0.6645429730415344,
-          0.07016867399215698,
-          -0.5303624272346497,
-          0.5217035412788391
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 3,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "RandomCube",
-      "transform": {
-        "position": [
-          -4.36367654800415,
-          3.7478694915771484,
-          -2.8580613136291504
-        ],
-        "rotation": [
-          0.9814790487289429,
-          -0.17717592418193817,
-          0.040371477603912354,
-          -0.06064450740814209
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 4,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "RandomCube",
-      "transform": {
-        "position": [
-          4.336481094360352,
-          -4.462103843688965,
-          3.7841691970825195
-        ],
-        "rotation": [
-          0.6648047566413879,
-          -0.2836582064628601,
-          0.5764539837837219,
-          -0.3811476528644562
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 5,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "RandomCube",
-      "transform": {
-        "position": [
-          4.204623222351074,
-          2.701387882232666,
-          -0.43037891387939453
-        ],
-        "rotation": [
-          -0.7919794321060181,
-          0.5588831901550293,
-          0.24518191814422607,
-          -0.01743192970752716
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 6,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "RandomCube",
-      "transform": {
-        "position": [
-          2.315485954284668,
-          3.435710906982422,
-          1.0640125274658203
-        ],
-        "rotation": [
-          -0.6148391962051392,
-          0.4199298024177551,
-          0.667543888092041,
-          -0.004112472292035818
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 7,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "RandomCube",
-      "transform": {
-        "position": [
-          3.0009384155273438,
-          -4.043294906616211,
-          2.5782670974731445
-        ],
-        "rotation": [
-          -0.672404408454895,
-          0.5316538214683533,
-          -0.5090905427932739,
-          -0.07773827761411667
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 8,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "RandomCube",
-      "transform": {
-        "position": [
-          0.32793521881103516,
-          2.0375566482543945,
-          -2.8398213386535645
-        ],
-        "rotation": [
-          -0.5073431730270386,
-          -0.6746025681495667,
-          0.5005813837051392,
-          -0.1921786665916443
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 9,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "RandomCube",
-      "transform": {
-        "position": [
-          -0.5265946388244629,
-          2.8590660095214844,
-          1.991745948791504
-        ],
-        "rotation": [
-          -0.9875524640083313,
-          0.07346503436565399,
-          -0.014394585974514484,
-          0.13833220303058624
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 10,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticGeometry": true,
-      "staticMesh": {
-        "mesh": "92b09700-4b40-4ca7-8502-627b2b53a4af"
-      },
-      "tag": "BoomBox",
+      "scene_local_id": 49,
+      "tag": "Area Light",
       "transform": {
         "position": [
           0.0,
-          0.0,
+          0.5183993577957153,
           0.0
         ],
         "rotation": [
-          1.0,
-          0.0,
-          0.0,
+          0.7071067094802856,
+          -0.7071068286895752,
+          -0.0,
           0.0
         ],
         "scale": [
-          49.88999938964844,
-          49.88999938964844,
-          49.88999938964844
-        ]
-      }
-    },
-    {
-      "camera": {
-        "far": 500.0,
-        "fovY": 1.0471999645233154,
-        "near": 0.10000000149011612,
-        "priority": 1
-      },
-      "id": 11,
-      "parent": -1,
-      "tag": "MainCamera",
-      "transform": {
-        "position": [
-          0.0,
-          0.0,
-          4.0
-        ],
-        "rotation": [
-          1.0,
-          0.0,
-          0.0,
-          0.0
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 12,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "RandomCube",
-      "transform": {
-        "position": [
-          2.463559150695801,
-          3.563169479370117,
-          -1.2269952297210693
-        ],
-        "rotation": [
-          -0.7908228039741516,
-          -0.04993554204702377,
-          0.44579946994781494,
-          -0.41637542843818665
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 13,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "RandomCube",
-      "transform": {
-        "position": [
-          -4.9340901374816895,
-          -2.745518207550049,
-          -1.315077781677246
-        ],
-        "rotation": [
-          0.3692428469657898,
-          0.10457194596529007,
-          -0.18020853400230408,
-          -0.9056761264801025
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 14,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "RandomCube",
-      "transform": {
-        "position": [
-          -0.3895101547241211,
-          -2.147587776184082,
-          4.630681037902832
-        ],
-        "rotation": [
-          -0.9741838574409485,
-          0.06224317476153374,
-          0.08310180902481079,
-          0.20046381652355194
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 15,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "RandomCube",
-      "transform": {
-        "position": [
-          -0.28699350357055664,
-          4.152490615844727,
-          -3.758561134338379
-        ],
-        "rotation": [
-          0.9498533010482788,
-          0.30541831254959106,
-          0.06693432480096817,
-          0.00425450224429369
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 16,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "RandomCube",
-      "transform": {
-        "position": [
-          -0.4901590347290039,
-          -2.3851335048675537,
-          1.846139907836914
-        ],
-        "rotation": [
-          0.7900477647781372,
-          -0.3647157549858093,
-          -0.2609199285507202,
-          -0.41800445318222046
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 17,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "RandomCube",
-      "transform": {
-        "position": [
-          -4.535091400146484,
-          0.8585162162780762,
-          -2.0250182151794434
-        ],
-        "rotation": [
-          0.9984211921691895,
-          -0.028469666838645935,
-          -0.04806412011384964,
-          -0.005867162719368935
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 18,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "RandomCube",
-      "transform": {
-        "position": [
-          0.7221341133117676,
-          -2.223633289337158,
-          -0.8374824523925781
-        ],
-        "rotation": [
-          0.6989388465881348,
-          0.4061925709247589,
-          0.44815129041671753,
-          -0.3816445767879486
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 19,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "RandomCube",
-      "transform": {
-        "position": [
-          -0.2105269432067871,
-          2.295207977294922,
-          2.8886146545410156
-        ],
-        "rotation": [
-          -0.9837362766265869,
-          0.11074766516685486,
-          0.09242124855518341,
-          0.10703348368406296
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 20,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "RandomCube",
-      "transform": {
-        "position": [
-          -0.5421075820922852,
-          4.839773178100586,
-          2.408813953399658
-        ],
-        "rotation": [
-          0.045188963413238525,
-          0.5825191736221313,
-          0.04423203319311142,
-          -0.8103535175323486
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 21,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "RandomCube",
-      "transform": {
-        "position": [
-          0.07708501815795898,
-          3.0861244201660156,
-          2.3092727661132813
-        ],
-        "rotation": [
-          -0.9785629510879517,
-          -0.1380518525838852,
-          0.0046401601284742355,
-          0.15275715291500092
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
-        ]
-      }
-    },
-    {
-      "id": 22,
-      "meshRenderer": {
-        "castShadow": true,
-        "materials": [],
-        "receiveShadow": true
-      },
-      "parent": -1,
-      "staticMesh": {
-        "mesh": "c0be0000-0000-4000-0000-000000000001"
-      },
-      "tag": "RandomCube",
-      "transform": {
-        "position": [
-          2.5480871200561523,
-          2.307455539703369,
-          2.5686120986938477
-        ],
-        "rotation": [
-          -0.8510684967041016,
-          -0.2526770234107971,
-          -0.420058935880661,
-          -0.1881149709224701
-        ],
-        "scale": [
-          1.0,
-          1.0,
-          1.0
+          2.0,
+          0.9999597072601318,
+          0.9999597072601318
         ]
       }
     }
@@ -721,15 +121,82 @@
       0.07999999821186066,
       0.07999999821186066
     ],
-    "backgroundMode": "Skybox",
+    "backgroundMode": "SolidColor",
     "brdfLut": "c5b06992-5a8f-4dc9-9d11-406e12b969d4",
-    "exposure": 1.0,
-    "gamma": 2.200000047683716,
-    "lutStrength": 1.0,
+    "postProcess": {
+      "aeAdaptSpeed": 2.0,
+      "aeEvMax": 4.0,
+      "aeEvMin": -4.0,
+      "aeHighPercent": 0.949999988079071,
+      "aeLowPercent": 0.44999998807907104,
+      "aperture": 1.399999976158142,
+      "autoExposureEnabled": false,
+      "bloomEnabled": true,
+      "bloomMipLevels": 3,
+      "bloomRadius": 1.0,
+      "bloomStrength": 0.4000000059604645,
+      "bloomThreshold": 1.0,
+      "caEnabled": false,
+      "caStrength": 0.5,
+      "colorGrading": {
+        "contrast": 1.0,
+        "enabled": false,
+        "gain": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "lift": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "midtone": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "saturation": 1.0
+      },
+      "dofEnabled": false,
+      "dofSamples": 16,
+      "exposure": 1.0,
+      "filmGrainEnabled": false,
+      "filmGrainIntensity": 0.10000000149011612,
+      "filmGrainSize": 1.600000023841858,
+      "focalLength": 50.0,
+      "focusDistance": 5.0,
+      "lutStrength": 1.0,
+      "maxCocPx": 20.0,
+      "motionBlurEnabled": false,
+      "motionBlurMaxSpeed": 0.10000000149011612,
+      "motionBlurSamples": 8,
+      "motionBlurStrength": 0.5,
+      "screenEffects": [],
+      "ssaoBias": 0.02500000037252903,
+      "ssaoBlurSharpness": 10.0,
+      "ssaoDirections": 4,
+      "ssaoEnabled": false,
+      "ssaoRadius": 32.0,
+      "ssaoSteps": 3,
+      "ssaoStrength": 1.0,
+      "ssrEnabled": true,
+      "ssrMaxRoughness": 0.4000000059604645,
+      "ssrMaxSteps": 64,
+      "ssrStrength": 1.0,
+      "ssrThickness": 0.10000000149011612,
+      "taaAntiGhosting": true,
+      "taaBlendMotion": 0.5,
+      "taaBlendStatic": 0.10000000149011612,
+      "taaEnabled": false,
+      "tonemapMode": "Builtin",
+      "vignetteEnabled": false,
+      "vignetteIntensity": 0.4000000059604645,
+      "vignetteSmoothness": 0.6000000238418579
+    },
     "prefilteredEnv": "78735f5c-b3c4-4363-b142-699c816fa64f",
     "sh9": "79735f5c-b3c4-4362-b342-699c816fa64e",
     "skyboxCubemap": "7e735f5c-b3c4-4365-b342-699c816fa649",
-    "skyboxHdr": "7a735f5c-b3c4-4361-b342-699c816fa64d",
-    "tonemapMode": "Builtin"
+    "skyboxHdr": "7a735f5c-b3c4-4361-b342-699c816fa64d"
   }
 }

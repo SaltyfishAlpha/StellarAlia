@@ -13,7 +13,7 @@ bool CameraDrawer::TryDraw(entt::registry& reg, entt::entity entity,
     auto* cam = reg.try_get<CameraComponent>(entity);
     if (!cam) return false;
     bool open = ImGui::CollapsingHeader("Camera", HeaderFlags());
-    if (RemoveButton("x##rem_cam")) { reg.remove<CameraComponent>(entity); return true; }
+    if (RemoveComponentButton<CameraComponent>("x##rem_cam", reg, entity, ctx, "Remove Camera")) return true;
     if (!open) return true;
     float fovDeg = glm::degrees(cam->fovY);
     TrackedFieldEdit(&cam->fovY, ctx, "Edit FoV",

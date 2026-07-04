@@ -335,7 +335,7 @@
             1.0
           ],
           "metallicFactor": 0.8500000238418579,
-          "roughnessFactor": 0.25
+          "roughnessFactor": 0.0
         },
         "textures": {}
       },
@@ -478,7 +478,7 @@
             1.0
           ],
           "metallicFactor": 1.0,
-          "roughnessFactor": 0.4449999928474426
+          "roughnessFactor": 0.27000001072883606
         },
         "textures": {}
       },
@@ -534,18 +534,9 @@
         "class": "",
         "fields": [
           {
-            "kind": "String",
-            "name": "targetName",
-            "value": "Player"
-          },
-          {
-            "kind": "Vec3",
-            "name": "offset",
-            "value": [
-              0.0,
-              3.0,
-              6.0
-            ]
+            "kind": "Float",
+            "name": "smoothing",
+            "value": 8.0
           },
           {
             "kind": "Vec3",
@@ -557,9 +548,18 @@
             ]
           },
           {
-            "kind": "Float",
-            "name": "smoothing",
-            "value": 8.0
+            "kind": "Vec3",
+            "name": "offset",
+            "value": [
+              0.0,
+              3.0,
+              6.0
+            ]
+          },
+          {
+            "kind": "String",
+            "name": "targetName",
+            "value": "Player"
           }
         ]
       },
@@ -573,6 +573,34 @@
         "rotation": [
           0.9890000224113464,
           -0.1509999930858612,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "id": 10,
+      "parent": -1,
+      "scene_local_id": 11,
+      "script": {
+        "asset_id": "33e0077e-b9bc-462d-87f9-f9c52edb835c",
+        "class": ""
+      },
+      "tag": "Entity",
+      "transform": {
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
           0.0,
           0.0
         ],
@@ -607,6 +635,8 @@
       "bloomRadius": 0.800000011920929,
       "bloomStrength": 0.41999998688697815,
       "bloomThreshold": 0.6800000071525574,
+      "caEnabled": false,
+      "caStrength": 0.5,
       "colorGrading": {
         "contrast": 1.0,
         "enabled": false,
@@ -630,10 +660,18 @@
       "dofEnabled": false,
       "dofSamples": 16,
       "exposure": 0.5299999713897705,
+      "filmGrainEnabled": false,
+      "filmGrainIntensity": 0.10000000149011612,
+      "filmGrainSize": 1.600000023841858,
       "focalLength": 50.0,
       "focusDistance": 5.0,
       "lutStrength": 1.0,
       "maxCocPx": 20.0,
+      "motionBlurEnabled": false,
+      "motionBlurMaxSpeed": 0.10000000149011612,
+      "motionBlurSamples": 8,
+      "motionBlurStrength": 0.5,
+      "screenEffects": [],
       "ssaoBias": 0.02500000037252903,
       "ssaoBlurSharpness": 10.0,
       "ssaoDirections": 4,
@@ -641,12 +679,20 @@
       "ssaoRadius": 32.0,
       "ssaoSteps": 3,
       "ssaoStrength": 1.0,
+      "ssrEnabled": true,
+      "ssrMaxRoughness": 0.4000000059604645,
+      "ssrMaxSteps": 64,
+      "ssrStrength": 1.0,
+      "ssrThickness": 0.10000000149011612,
       "taaAntiGhosting": true,
       "taaBlendMotion": 0.5,
       "taaBlendStatic": 0.10000000149011612,
       "taaEnabled": true,
       "tonemapLut": "911aa46e-4510-4bab-bc15-0013ab7ac82f",
-      "tonemapMode": "Builtin"
+      "tonemapMode": "Builtin",
+      "vignetteEnabled": false,
+      "vignetteIntensity": 0.4000000059604645,
+      "vignetteSmoothness": 0.6000000238418579
     },
     "prefilteredEnv": "006e3a40-137e-4773-9e5c-2fe48868dacf",
     "sh9": "6a64a606-b3fc-4bee-803d-f783d1c8ee33",

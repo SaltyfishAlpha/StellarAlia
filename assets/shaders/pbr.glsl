@@ -69,50 +69,172 @@ vec3 EvaluateSHIrradiance(vec3 N) {
 }
 
 // ── LTC area light (Heitz et al. 2016) ───────────────────────────────────────
-// LUT is 64×64; uv = (NdotV, roughness) in [0,1].
+// LUT is 64×64; selfshadow fit — uv = (roughness, sqrt(1 - NdotV)) in [0,1].
 const vec2 LTC_LUT_SIZE = vec2(64.0);
 
-// Sample the LTC matrix LUT.  Packed storage: (m00, m02, m11, m20).
+// Sample the LTC inverse-M matrix LUT.  The four texels (t.x..t.w) map to the
+// isotropic Minv exactly as in the selfshadow reference (M[1][1] = 1):
+//     | t.x  0   t.z |
+//     | 0    1   0   |
+//     | t.y  0   t.w |
 mat3 LtcMatrix(vec2 uv) {
     vec4 t = texture(t_LtcMat, uv);
     return mat3(
-        t.x,  0.0, t.y,
-        0.0,  t.z, 0.0,
-        t.w,  0.0, 1.0
+        vec3(t.x, 0.0, t.y),   // column 0
+        vec3(0.0, 1.0, 0.0),   // column 1
+        vec3(t.z, 0.0, t.w)    // column 2
     );
 }
 
+// Edge integral of the clamped-cosine polygon form factor (Heitz 2016).
+// The rational approximation folds in the 1/(2*PI) normalisation, so the
+// returned vector's z-component is directly the (unclipped) form factor E.
+vec3 IntegrateEdgeVec(vec3 v1, vec3 v2) {
+    float x = dot(v1, v2);
+    float y = abs(x);
+    float a = 0.8543985 + (0.4965155 + 0.0145206 * y) * y;
+    float b = 3.4175940 + (4.1616724 + y) * y;
+    float v = a / b;
+    float thetaSinTheta = (x > 0.0)
+        ? v
+        : 0.5 * inversesqrt(max(1.0 - x * x, 1e-7)) - v;
+    return cross(v1, v2) * thetaSinTheta;
+}
+
+float IntegrateEdge(vec3 v1, vec3 v2) {
+    return IntegrateEdgeVec(v1, v2).z;
+}
+
+// Clip a quad (in cosine space) against the horizon plane z = 0, producing a
+// polygon of n = 0..5 vertices.  This is the accurate variant (Heitz 2016); it
+// stays correct when the light straddles / intersects the shading plane, unlike
+// the clipless sphere-approximation which shows dark-lens artefacts there.
+void ClipQuadToHorizon(inout vec3 L[5], out int n) {
+    // detect clipping config
+    int config = 0;
+    if (L[0].z > 0.0) config += 1;
+    if (L[1].z > 0.0) config += 2;
+    if (L[2].z > 0.0) config += 4;
+    if (L[3].z > 0.0) config += 8;
+
+    n = 0;
+
+    if (config == 0) {
+        // clip all
+    } else if (config == 1) {
+        n = 3;
+        L[1] = -L[1].z * L[0] + L[0].z * L[1];
+        L[2] = -L[3].z * L[0] + L[0].z * L[3];
+    } else if (config == 2) {
+        n = 3;
+        L[0] = -L[0].z * L[1] + L[1].z * L[0];
+        L[2] = -L[2].z * L[1] + L[1].z * L[2];
+    } else if (config == 3) {
+        n = 4;
+        L[2] = -L[2].z * L[1] + L[1].z * L[2];
+        L[3] = -L[3].z * L[0] + L[0].z * L[3];
+    } else if (config == 4) {
+        n = 3;
+        L[0] = -L[3].z * L[2] + L[2].z * L[3];
+        L[1] = -L[1].z * L[2] + L[2].z * L[1];
+    } else if (config == 5) {
+        n = 0; // impossible
+    } else if (config == 6) {
+        n = 4;
+        L[0] = -L[0].z * L[1] + L[1].z * L[0];
+        L[3] = -L[3].z * L[2] + L[2].z * L[3];
+    } else if (config == 7) {
+        n = 5;
+        L[4] = -L[3].z * L[0] + L[0].z * L[3];
+        L[3] = -L[3].z * L[2] + L[2].z * L[3];
+    } else if (config == 8) {
+        n = 3;
+        L[0] = -L[0].z * L[3] + L[3].z * L[0];
+        L[1] = -L[2].z * L[3] + L[3].z * L[2];
+        L[2] =  L[3];
+    } else if (config == 9) {
+        n = 4;
+        L[1] = -L[1].z * L[0] + L[0].z * L[1];
+        L[2] = -L[2].z * L[3] + L[3].z * L[2];
+    } else if (config == 10) {
+        n = 0; // impossible
+    } else if (config == 11) {
+        n = 5;
+        L[4] = L[3];
+        L[3] = -L[2].z * L[3] + L[3].z * L[2];
+        L[2] = -L[2].z * L[1] + L[1].z * L[2];
+    } else if (config == 12) {
+        n = 4;
+        L[1] = -L[1].z * L[2] + L[2].z * L[1];
+        L[0] = -L[0].z * L[3] + L[3].z * L[0];
+    } else if (config == 13) {
+        n = 5;
+        L[4] = L[3];
+        L[3] = L[2];
+        L[2] = -L[1].z * L[2] + L[2].z * L[1];
+        L[1] = -L[1].z * L[0] + L[0].z * L[1];
+    } else if (config == 14) {
+        n = 5;
+        L[4] = -L[0].z * L[3] + L[3].z * L[0];
+        L[0] = -L[0].z * L[1] + L[1].z * L[0];
+    } else if (config == 15) {
+        n = 4;
+    }
+
+    if (n == 3)
+        L[3] = L[0];
+    if (n == 4)
+        L[4] = L[0];
+}
+
 // Integrate the clamped cosine over a planar polygon (4 vertices) transformed
-// into the LTC-warped tangent space.  Returns unshadowed irradiance.
-float LTC_Evaluate(vec3 N, vec3 V, vec3 P, mat3 Minv, vec3 points[4]) {
+// into the LTC-warped tangent space.  Returns the form factor (already
+// normalised via IntegrateEdge — do NOT scale by 1/(2*PI) again downstream).
+float LTC_Evaluate(vec3 N, vec3 V, vec3 P, mat3 Minv, vec3 points[4], bool twoSided) {
     // Orthonormal basis around N
     vec3 T1 = normalize(V - N * dot(V, N));
     vec3 T2 = cross(N, T1);
     mat3 basis = transpose(mat3(T1, T2, N));
 
-    // Transform and warp polygon vertices
-    vec3 L[4];
-    for (int j = 0; j < 4; ++j)
-        L[j] = normalize(Minv * (basis * (points[j] - P)));
+    // Warp polygon vertices into cosine space (unnormalised — clipping needs .z)
+    vec3 L[5];
+    L[0] = Minv * (basis * (points[0] - P));
+    L[1] = Minv * (basis * (points[1] - P));
+    L[2] = Minv * (basis * (points[2] - P));
+    L[3] = Minv * (basis * (points[3] - P));
+    L[4] = L[0];   // safe init; overwritten by clipping when needed
 
-    // Solid-angle form: sum cross-product z-components around boundary
-    float sum = 0.0;
-    for (int j = 0; j < 4; ++j) {
-        vec3 a = L[j];
-        vec3 b = L[(j + 1) & 3];
-        float theta = acos(clamp(dot(a, b), -1.0, 1.0));
-        sum += theta * cross(a, b).z;
-    }
-    return max(0.0, sum) * INV_PI * 0.5;
+    // Clip against the horizon (accurate, artefact-free at plane intersections)
+    int n;
+    ClipQuadToHorizon(L, n);
+    if (n == 0)
+        return 0.0;
+
+    // Project onto the unit sphere
+    L[0] = normalize(L[0]);
+    L[1] = normalize(L[1]);
+    L[2] = normalize(L[2]);
+    L[3] = normalize(L[3]);
+    L[4] = normalize(L[4]);
+
+    // Sum the edge integrals around the clipped boundary
+    float sum = IntegrateEdge(L[0], L[1])
+              + IntegrateEdge(L[1], L[2])
+              + IntegrateEdge(L[2], L[3]);
+    if (n >= 4) sum += IntegrateEdge(L[3], L[4]);
+    if (n == 5) sum += IntegrateEdge(L[4], L[0]);
+
+    return twoSided ? abs(sum) : max(0.0, sum);
 }
 
 // Evaluate one area light (LightEntry.type == 3) and return its contribution.
 vec3 EvaluateAreaLight(LightEntry light, vec3 P, vec3 N, vec3 V,
                        float roughness, vec3 F0, vec3 albedo, float metallic) {
-    float NdotV = max(dot(N, V), 0.0);
+    float NdotV = clamp(dot(N, V), 0.0, 1.0);
 
-    // LUT coordinate — bilinear clamp to avoid edge artefacts
-    vec2 uv = clamp(vec2(NdotV, roughness), vec2(0.0), vec2(1.0));
+    // LUT coordinate (selfshadow fit): x = roughness, y = sqrt(1 - NdotV).
+    // Bias/scale to sample texel centres and avoid edge bleeding.
+    vec2 uv = vec2(roughness, sqrt(1.0 - NdotV));
     uv = uv * (LTC_LUT_SIZE - 1.0) / LTC_LUT_SIZE + 0.5 / LTC_LUT_SIZE;
 
     mat3  Minv    = LtcMatrix(uv);
@@ -133,8 +255,9 @@ vec3 EvaluateAreaLight(LightEntry light, vec3 P, vec3 N, vec3 V,
     corners[2] = lp + tu * hw + tv * hh;
     corners[3] = lp - tu * hw + tv * hh;
 
-    float specIrr = LTC_Evaluate(N, V, P, Minv,       corners) * ggxNorm;
-    float diffIrr = LTC_Evaluate(N, V, P, mat3(1.0),  corners);
+    bool  twoSided = light.twoSided > 0.5;
+    float specIrr = LTC_Evaluate(N, V, P, Minv,       corners, twoSided) * ggxNorm;
+    float diffIrr = LTC_Evaluate(N, V, P, mat3(1.0),  corners, twoSided);
 
     vec3 F  = mix(F0, vec3(1.0), fresnel);
     vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);

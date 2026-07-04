@@ -14,7 +14,7 @@ bool DirectionalLightDrawer::TryDraw(entt::registry& reg, entt::entity entity,
     auto* dl = reg.try_get<DirectionalLightComponent>(entity);
     if (!dl) return false;
     bool open = ImGui::CollapsingHeader("Directional Light", HeaderFlags());
-    if (RemoveButton("x##rem_dl")) { reg.remove<DirectionalLightComponent>(entity); return true; }
+    if (RemoveComponentButton<DirectionalLightComponent>("x##rem_dl", reg, entity, ctx, "Remove Directional Light")) return true;
     if (!open) return true;
     TrackedFieldEdit(&dl->color, ctx, "Edit Color",
         [](glm::vec3* p){ return ImGui::ColorEdit3("Color", glm::value_ptr(*p)); });
@@ -30,7 +30,7 @@ bool PointLightDrawer::TryDraw(entt::registry& reg, entt::entity entity,
     auto* pl = reg.try_get<PointLightComponent>(entity);
     if (!pl) return false;
     bool open = ImGui::CollapsingHeader("Point Light", HeaderFlags());
-    if (RemoveButton("x##rem_pl")) { reg.remove<PointLightComponent>(entity); return true; }
+    if (RemoveComponentButton<PointLightComponent>("x##rem_pl", reg, entity, ctx, "Remove Point Light")) return true;
     if (!open) return true;
     TrackedFieldEdit(&pl->color, ctx, "Edit Color",
         [](glm::vec3* p){ return ImGui::ColorEdit3("Color", glm::value_ptr(*p)); });
@@ -46,7 +46,7 @@ bool SpotLightDrawer::TryDraw(entt::registry& reg, entt::entity entity,
     auto* sl = reg.try_get<SpotLightComponent>(entity);
     if (!sl) return false;
     bool open = ImGui::CollapsingHeader("Spot Light", HeaderFlags());
-    if (RemoveButton("x##rem_sl")) { reg.remove<SpotLightComponent>(entity); return true; }
+    if (RemoveComponentButton<SpotLightComponent>("x##rem_sl", reg, entity, ctx, "Remove Spot Light")) return true;
     if (!open) return true;
     TrackedFieldEdit(&sl->color, ctx, "Edit Color",
         [](glm::vec3* p){ return ImGui::ColorEdit3("Color", glm::value_ptr(*p)); });
@@ -78,7 +78,7 @@ bool AreaLightDrawer::TryDraw(entt::registry& reg, entt::entity entity,
     auto* al = reg.try_get<AreaLightComponent>(entity);
     if (!al) return false;
     bool open = ImGui::CollapsingHeader("Area Light", HeaderFlags());
-    if (RemoveButton("x##rem_al")) { reg.remove<AreaLightComponent>(entity); return true; }
+    if (RemoveComponentButton<AreaLightComponent>("x##rem_al", reg, entity, ctx, "Remove Area Light")) return true;
     if (!open) return true;
     TrackedFieldEdit(&al->color, ctx, "Edit Color",
         [](glm::vec3* p){ return ImGui::ColorEdit3("Color", glm::value_ptr(*p)); });

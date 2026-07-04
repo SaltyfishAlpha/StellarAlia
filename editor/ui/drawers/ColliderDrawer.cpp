@@ -15,13 +15,24 @@ bool ColliderDrawer::TryDraw(entt::registry& reg, entt::entity entity,
     auto* col = reg.try_get<ColliderComponent>(entity);
     if (!col) return false;
     bool open = ImGui::CollapsingHeader("Collider", HeaderFlags());
-    if (RemoveButton("x##rem_col")) { reg.remove<ColliderComponent>(entity); return true; }
+    if (RemoveComponentButton<ColliderComponent>("x##rem_col", reg, entity, ctx, "Remove Collider")) return true;
     if (!open) return true;
 
     const char* shapes[] = { "Box", "Sphere", "Capsule" };
     int s = static_cast<int>(col->shape);
-    if (ImGui::Combo("Shape", &s, shapes, 3))
-        col->shape = static_cast<ColliderComponent::Shape>(s);
+    if (ImGui::Combo("Shape", &s, shapes, 3)) {
+        const auto newShape = static_cast<ColliderComponent::Shape>(s);
+        const auto oldShape = col->shape;
+        if (ctx.cmdMgr) {
+            ctx.cmdMgr->Execute(std::make_unique<CallbackCommand>(
+                "Change Collider Shape",
+                [entity, newShape](EditorContext& c){ if (auto* col2 = c.registry->try_get<ColliderComponent>(entity)) col2->shape = newShape; },
+                [entity, oldShape](EditorContext& c){ if (auto* col2 = c.registry->try_get<ColliderComponent>(entity)) col2->shape = oldShape; }),
+                ctx);
+        } else {
+            col->shape = newShape;
+        }
+    }
 
     switch (col->shape) {
         case ColliderComponent::Shape::Box:

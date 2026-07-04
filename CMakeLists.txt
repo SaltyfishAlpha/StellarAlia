@@ -153,6 +153,7 @@ endif()
 
 # Active unit tests (framework / interface):
 add_subdirectory(examples/rhi_interface_demo)   # RHI interface contract (Null mock, no GPU)
+add_subdirectory(examples/spd_test)             # Issue #94 SPD single-dispatch downsampler (GPU readback)
 add_subdirectory(examples/rendergraph_demo)     # RenderGraph aliasing / compile / barriers
 add_subdirectory(examples/compute_demo)         # Compute pipeline framework (ComputeProgram)
 add_subdirectory(examples/cook_demo)            # Asset cook pipeline / tooling (local assets)

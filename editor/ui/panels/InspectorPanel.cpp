@@ -6,11 +6,41 @@
 #include "resource/AssetRegistry.hpp"
 #include "function/scene/Scene.hpp"
 #include "function/scene/Components.hpp"
+#include "command/CommandManager.hpp"
+#include "command/commands/ComponentCommands.hpp"
 
 #include <imgui.h>
 #include <entt/entt.hpp>
 
+#include <functional>
+#include <memory>
+#include <string>
+#include <utility>
+
 namespace StellarAlia::Editor {
+
+namespace {
+
+// Build a ComponentDescriptor for engine component T. makeAddCmd returns an
+// undoable AddComponentCommand<T>; markMaterialDirty forwards Scene::MarkMaterialDirty
+// as the command's onApplied hook (matches the drawers' remove-side effects).
+template<typename T>
+ComponentDescriptor MakeComponentDesc(std::string category, std::string label,
+                                      bool markMaterialDirty = false) {
+    std::string desc = "Add " + label;
+    return ComponentDescriptor{
+        std::move(category), std::move(label),
+        [](entt::registry& r, entt::entity e){ return r.any_of<T>(e); },
+        [markMaterialDirty, desc](entt::entity e, Scene& s)
+            -> std::unique_ptr<IEditorCommand> {
+            std::function<void()> onApplied;
+            if (markMaterialDirty) onApplied = [&s]{ s.MarkMaterialDirty(); };
+            return std::make_unique<AddComponentCommand<T>>(e, desc, std::move(onApplied));
+        }
+    };
+}
+
+} // namespace
 
 InspectorPanel::InspectorPanel(EditorContext& ctx)
     : m_ctx(&ctx)
@@ -34,81 +64,29 @@ void InspectorPanel::RegisterComponent(ComponentDescriptor desc) {
 
 void InspectorPanel::RegisterBuiltinComponents() {
     // ── Rendering ─────────────────────────────────────────────────────────────
-    RegisterComponent({
-        "Rendering", "Static Mesh",
-        [](auto& r, auto e){ return r.template any_of<StaticMeshComponent>(e); },
-        [](auto& r, auto e, auto& ){ r.template emplace_or_replace<StaticMeshComponent>(e); }
-    });
-    RegisterComponent({
-        "Rendering", "Mesh Renderer",
-        [](auto& r, auto e){ return r.template any_of<MeshRendererComponent>(e); },
-        [](auto& r, auto e, auto& s){ r.template emplace_or_replace<MeshRendererComponent>(e); s.MarkMaterialDirty(); }
-    });
-    RegisterComponent({
-        "Rendering", "Material Override",
-        [](auto& r, auto e){ return r.template any_of<MaterialOverrideComponent>(e); },
-        [](auto& r, auto e, auto& s){ r.template emplace_or_replace<MaterialOverrideComponent>(e); s.MarkMaterialDirty(); }
-    });
+    RegisterComponent(MakeComponentDesc<StaticMeshComponent>("Rendering", "Static Mesh"));
+    RegisterComponent(MakeComponentDesc<MeshRendererComponent>("Rendering", "Mesh Renderer", /*markMaterialDirty*/true));
+    RegisterComponent(MakeComponentDesc<MaterialOverrideComponent>("Rendering", "Material Override", /*markMaterialDirty*/true));
 
     // ── Lighting ──────────────────────────────────────────────────────────────
-    RegisterComponent({
-        "Lighting", "Directional Light",
-        [](auto& r, auto e){ return r.template any_of<DirectionalLightComponent>(e); },
-        [](auto& r, auto e, auto& ){ r.template emplace_or_replace<DirectionalLightComponent>(e); }
-    });
-    RegisterComponent({
-        "Lighting", "Point Light",
-        [](auto& r, auto e){ return r.template any_of<PointLightComponent>(e); },
-        [](auto& r, auto e, auto& ){ r.template emplace_or_replace<PointLightComponent>(e); }
-    });
-    RegisterComponent({
-        "Lighting", "Spot Light",
-        [](auto& r, auto e){ return r.template any_of<SpotLightComponent>(e); },
-        [](auto& r, auto e, auto& ){ r.template emplace_or_replace<SpotLightComponent>(e); }
-    });
-    RegisterComponent({
-        "Lighting", "Area Light",
-        [](auto& r, auto e){ return r.template any_of<AreaLightComponent>(e); },
-        [](auto& r, auto e, auto& ){ r.template emplace_or_replace<AreaLightComponent>(e); }
-    });
+    RegisterComponent(MakeComponentDesc<DirectionalLightComponent>("Lighting", "Directional Light"));
+    RegisterComponent(MakeComponentDesc<PointLightComponent>("Lighting", "Point Light"));
+    RegisterComponent(MakeComponentDesc<SpotLightComponent>("Lighting", "Spot Light"));
+    RegisterComponent(MakeComponentDesc<AreaLightComponent>("Lighting", "Area Light"));
 
     // ── Camera ────────────────────────────────────────────────────────────────
-    RegisterComponent({
-        "Camera", "Camera",
-        [](auto& r, auto e){ return r.template any_of<CameraComponent>(e); },
-        [](auto& r, auto e, auto& ){ r.template emplace_or_replace<CameraComponent>(e); }
-    });
+    RegisterComponent(MakeComponentDesc<CameraComponent>("Camera", "Camera"));
 
     // ── Animation ─────────────────────────────────────────────────────────────
-    RegisterComponent({
-        "Animation", "Animator",
-        [](auto& r, auto e){ return r.template any_of<AnimatorComponent>(e); },
-        [](auto& r, auto e, auto& ){ r.template emplace_or_replace<AnimatorComponent>(e); }
-    });
-    RegisterComponent({
-        "Animation", "Skinned Mesh",
-        [](auto& r, auto e){ return r.template any_of<SkinnedMeshComponent>(e); },
-        [](auto& r, auto e, auto& ){ r.template emplace_or_replace<SkinnedMeshComponent>(e); }
-    });
+    RegisterComponent(MakeComponentDesc<AnimatorComponent>("Animation", "Animator"));
+    RegisterComponent(MakeComponentDesc<SkinnedMeshComponent>("Animation", "Skinned Mesh"));
 
     // ── Physics ───────────────────────────────────────────────────────────────
-    RegisterComponent({
-        "Physics (req. restart)", "Rigid Body",
-        [](auto& r, auto e){ return r.template any_of<RigidBodyComponent>(e); },
-        [](auto& r, auto e, auto& ){ r.template emplace_or_replace<RigidBodyComponent>(e); }
-    });
-    RegisterComponent({
-        "Physics (req. restart)", "Collider",
-        [](auto& r, auto e){ return r.template any_of<ColliderComponent>(e); },
-        [](auto& r, auto e, auto& ){ r.template emplace_or_replace<ColliderComponent>(e); }
-    });
+    RegisterComponent(MakeComponentDesc<RigidBodyComponent>("Physics (req. restart)", "Rigid Body"));
+    RegisterComponent(MakeComponentDesc<ColliderComponent>("Physics (req. restart)", "Collider"));
 
     // ── Scripting ─────────────────────────────────────────────────────────────
-    RegisterComponent({
-        "Scripting", "Script",
-        [](auto& r, auto e){ return r.template any_of<ScriptComponent>(e); },
-        [](auto& r, auto e, auto& ){ r.template emplace_or_replace<ScriptComponent>(e); }
-    });
+    RegisterComponent(MakeComponentDesc<ScriptComponent>("Scripting", "Script"));
 }
 
 void InspectorPanel::RegisterAssetDrawers() {
@@ -184,8 +162,11 @@ void InspectorPanel::DrawEntityInspector(uint32_t sel) {
             }
             const bool has = desc.hasComp(reg, entity);
             if (has) ImGui::BeginDisabled();
-            if (ImGui::Selectable(desc.label.c_str()) && !has)
-                desc.addComp(reg, entity, *m_scene);
+            if (ImGui::Selectable(desc.label.c_str()) && !has) {
+                auto cmd = desc.makeAddCmd(entity, *m_scene);
+                if (m_ctx && m_ctx->cmdMgr) m_ctx->cmdMgr->Execute(std::move(cmd), *m_ctx);
+                else if (m_ctx)             cmd->Execute(*m_ctx);
+            }
             if (has) ImGui::EndDisabled();
         }
         ImGui::EndPopup();

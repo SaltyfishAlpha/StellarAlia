@@ -51,7 +51,7 @@ struct LightEntry {
     vec3  position;    int   type;        // 32..48  type: 0=dir 1=point 2=spot 3=area
     float innerAngle;  float outerAngle;  // 48..56  spot: cone (rad); area: width, height
     // [56..63] implicit std140 alignment gap (vec3 needs offset%16==0)
-    vec3  tangentU;    float _pad0;       // 64..80  area: right axis; others: zero
+    vec3  tangentU;    float twoSided;    // 64..80  area: right axis + two-sided flag (0/1); others: zero
     vec3  tangentV;    float _pad1;       // 80..96  area: up axis; others: zero
     // stride = ceil(96/16)*16 = 96 — no trailing padding
 };

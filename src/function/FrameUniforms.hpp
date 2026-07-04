@@ -61,7 +61,7 @@ struct LightEntry {
     float     innerAngle;  float outerAngle;  //  48..56  spot: cone (rad); area: width, height
     float     _align0;     float _align1;     //  56..64  — std140 alignment gap: vec3 requires
                                               //           offset%16==0, previous field ends at 56
-    glm::vec3 tangentU;    float _pad0;       //  64..80  area: right axis; others: zero
+    glm::vec3 tangentU;    float twoSided;    //  64..80  area: right axis + two-sided flag (0/1); others: zero
     glm::vec3 tangentV;    float _pad1;       //  80..96  area: up axis; others: zero
     // std140 array stride = ceil(96/16)*16 = 96 — no trailing padding needed
 };

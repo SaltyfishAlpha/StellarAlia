@@ -1084,6 +1084,7 @@ LightUniforms SceneRenderer::GatherLights(const Scene& scene) const {
             e.outerAngle  = al.size.y;
             e.tangentU    = glm::normalize(glm::vec3(wt.matrix[0]));
             e.tangentV    = glm::normalize(glm::vec3(wt.matrix[2]));
+            e.twoSided    = al.twoSided ? 1.0f : 0.0f;
             e.type        = 3;
         });
 
@@ -1211,8 +1212,22 @@ void SceneRenderer::RenderFrame(Scene& scene, const CameraData& camera,
     // programs/pipelines, which is unsafe from the mid-frame UI callback that queued it.
     if (m_hasPendingShaderReload) {
         m_hasPendingShaderReload = false;
+        // Mirror EditorMode::LoadProject's cleanup order: cached MaterialInstances
+        // reference the project MaterialTypes that ApplyProjectShaderTypes is about
+        // to destroy, so evict them first (ApplyProjectShaderTypes assumes the caller
+        // already did — see its comment). Without this, m_drawItems[].material and
+        // its ->m_type dangle after the swap, and the geometry pass binds a material
+        // descriptor set against a freed pipeline layout → invalid-pipeline-handle
+        // warning followed by a descriptor-set incompatibility crash.
+        m_matMgr->ClearProjectInstances();
         ApplyProjectShaderTypes(m_pendingShaderReloadDir);
         m_pendingShaderReloadDir.clear();
+        // Re-resolve the (now-dangling) DrawItem material pointers, but defer the
+        // actual rebuild to the canonical dirty-driven path below (post-BeginFrame,
+        // post-material-ring Reset). Rebuilding here at frame top would allocate
+        // SSBO blobs into the ring before its per-frame Reset() and before the
+        // BeginFrame fence-wait retires the previous frame's draw-item references.
+        scene.MarkMaterialDirty();
     }
 
     // Per-frame material param ring rolls over here — must happen before any
@@ -1540,6 +1555,14 @@ void FrameContext::BindStorageImage(RHI::RHIDescSetHandle set, uint32_t binding,
     m_pendingStorageImages.push_back({set, binding, handle});
 }
 
+void FrameContext::BindStorageImageArrayMip(RHI::RHIDescSetHandle set, uint32_t binding,
+                                            uint32_t arrayElement, RGTextureHandle handle,
+                                            uint32_t mipLevel) const
+{
+    if (!handle.IsValid() || !set.IsValid()) return;
+    m_pendingStorageArrayMips.push_back({set, binding, arrayElement, handle, mipLevel});
+}
+
 void FrameContext::FlushBindings() const
 {
     for (const auto& b : m_pendingBindings) {
@@ -1562,6 +1585,14 @@ void FrameContext::FlushBindings() const
             device->WriteDescriptorStorageImage(b.set, b.binding, rhi);
     }
     m_pendingStorageImages.clear();
+
+    for (const auto& b : m_pendingStorageArrayMips) {
+        const RHI::RHITextureHandle rhi = rg->GetResolvedHandle(b.handle);
+        if (rhi.IsValid())
+            device->WriteDescriptorStorageImageArrayMip(b.set, b.binding, b.arrayElement,
+                                                        rhi, b.mipLevel);
+    }
+    m_pendingStorageArrayMips.clear();
 }
 
 // ── ShadowFeature ─────────────────────────────────────────────────────────────
@@ -1935,7 +1966,8 @@ void SceneRenderer::VelocityPrepassFeature::AddPasses(SceneRenderer& renderer,
     // #48 SSR). Add OR conditions here as new consumers appear.
     const bool needVelocity =
            (renderer.m_motionBlurFeature && renderer.m_motionBlurFeature->m_enabled)
-        || (renderer.m_taaFeature        && renderer.m_taaFeature->m_enabled);
+        || (renderer.m_taaFeature        && renderer.m_taaFeature->m_enabled)
+        || (renderer.m_ssrFeature        && renderer.m_ssrFeature->m_enabled);  // #89 temporal accum
     if (!needVelocity) return;
     if (!m_staticProgram) return;
 
@@ -2197,18 +2229,35 @@ void SceneRenderer::SSRFeature::OnInit(const FeatureInitContext& ctx)
 {
     // frameLayout occupies set=1 (camera + IBL textures, shared engine layout);
     // SSR's own resources (depth/gbuffer/hdr/AO + UAV output) are auto-derived at set=2.
-    m_prog = ctx.programs->GetCompute("ssr");
-    if (!m_prog) {
-        SA_LOG_WARN("SSRFeature: ssr.comp load failed — SSR disabled");
+    m_prog         = ctx.programs->GetCompute("ssr");            // trace (set=1 frame + set=2)
+    m_resolveProg  = ctx.programs->GetCompute("ssr_resolve");    // spatial resolve
+    m_temporalProg = ctx.programs->GetCompute("ssr_temporal");   // temporal accumulation
+    // Hi-Z pyramid programs are standalone compute (set=0, no frame layout).
+    m_hizCopyProg = ctx.programs->GetCompute("hiz_copy", /*useFrameLayout=*/false);
+    m_hizSpdProg  = ctx.programs->GetCompute("hiz_spd",  /*useFrameLayout=*/false);
+    if (!m_prog || !m_resolveProg || !m_temporalProg || !m_hizCopyProg || !m_hizSpdProg) {
+        SA_LOG_WARN("SSRFeature: ssr/hiz shader load failed — SSR disabled");
+        m_prog = nullptr;
         return;
     }
-    m_ssrSet = ctx.device->AllocateDescriptorSet(m_prog->GetLayout(2));
+    m_ssrSet      = ctx.device->AllocateDescriptorSet(m_prog->GetLayout(2));
+    m_resolveSet  = ctx.device->AllocateDescriptorSet(m_resolveProg->GetLayout(2));
+    m_temporalSet = ctx.device->AllocateDescriptorSet(m_temporalProg->GetLayout(2));
+    m_hizCopySet  = ctx.device->AllocateDescriptorSet(m_hizCopyProg->GetLayout(0));
+    m_hizSpdSet   = ctx.device->AllocateDescriptorSet(m_hizSpdProg->GetLayout(0));
 }
 
-void SceneRenderer::SSRFeature::OnShutdown(RHI::IRHIDevice* /*device*/)
+void SceneRenderer::SSRFeature::OnShutdown(RHI::IRHIDevice* device)
 {
-    m_prog   = nullptr;  // owned by ProgramCache
-    m_ssrSet = {};
+    if (m_hizTex.IsValid()) device->DestroyTexture(m_hizTex);
+    for (auto& h : m_ssrHistory) { if (h.IsValid()) device->DestroyTexture(h); h = {}; }
+    m_hizTex       = {};
+    m_prog         = nullptr;  // owned by ProgramCache
+    m_resolveProg  = nullptr;
+    m_temporalProg = nullptr;
+    m_hizCopyProg  = nullptr;
+    m_hizSpdProg   = nullptr;
+    m_ssrSet = m_resolveSet = m_temporalSet = m_hizCopySet = m_hizSpdSet = {};
 }
 
 void SceneRenderer::SSRFeature::AddPasses(SceneRenderer& /*renderer*/,
@@ -2223,58 +2272,211 @@ void SceneRenderer::SSRFeature::AddPasses(SceneRenderer& /*renderer*/,
         return;
     }
 
-    // Transient UAV output; redirected to handles.hdr after this feature runs.
-    RHI::RHITextureDesc desc{};
-    desc.width     = w;
-    desc.height    = h;
-    desc.format    = RHI::RHIFormat::RGBA16F;  // rgba8 is not a guaranteed storage-image format
-    // UnorderedAccess: SSR compute writes it. RenderTarget + Sampled: it becomes
-    // handles.hdr, which downstream passes (Bloom composite, etc.) render into and sample.
-    desc.usage     = RHI::RHITextureUsage::UnorderedAccess
-                   | RHI::RHITextureUsage::RenderTarget
-                   | RHI::RHITextureUsage::Sampled;
-    desc.debugName = "SSR_Composite";
-    const RGTextureHandle rgOut = ctx.rg->CreateTexture("SSR_Composite", desc);
+    // ── Build Hi-Z min depth pyramid (Issue #89, via #94 SPD) ────────────────
+    // Single R32F mip-chain, rebuilt on resize. hiz_copy seeds mip0 from depth;
+    // hiz_spd min-reduces it into mip1..N in one dispatch.
+    if (m_hizW != w || m_hizH != h) {
+        if (m_hizTex.IsValid()) ctx.device->DestroyTexture(m_hizTex);
+        uint32_t mips = 1;
+        while (mips < 12u && (std::max(w, h) >> mips) >= 1u) ++mips;  // floor(log2(max))+1, cap 12
+        RHI::RHITextureDesc hd{};
+        hd.width = w; hd.height = h; hd.mipLevels = mips;
+        hd.format = RHI::RHIFormat::R32F;
+        hd.usage  = RHI::RHITextureUsage::UnorderedAccess | RHI::RHITextureUsage::Sampled;
+        hd.debugName = "HiZ";
+        m_hizTex = ctx.device->CreateTexture(hd);
+        m_hizW = w; m_hizH = h; m_hizMips = mips;
+    }
+    const RGTextureHandle rgHiz = ctx.rg->ImportTexture("HiZ", m_hizTex,
+        RHI::RHIResourceState::Undefined, RHI::RHIResourceState::ShaderRead);
 
-    // set=2: sampled G-Buffer/HDR/AO inputs + UAV output (resolved by FlushBindings).
-    ctx.BindTexture     (m_ssrSet, 0, handles.depth);
-    ctx.BindTexture     (m_ssrSet, 1, handles.gbufferRT0);
-    ctx.BindTexture     (m_ssrSet, 2, handles.gbufferRT1);
-    ctx.BindTexture     (m_ssrSet, 3, handles.hdr);
-    ctx.BindTexture     (m_ssrSet, 4, handles.ssaoTex);
-    ctx.BindStorageImage(m_ssrSet, 5, rgOut);
+    RGBufferDesc hizCntDesc{};
+    hizCntDesc.size          = sizeof(uint32_t);
+    hizCntDesc.usage         = RHI::RHIBufferUsage::Storage | RHI::RHIBufferUsage::CopyDst;
+    hizCntDesc.clearOnCreate = true;   // SPD global-step atomic counter, zeroed each frame
+    hizCntDesc.debugName     = "HiZ_Counter";
+    const RGBufferHandle rgHizCnt = ctx.rg->CreateBuffer("HiZ_Counter", hizCntDesc);
 
-    const RHI::RHIPipelineHandle pipeline = m_prog->GetPipeline(ctx.device);
-    const RHI::RHIDescSetHandle  frameSet = ctx.frameSet;
-    const RHI::RHIDescSetHandle  ssrSet   = m_ssrSet;
+    ctx.BindTexture             (m_hizCopySet, 0, handles.depth);
+    ctx.BindStorageImageArrayMip(m_hizCopySet, 1, 0, rgHiz, 0);            // hiz_copy → mip0
+    ctx.BindStorageImageArrayMip(m_hizSpdSet,  0, 0, rgHiz, 0);            // hiz_spd u_src = mip0
+    for (uint32_t i = 1; i < m_hizMips; ++i)
+        ctx.BindStorageImageArrayMip(m_hizSpdSet, 1, i - 1, rgHiz, i);     // u_mips[i-1] = mip i
+    ctx.BindBuffer(m_hizSpdSet, 2, rgHizCnt);
 
-    struct SSRPC { int maxSteps; float thickness; float maxRoughness; float strength; };
-    const SSRPC pc{ m_maxSteps, m_thickness, m_maxRoughness, m_strength };
+    const RHI::RHIPipelineHandle hizCopyPipe = m_hizCopyProg->GetPipeline(ctx.device);
+    const RHI::RHIPipelineHandle hizSpdPipe  = m_hizSpdProg->GetPipeline(ctx.device);
+    const RHI::RHIDescSetHandle  hizCopySet  = m_hizCopySet;
+    const RHI::RHIDescSetHandle  hizSpdSet   = m_hizSpdSet;
+    const RGTextureHandle        rgDepthHiz  = handles.depth;
+    const uint32_t gX = (w + 63u) / 64u, gY = (h + 63u) / 64u;
+
+    struct HizCopyPC { int w, h; };
+    const HizCopyPC hizCopyPC{ int(w), int(h) };
+    struct HizSpdPC  { int w, h, mipCount, numWG; };
+    const HizSpdPC  hizSpdPC{ int(w), int(h), int(m_hizMips - 1), int(gX * gY) };
+
+    ctx.rg->AddPass("HiZ_Copy",
+        [rgDepthHiz, rgHiz](RGPassBuilder& b) { b.Read(rgDepthHiz); b.WriteUAV(rgHiz); },
+        [hizCopyPipe, hizCopySet, hizCopyPC, w, h]
+        (RHI::IRHICommandList& cmd, const RGResources&) {
+            cmd.SetComputePipeline(hizCopyPipe);
+            cmd.SetDescriptorSet(0, hizCopySet);
+            cmd.SetPushConstants(&hizCopyPC, sizeof(hizCopyPC), RHI::RHIShaderStage::Compute);
+            cmd.Dispatch((w + 7u) / 8u, (h + 7u) / 8u, 1u);
+        });
+
+    ctx.rg->AddPass("HiZ_SPD",
+        // Read(rgHiz) forces HiZ_Copy→here ordering; WriteUAV keeps it GENERAL (imageLoad mip0).
+        [rgHiz, rgHizCnt](RGPassBuilder& b) { b.Read(rgHiz); b.WriteUAV(rgHiz); b.WriteBuffer(rgHizCnt); },
+        [hizSpdPipe, hizSpdSet, hizSpdPC, gX, gY]
+        (RHI::IRHICommandList& cmd, const RGResources&) {
+            cmd.SetComputePipeline(hizSpdPipe);
+            cmd.SetDescriptorSet(0, hizSpdSet);
+            cmd.SetPushConstants(&hizSpdPC, sizeof(hizSpdPC), RHI::RHIShaderStage::Compute);
+            cmd.Dispatch(gX, gY, 1u);
+        });
+
+    // Phase C trace/resolve split: trace writes stochastic radiance+pdf and hitUV+conf into
+    // two transient RTs; resolve spatially denoises them and composites into SSR_Composite.
+    auto makeRT = [&](const char* name) {
+        RHI::RHITextureDesc d{};
+        d.width = w; d.height = h;
+        d.format = RHI::RHIFormat::RGBA16F;
+        d.usage  = RHI::RHITextureUsage::UnorderedAccess | RHI::RHITextureUsage::Sampled;
+        d.debugName = name;
+        return ctx.rg->CreateTexture(name, d);
+    };
+    const RGTextureHandle rgRad = makeRT("SSR_Radiance");  // rgb=radiance, a=pdf
+    const RGTextureHandle rgHit = makeRT("SSR_Hit");       // rg=hitUV, b=conf, a=mask
+
+    RHI::RHITextureDesc outDesc{};
+    outDesc.width = w; outDesc.height = h;
+    outDesc.format = RHI::RHIFormat::RGBA16F;
+    outDesc.usage  = RHI::RHITextureUsage::UnorderedAccess
+                   | RHI::RHITextureUsage::RenderTarget | RHI::RHITextureUsage::Sampled;
+    outDesc.debugName = "SSR_Composite";
+    const RGTextureHandle rgOut = ctx.rg->CreateTexture("SSR_Composite", outDesc);
 
     const RGTextureHandle rgHdr   = handles.hdr;
     const RGTextureHandle rgDepth = handles.depth;
     const RGTextureHandle rgRT0   = handles.gbufferRT0;
     const RGTextureHandle rgRT1   = handles.gbufferRT1;
     const RGTextureHandle rgAO    = handles.ssaoTex;
+    const RHI::RHIDescSetHandle frameSet = ctx.frameSet;
 
-    ctx.rg->AddPass("SSR",
-        [rgHdr, rgDepth, rgRT0, rgRT1, rgAO, rgOut](RGPassBuilder& b) {
-            b.Read(rgDepth);
-            b.Read(rgRT0);
-            b.Read(rgRT1);
-            b.Read(rgHdr);
-            b.Read(rgAO);
-            b.WriteUAV(rgOut);
+    // ── Trace pass ────────────────────────────────────────────────────────────
+    ctx.BindTexture     (m_ssrSet, 0, rgDepth);
+    ctx.BindTexture     (m_ssrSet, 1, rgRT0);
+    ctx.BindTexture     (m_ssrSet, 2, rgRT1);
+    ctx.BindTexture     (m_ssrSet, 3, rgHdr);
+    ctx.BindTexture     (m_ssrSet, 4, rgAO);
+    ctx.BindStorageImage(m_ssrSet, 5, rgRad);
+    ctx.BindTexture     (m_ssrSet, 6, rgHiz);
+    ctx.BindStorageImage(m_ssrSet, 7, rgHit);
+
+    const RHI::RHIPipelineHandle tracePipe = m_prog->GetPipeline(ctx.device);
+    const RHI::RHIDescSetHandle  traceSet  = m_ssrSet;
+    struct SSRPC { int maxSteps; float thickness; float maxRoughness; float strength; };
+    const SSRPC tracePC{ m_maxSteps, m_thickness, m_maxRoughness, m_strength };
+
+    ctx.rg->AddPass("SSR_Trace",
+        [rgHdr, rgDepth, rgRT0, rgRT1, rgAO, rgHiz, rgRad, rgHit](RGPassBuilder& b) {
+            b.Read(rgDepth); b.Read(rgRT0); b.Read(rgRT1); b.Read(rgHdr); b.Read(rgAO);
+            b.Read(rgHiz); b.WriteUAV(rgRad); b.WriteUAV(rgHit);
         },
-        [pipeline, frameSet, ssrSet, pc, w, h]
-        (RHI::IRHICommandList& cmd, const RGResources& /*res*/) {
-            cmd.SetComputePipeline(pipeline);
+        [tracePipe, frameSet, traceSet, tracePC, w, h]
+        (RHI::IRHICommandList& cmd, const RGResources&) {
+            cmd.SetComputePipeline(tracePipe);
             cmd.SetDescriptorSet(1, frameSet);
-            cmd.SetDescriptorSet(2, ssrSet);
-            cmd.SetPushConstants(&pc, sizeof(pc), RHI::RHIShaderStage::Compute);
+            cmd.SetDescriptorSet(2, traceSet);
+            cmd.SetPushConstants(&tracePC, sizeof(tracePC), RHI::RHIShaderStage::Compute);
             cmd.Dispatch((w + 7u) / 8u, (h + 7u) / 8u, 1u);
         });
 
+    // ── Spatial pre-resolve → reflection radiance (feeds temporal) ────────────
+    const RGTextureHandle rgRefl = makeRT("SSR_Reflection");  // rgb=radiance, a=conf
+
+    ctx.BindTexture     (m_resolveSet, 0, rgDepth);
+    ctx.BindTexture     (m_resolveSet, 1, rgRT1);
+    ctx.BindTexture     (m_resolveSet, 2, rgRad);
+    ctx.BindTexture     (m_resolveSet, 3, rgHit);
+    ctx.BindStorageImage(m_resolveSet, 4, rgRefl);
+
+    const RHI::RHIPipelineHandle resolvePipe = m_resolveProg->GetPipeline(ctx.device);
+    const RHI::RHIDescSetHandle  resolveSet  = m_resolveSet;
+    struct ResolvePC { float maxRoughness; int radius; float pad0, pad1; };
+    const ResolvePC resolvePC{ m_maxRoughness, 1, 0.0f, 0.0f };  // light 3×3 (temporal does the rest)
+
+    ctx.rg->AddPass("SSR_Resolve",
+        [rgDepth, rgRT1, rgRad, rgHit, rgRefl](RGPassBuilder& b) {
+            b.Read(rgDepth); b.Read(rgRT1); b.Read(rgRad); b.Read(rgHit); b.WriteUAV(rgRefl);
+        },
+        [resolvePipe, frameSet, resolveSet, resolvePC, w, h]
+        (RHI::IRHICommandList& cmd, const RGResources&) {
+            cmd.SetComputePipeline(resolvePipe);
+            cmd.SetDescriptorSet(1, frameSet);
+            cmd.SetDescriptorSet(2, resolveSet);
+            cmd.SetPushConstants(&resolvePC, sizeof(resolvePC), RHI::RHIShaderStage::Compute);
+            cmd.Dispatch((w + 7u) / 8u, (h + 7u) / 8u, 1u);
+        });
+
+    // ── Temporal accumulation (main denoiser) + split-sum composite ───────────
+    // Ping-pong persistent history; reset on resize.
+    if (m_histW != w || m_histH != h) {
+        for (auto& hh : m_ssrHistory) { if (hh.IsValid()) ctx.device->DestroyTexture(hh); }
+        RHI::RHITextureDesc hd{};
+        hd.width = w; hd.height = h;
+        hd.format = RHI::RHIFormat::RGBA16F;
+        hd.usage  = RHI::RHITextureUsage::UnorderedAccess | RHI::RHITextureUsage::Sampled;
+        for (int i = 0; i < 2; ++i) {
+            hd.debugName = i == 0 ? "SSR_History0" : "SSR_History1";
+            m_ssrHistory[i] = ctx.device->CreateTexture(hd);
+        }
+        m_histW = w; m_histH = h; m_histValid = false; m_histIdx = 0;
+    }
+    const int readIdx  = m_histIdx;
+    const int writeIdx = 1 - m_histIdx;
+    const RGTextureHandle rgHistR = ctx.rg->ImportTexture("SSR_HistR", m_ssrHistory[readIdx],
+        RHI::RHIResourceState::ShaderRead, RHI::RHIResourceState::ShaderRead);
+    const RGTextureHandle rgHistW = ctx.rg->ImportTexture("SSR_HistW", m_ssrHistory[writeIdx],
+        RHI::RHIResourceState::Undefined, RHI::RHIResourceState::ShaderRead);
+    const RGTextureHandle rgVel = handles.velocity;
+
+    ctx.BindTexture     (m_temporalSet, 0, rgDepth);
+    ctx.BindTexture     (m_temporalSet, 1, rgRT0);
+    ctx.BindTexture     (m_temporalSet, 2, rgRT1);
+    ctx.BindTexture     (m_temporalSet, 3, rgHdr);
+    ctx.BindTexture     (m_temporalSet, 4, rgAO);
+    ctx.BindTexture     (m_temporalSet, 5, rgRefl);
+    ctx.BindTexture     (m_temporalSet, 6, rgHistR);
+    ctx.BindTexture     (m_temporalSet, 7, rgVel);
+    ctx.BindStorageImage(m_temporalSet, 8, rgHistW);
+    ctx.BindStorageImage(m_temporalSet, 9, rgOut);
+
+    const RHI::RHIPipelineHandle temporalPipe = m_temporalProg->GetPipeline(ctx.device);
+    const RHI::RHIDescSetHandle  temporalSet  = m_temporalSet;
+    struct TemporalPC { float alpha; float historyValid; float pad0, pad1; };
+    const TemporalPC temporalPC{ 0.80f, m_histValid ? 1.0f : 0.0f, 0.0f, 0.0f };
+
+    ctx.rg->AddPass("SSR_Temporal",
+        [rgDepth, rgRT0, rgRT1, rgHdr, rgAO, rgRefl, rgHistR, rgVel, rgHistW, rgOut]
+        (RGPassBuilder& b) {
+            b.Read(rgDepth); b.Read(rgRT0); b.Read(rgRT1); b.Read(rgHdr); b.Read(rgAO);
+            b.Read(rgRefl); b.Read(rgHistR); b.Read(rgVel);
+            b.WriteUAV(rgHistW); b.WriteUAV(rgOut);
+        },
+        [temporalPipe, frameSet, temporalSet, temporalPC, w, h]
+        (RHI::IRHICommandList& cmd, const RGResources&) {
+            cmd.SetComputePipeline(temporalPipe);
+            cmd.SetDescriptorSet(1, frameSet);
+            cmd.SetDescriptorSet(2, temporalSet);
+            cmd.SetPushConstants(&temporalPC, sizeof(temporalPC), RHI::RHIShaderStage::Compute);
+            cmd.Dispatch((w + 7u) / 8u, (h + 7u) / 8u, 1u);
+        });
+
+    m_histIdx   = writeIdx;
+    m_histValid = true;
     m_outputHandle = rgOut;
 }
 

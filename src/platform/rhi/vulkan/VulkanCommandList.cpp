@@ -66,6 +66,11 @@ void VulkanCommandList::SetPipeline(RHIPipelineHandle pipeline) {
     VkPipelineLayout layout     = m_device->GetVkPipelineLayout(pipeline);
     if (vkPipeline == VK_NULL_HANDLE || layout == VK_NULL_HANDLE) {
         SA_LOG_WARN("VulkanCommandList::SetPipeline — invalid pipeline handle");
+        // Invalidate the tracked pipeline so a subsequent SetDescriptorSet /
+        // SetPushConstants can't bind against the *previous* pass's layout (which
+        // triggers a descriptor-set-incompatibility crash). Both no-op on a null
+        // layout, so this degrades a failed bind to a skipped draw instead.
+        m_boundPipeline = {};
         return;
     }
     m_boundPipeline         = pipeline;
@@ -78,6 +83,9 @@ void VulkanCommandList::SetComputePipeline(RHIPipelineHandle pipeline) {
     VkPipelineLayout layout     = m_device->GetVkPipelineLayout(pipeline);
     if (vkPipeline == VK_NULL_HANDLE || layout == VK_NULL_HANDLE) {
         SA_LOG_WARN("VulkanCommandList::SetComputePipeline — invalid pipeline handle");
+        // See SetPipeline: invalidate so a following SetDescriptorSet can't bind
+        // against a stale layout.
+        m_boundPipeline = {};
         return;
     }
     m_boundPipeline          = pipeline;

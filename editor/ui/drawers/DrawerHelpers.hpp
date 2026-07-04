@@ -5,8 +5,10 @@
 #include "EditorContext.hpp"
 #include "command/CommandManager.hpp"
 #include "command/commands/FieldCommands.hpp"
+#include "command/commands/ComponentCommands.hpp"
 #include "ui/AssetDragPayload.hpp"
 
+#include <entt/entt.hpp>
 #include <imgui.h>
 #include <algorithm>
 #include <cstring>
@@ -135,6 +137,38 @@ inline bool RemoveButton(const char* id) {
 // Returns ImGuiTreeNodeFlags with AllowOverlap always set.
 inline ImGuiTreeNodeFlags HeaderFlags(ImGuiTreeNodeFlags extra = 0) {
     return ImGuiTreeNodeFlags_AllowOverlap | extra;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RemoveComponentButton<T> — draws the right-edge "×" button and, when clicked,
+// removes component T from the entity via an undoable RemoveComponentCommand<T>.
+// Falls back to a direct reg.remove<T>() when no CommandManager is available
+// (mirrors AcceptAssetIDDrop / TrackedFieldEdit).
+//
+// onApplied fires after both the removal and its undo — pass the same side
+// effect the drawer used to run inline (e.g. Scene::MarkMaterialDirty), so the
+// restored component is reflected in dependent systems.
+//
+// Returns true when the component was removed (caller should stop drawing it).
+// ─────────────────────────────────────────────────────────────────────────────
+template<typename T>
+inline bool RemoveComponentButton(const char* id,
+                                  entt::registry& reg, entt::entity entity,
+                                  EditorContext& ctx, const char* description,
+                                  std::function<void()> onApplied = {})
+{
+    if (!RemoveButton(id)) return false;
+    if (ctx.cmdMgr) {
+        ctx.cmdMgr->Execute(
+            std::make_unique<RemoveComponentCommand<T>>(
+                entity, description ? description : "Remove Component",
+                std::move(onApplied)),
+            ctx);
+    } else {
+        reg.remove<T>(entity);
+        if (onApplied) onApplied();
+    }
+    return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

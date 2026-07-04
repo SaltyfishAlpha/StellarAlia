@@ -59,6 +59,14 @@ void MaterialInstance::SetTexture(std::string_view name, RHI::RHITextureHandle t
             std::memcpy(m_uboBlob.data() + td->uboBlobOffset, &slot, sizeof(slot));
         m_paramDirty = true;
     } else {
+        if (td->slotIndex >= m_textures.size()) {
+            // Guards a heap stomp: slotIndex comes from m_type, so a stale/dangling
+            // type (or a type hot-swapped to more texture slots than this instance
+            // was created with) would otherwise write out of bounds.
+            SA_LOG_ERROR("MaterialInstance::SetTexture: slot {} out of range ({} slots) for '{}'",
+                         td->slotIndex, m_textures.size(), name);
+            return;
+        }
         m_textures[td->slotIndex] = tex;
         m_device->WriteDescriptorTexture(m_descSet, td->binding, tex);
     }

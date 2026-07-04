@@ -12,13 +12,24 @@ bool RigidBodyDrawer::TryDraw(entt::registry& reg, entt::entity entity,
     auto* rb = reg.try_get<RigidBodyComponent>(entity);
     if (!rb) return false;
     bool open = ImGui::CollapsingHeader("Rigid Body", HeaderFlags());
-    if (RemoveButton("x##rem_rb")) { reg.remove<RigidBodyComponent>(entity); return true; }
+    if (RemoveComponentButton<RigidBodyComponent>("x##rem_rb", reg, entity, ctx, "Remove Rigid Body")) return true;
     if (!open) return true;
 
     const char* types[] = { "Static", "Kinematic", "Dynamic" };
     int t = static_cast<int>(rb->type);
-    if (ImGui::Combo("Type", &t, types, 3))
-        rb->type = static_cast<RigidBodyComponent::Type>(t);
+    if (ImGui::Combo("Type", &t, types, 3)) {
+        const auto newType = static_cast<RigidBodyComponent::Type>(t);
+        const auto oldType = rb->type;
+        if (ctx.cmdMgr) {
+            ctx.cmdMgr->Execute(std::make_unique<CallbackCommand>(
+                "Change Rigid Body Type",
+                [entity, newType](EditorContext& c){ if (auto* r = c.registry->try_get<RigidBodyComponent>(entity)) r->type = newType; },
+                [entity, oldType](EditorContext& c){ if (auto* r = c.registry->try_get<RigidBodyComponent>(entity)) r->type = oldType; }),
+                ctx);
+        } else {
+            rb->type = newType;
+        }
+    }
 
     ImGui::BeginDisabled(rb->type != RigidBodyComponent::Type::Dynamic);
     TrackedFieldEdit(&rb->mass, ctx, "Edit Mass",

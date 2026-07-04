@@ -4,6 +4,7 @@
 #include "ui/IAssetInspector.hpp"
 #include "EditorContext.hpp"
 #include "EditorSelection.hpp"
+#include "command/IEditorCommand.hpp"
 
 #include <imgui.h>
 #include <entt/entt.hpp>
@@ -30,21 +31,24 @@ class EditorIconCache;
 //
 // The "Add Component" popup is driven by a registered ComponentDescriptor list.
 // Engine components are pre-registered; call RegisterComponent() to add custom
-// or game-specific components at startup:
+// or game-specific components at startup. makeAddCmd returns an undoable command
+// (see AddComponentCommand<T>) so adding a component enters the undo/redo stack:
 //
 //   inspector.RegisterComponent({
 //       "Game",
 //       "Health",
-//       [](auto& reg, auto e) { return reg.any_of<HealthComponent>(e); },
-//       [](auto& reg, auto e, auto&) { reg.emplace<HealthComponent>(e); }
+//       [](entt::registry& reg, entt::entity e) { return reg.any_of<HealthComponent>(e); },
+//       [](entt::entity e, Scene&) -> std::unique_ptr<IEditorCommand> {
+//           return std::make_unique<AddComponentCommand<HealthComponent>>(e, "Add Health");
+//       }
 //   });
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct ComponentDescriptor {
     std::string category;  // section header text (e.g. "Rendering")
     std::string label;     // entry label in the popup
-    std::function<bool(entt::registry&, entt::entity)>          hasComp;
-    std::function<void(entt::registry&, entt::entity, Scene&)>  addComp;
+    std::function<bool(entt::registry&, entt::entity)>                        hasComp;
+    std::function<std::unique_ptr<IEditorCommand>(entt::entity, Scene&)>       makeAddCmd;
 };
 
 class InspectorPanel : public IEditorWindow {

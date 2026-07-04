@@ -59,6 +59,10 @@ public:
     void WriteDescriptorStorageImageMip(RHIDescSetHandle ds, uint32_t binding,
                                         RHITextureHandle texture,
                                         uint32_t         mipLevel) override;
+    void WriteDescriptorStorageImageArrayMip(RHIDescSetHandle ds, uint32_t binding,
+                                             uint32_t         arrayElement,
+                                             RHITextureHandle texture,
+                                             uint32_t         mipLevel) override;
     void WriteDescriptorBuffer(RHIDescSetHandle ds, uint32_t binding,
                                RHIBufferHandle buffer,
                                uint64_t offset = 0,

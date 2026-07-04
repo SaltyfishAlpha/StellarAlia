@@ -1,0 +1,9 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Hi-Z pyramid downsampler (Issue #89): SPD with a min reduce so each coarser mip
+// holds the nearest surface (NDC depth, near=0) of its 2x2 children — lets the SSR
+// ray march skip cells that lie entirely in front of all geometry.
+#define SPD_REDUCE(a, b, c, d) min(min((a), (b)), min((c), (d)))
+#define SPD_SRC_IMAGE   // mip0 lives in the same chain we write → imageLoad, not sampler
+#include "spd_reduce.glsl"

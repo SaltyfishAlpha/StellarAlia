@@ -3,6 +3,7 @@
 #include "EditorSelection.hpp"
 #include "command/CommandManager.hpp"
 #include "command/commands/EntityCommands.hpp"
+#include "command/commands/ComponentCommands.hpp"
 #include "function/scene/Scene.hpp"
 #include "function/scene/Components.hpp"
 #include "function/scene/EntityFactory.hpp"
@@ -12,6 +13,8 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <memory>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -27,6 +30,17 @@ static bool IsInSubtree(entt::entity candidate, entt::entity subtreeRoot,
     for (entt::entity child : hc->children)
         if (IsInSubtree(candidate, child, reg)) return true;
     return false;
+}
+
+// Collect an entity and all its descendants (pre-order) into out. Used so an
+// undo of Duplicate destroys the entire copied subtree — Scene::DestroyEntity
+// orphans children rather than recursing, so the roots alone aren't enough.
+static void CollectSubtree(entt::entity e, const entt::registry& reg,
+                           std::vector<entt::entity>& out) {
+    out.push_back(e);
+    if (const auto* hc = reg.try_get<HierarchyComponent>(e))
+        for (entt::entity child : hc->children)
+            if (reg.valid(child)) CollectSubtree(child, reg, out);
 }
 
 static void MoveChildBefore(entt::entity child, entt::entity beforeSibling,
@@ -146,36 +160,102 @@ void SceneHierarchyPresenter::Update(float /*dt*/) {
         CreateOp op = std::move(m_pendingCreate);
         m_pendingCreate = {};
 
-        entt::entity e = entt::null;
-        if (op.kind == CreateOp::Empty) {
-            e = scene.CreateEntity("Entity");
+        if (m_ctx.cmdMgr) {
+            auto created = std::make_shared<std::vector<entt::entity>>();
+            const std::string desc = (op.kind == CreateOp::Empty)
+                                    ? "Create Entity" : "Create From Template";
+            m_ctx.cmdMgr->Execute(std::make_unique<CallbackCommand>(
+                desc,
+                [this, op, created](EditorContext& c){
+                    created->clear();
+                    Scene& s = *c.scene;
+                    auto&  r = s.Registry();
+                    entt::entity e = entt::null;
+                    if (op.kind == CreateOp::Empty) {
+                        e = s.CreateEntity("Entity");
+                        if (r.valid(e)) CollectSubtree(e, r, *created);
+                    } else {
+                        auto spawned = SceneSerializer::SpawnFromTemplate(s, op.templatePath);
+                        if (!spawned.empty()) {
+                            e = spawned.front();
+                            s.MarkMaterialDirty();
+                            for (entt::entity sp : spawned)
+                                if (r.valid(sp)) CollectSubtree(sp, r, *created);
+                        }
+                    }
+                    if (r.valid(e)) {
+                        if (r.valid(op.parent)) s.SetParent(e, op.parent);
+                        if (c.selection) c.selection->SelectEntity(e);
+                    }
+                },
+                [created](EditorContext& c){
+                    auto& r = c.scene->Registry();
+                    for (entt::entity e : *created)
+                        if (r.valid(e)) c.scene->DestroyEntity(e);
+                    created->clear();
+                    if (c.selection) c.selection->Clear();
+                }),
+                m_ctx);
         } else {
-            auto spawned = SceneSerializer::SpawnFromTemplate(scene, op.templatePath);
-            if (!spawned.empty()) {
-                e = spawned.front();
-                scene.MarkMaterialDirty();
+            entt::entity e = entt::null;
+            if (op.kind == CreateOp::Empty) {
+                e = scene.CreateEntity("Entity");
+            } else {
+                auto spawned = SceneSerializer::SpawnFromTemplate(scene, op.templatePath);
+                if (!spawned.empty()) {
+                    e = spawned.front();
+                    scene.MarkMaterialDirty();
+                }
             }
-        }
-
-        if (reg.valid(e)) {
-            if (reg.valid(op.parent))
-                scene.SetParent(e, op.parent);
-            m_ctx.selection->SelectEntity(e);
+            if (reg.valid(e)) {
+                if (reg.valid(op.parent))
+                    scene.SetParent(e, op.parent);
+                m_ctx.selection->SelectEntity(e);
+            }
         }
     }
 
     // ── Duplicate ─────────────────────────────────────────────────────────
     if (!m_pendingDuplicates.empty()) {
         std::vector<entt::entity> srcs = std::move(m_pendingDuplicates);
-        std::vector<entt::entity> dsts;
-        dsts.reserve(srcs.size());
-        for (entt::entity src : srcs) {
-            if (reg.valid(src))
-                dsts.push_back(DuplicateEntity(src));
-        }
-        if (!dsts.empty()) {
-            scene.MarkMaterialDirty();
-            m_ctx.selection->SelectEntities(dsts);
+        if (m_ctx.cmdMgr) {
+            // created = full copied subtree(s), shared between redo (fills it) and
+            // undo (destroys it). Re-running redo re-duplicates with fresh ids.
+            auto created = std::make_shared<std::vector<entt::entity>>();
+            m_ctx.cmdMgr->Execute(std::make_unique<CallbackCommand>(
+                "Duplicate Entities",
+                [this, srcs, created](EditorContext& c){
+                    created->clear();
+                    auto& r = c.scene->Registry();
+                    std::vector<entt::entity> roots;
+                    for (entt::entity src : srcs) {
+                        if (!r.valid(src)) continue;
+                        entt::entity dst = DuplicateEntity(src);
+                        roots.push_back(dst);
+                        CollectSubtree(dst, r, *created);
+                    }
+                    if (!roots.empty()) {
+                        c.scene->MarkMaterialDirty();
+                        if (c.selection) c.selection->SelectEntities(roots);
+                    }
+                },
+                [created](EditorContext& c){
+                    auto& r = c.scene->Registry();
+                    for (entt::entity e : *created)
+                        if (r.valid(e)) c.scene->DestroyEntity(e);
+                    created->clear();
+                    if (c.selection) c.selection->Clear();
+                }),
+                m_ctx);
+        } else {
+            std::vector<entt::entity> dsts;
+            dsts.reserve(srcs.size());
+            for (entt::entity src : srcs)
+                if (reg.valid(src)) dsts.push_back(DuplicateEntity(src));
+            if (!dsts.empty()) {
+                scene.MarkMaterialDirty();
+                m_ctx.selection->SelectEntities(dsts);
+            }
         }
     }
 

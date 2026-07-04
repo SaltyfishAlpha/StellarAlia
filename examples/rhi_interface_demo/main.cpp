@@ -250,6 +250,19 @@ public:
                     ds.index, binding, texture.index, mipLevel);
     }
 
+    void WriteDescriptorStorageImageArrayMip(RHIDescSetHandle ds,
+                                             uint32_t         binding,
+                                             uint32_t         arrayElement,
+                                             RHITextureHandle texture,
+                                             uint32_t         mipLevel) override {
+        ++m_storageArrayWriteCount;
+        SA_LOG_INFO("[DEV] WriteDescriptor  ds={} binding={}[{}] <- storageImage={} mip={}",
+                    ds.index, binding, arrayElement, texture.index, mipLevel);
+    }
+
+    // Counter exercised by the Issue #94 storage-image-array unit test in main().
+    uint32_t m_storageArrayWriteCount = 0;
+
     void WriteDescriptorBuffer(RHIDescSetHandle ds,
                                uint32_t         binding,
                                RHIBufferHandle  buffer,
@@ -643,6 +656,42 @@ int main() {
     // The swapchain texture can be imported into RenderGraph for the present pass:
     //   RGTextureHandle backbuffer = rg.ImportTexture(
     //       device.GetSwapchainTexture(), RHIResourceState::Present);
+
+    // ── 9.5 Storage-image array binding (Issue #94 SPD infra) ─────────────────
+    // Validates the reflection→layout→per-element-write path a SPD mip-chain
+    // downsampler needs: a single storage-image ARRAY binding whose element i
+    // targets mip i. Purely non-graphical — asserts on the null device.
+    SA_LOG_INFO("--- Storage-image array (Issue #94) ---");
+    {
+        ShaderReflection spdRefl;
+        spdRefl.bindings.push_back({
+            .set       = 1,
+            .binding   = 0,
+            .type      = RHIDescriptorType::StorageImage,
+            .stages    = RHIShaderStage::Compute,
+            .name      = "u_mips",
+            .arraySize = 8,   // image2D u_mips[8] — SPD writes up to 12+1 mips
+        });
+
+        // Reflection carries the array size through unchanged.
+        auto mipsBinding = spdRefl.FindBinding("u_mips");
+        assert(mipsBinding.has_value());
+        assert(mipsBinding->arraySize == 8);
+        assert(mipsBinding->type == RHIDescriptorType::StorageImage);
+        SA_LOG_INFO("Reflection: u_mips arraySize={} PASS", mipsBinding->arraySize);
+
+        RHIDescLayoutHandle spdLayout = device.CreateDescriptorSetLayout(spdRefl, 1);
+        RHIDescSetHandle    spdDS     = device.AllocateDescriptorSet(spdLayout);
+
+        // Bind each mip as a distinct array element of the single binding.
+        for (uint32_t mip = 0; mip < 8; ++mip)
+            device.WriteDescriptorStorageImageArrayMip(spdDS, mipsBinding->binding,
+                                                       /*arrayElement=*/mip, albedoTex, mip);
+
+        assert(device.m_storageArrayWriteCount == 8);
+        SA_LOG_INFO("Storage-image array writes: {} elements PASS",
+                    device.m_storageArrayWriteCount);
+    }
 
     // ── 10. Teardown ──────────────────────────────────────────────────────────
     SA_LOG_INFO("--- Teardown ---");

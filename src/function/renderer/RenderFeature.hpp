@@ -127,6 +127,16 @@ struct FrameContext {
     void BindStorageImage(RHI::RHIDescSetHandle set, uint32_t binding,
                           RGTextureHandle handle) const;
 
+    // ── Storage-image ARRAY-element (per-mip) binding (Issue #94) ─────────────
+    //
+    // Binds a single mip level of a transient/imported RG texture into array
+    // element `arrayElement` of a storage-image array binding (image2D[]), for
+    // SPD-style mip-chain generation where element i targets mip i. Resolved
+    // after Execute() like the other Bind* helpers. No-op if either handle invalid.
+    void BindStorageImageArrayMip(RHI::RHIDescSetHandle set, uint32_t binding,
+                                  uint32_t arrayElement, RGTextureHandle handle,
+                                  uint32_t mipLevel) const;
+
 private:
     friend class SceneRenderer;
 
@@ -140,10 +150,18 @@ private:
         uint32_t              binding;
         RGBufferHandle        handle;
     };
+    struct PendingStorageArrayMip {
+        RHI::RHIDescSetHandle set;
+        uint32_t              binding;
+        uint32_t              arrayElement;
+        RGTextureHandle       handle;
+        uint32_t              mipLevel;
+    };
     // mutable: Bind* methods are const so callers need not change const FrameContext& signatures.
-    mutable std::vector<PendingBinding>       m_pendingBindings;
-    mutable std::vector<PendingBufferBinding> m_pendingBufferBindings;
-    mutable std::vector<PendingBinding>       m_pendingStorageImages;
+    mutable std::vector<PendingBinding>          m_pendingBindings;
+    mutable std::vector<PendingBufferBinding>    m_pendingBufferBindings;
+    mutable std::vector<PendingBinding>          m_pendingStorageImages;
+    mutable std::vector<PendingStorageArrayMip>  m_pendingStorageArrayMips;
 
     // Resolves all queued bindings and writes descriptor sets.
     // Called by SceneRenderer after AllocateSlots() but before Execute().

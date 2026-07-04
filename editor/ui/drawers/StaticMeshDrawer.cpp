@@ -13,11 +13,9 @@ bool StaticMeshDrawer::TryDraw(entt::registry& reg, entt::entity entity,
     auto* sm = reg.try_get<StaticMeshComponent>(entity);
     if (!sm) return false;
     bool open = ImGui::CollapsingHeader("Static Mesh", HeaderFlags());
-    if (RemoveButton("x##rem_sm")) {
-        reg.remove<StaticMeshComponent>(entity);
-        scene.MarkMaterialDirty();
+    if (RemoveComponentButton<StaticMeshComponent>("x##rem_sm", reg, entity, ctx,
+            "Remove Static Mesh", [&scene]{ scene.MarkMaterialDirty(); }))
         return true;
-    }
     if (!open) return true;
 
     ImGui::PushID("StaticMesh");

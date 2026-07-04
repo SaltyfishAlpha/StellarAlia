@@ -170,6 +170,15 @@ public:
                                                 RHITextureHandle texture,
                                                 uint32_t         mipLevel) = 0;
 
+    // Writes a single mip level into a specific array element of a storage-image
+    // array binding (VK dstArrayElement). For SPD-style mip-chain generation
+    // where array element i binds mip level i (Issue #94). Reuses the per-mip view.
+    virtual void WriteDescriptorStorageImageArrayMip(RHIDescSetHandle ds,
+                                                     uint32_t         binding,
+                                                     uint32_t         arrayElement,
+                                                     RHITextureHandle texture,
+                                                     uint32_t         mipLevel) = 0;
+
     virtual void WriteDescriptorBuffer(RHIDescSetHandle ds,
                                        uint32_t         binding,
                                        RHIBufferHandle  buffer,

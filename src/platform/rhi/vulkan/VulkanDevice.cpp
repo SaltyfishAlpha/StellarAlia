@@ -1529,6 +1529,14 @@ void VulkanDevice::WriteDescriptorStorageImageMip(RHIDescSetHandle dsHandle,
                                                    uint32_t         binding,
                                                    RHITextureHandle textureHandle,
                                                    uint32_t         mipLevel) {
+    WriteDescriptorStorageImageArrayMip(dsHandle, binding, 0, textureHandle, mipLevel);
+}
+
+void VulkanDevice::WriteDescriptorStorageImageArrayMip(RHIDescSetHandle dsHandle,
+                                                       uint32_t         binding,
+                                                       uint32_t         arrayElement,
+                                                       RHITextureHandle textureHandle,
+                                                       uint32_t         mipLevel) {
     if (!dsHandle.IsValid()      || dsHandle.index      >= m_descSets.size())  return;
     if (!textureHandle.IsValid() || textureHandle.index >= m_textures.size())  return;
 
@@ -1567,6 +1575,7 @@ void VulkanDevice::WriteDescriptorStorageImageMip(RHIDescSetHandle dsHandle,
     write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     write.dstSet          = m_descSets[dsHandle.index].set;
     write.dstBinding      = binding;
+    write.dstArrayElement = arrayElement;
     write.descriptorCount = 1;
     write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     write.pImageInfo      = &imgInfo;

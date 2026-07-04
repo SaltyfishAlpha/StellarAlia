@@ -9,8 +9,8 @@
 
 | 状态 | 数量 | 列表 |
 |---|---|---|
-| ✅ 已完成 | 36 | #29 #45 #46 #47 **#48** #58 #62-#67 #69 #72 #73 #74 #75 **#77** #78 #81 #82 #84 #85 **#86** **#88** **#90** **#91** **#92** #56b（旧#71热编译）#71 Phase 2 #71 Phase 3a/3b + Vulkan D/E/F/G/H + Cross-dir Vtx Shader + UI Bug 5 项 |
-| ❌ 未完成（带设计） | 15 | #36 #49 #55 #56 #57 #60 #61 #68 #70 #79 #80 #83 **#87** **#89** **#93** |
+| ✅ 已完成 | 38 | #29 #45 #46 #47 **#48** #58 #62-#67 #69 #72 #73 #74 #75 **#77** #78 #81 #82 #84 #85 **#86** **#88** **#89** **#90** **#91** **#92** **#94** #56b（旧#71热编译）#71 Phase 2 #71 Phase 3a/3b + Vulkan D/E/F/G/H + Cross-dir Vtx Shader + UI Bug 5 项 |
+| ❌ 未完成（带设计） | 15 | #36 #49 #55 #56 #57 #60 #61 #68 #70 #79 #80 #83 **#87** **#93** **#95** |
 | ❌ 未完成（短条目） | 11 | X-1 ~ X-8 + #54 + #73-A + #23 帧率优化伞 |
 
 **关键指标**：`ScriptApiFunctionTable::version = 7` — 表明脚本 API 已经过 v2→v3（Phase 2）→v4→v5（Phase 3a InputMap）→v6（#81 Transform 重命名）→v7（#47 PostProcess）共五轮扩展。
@@ -34,7 +34,8 @@
 ### 🟡 低优先级 — 渲染/工具
 - **#36 RHI VkMemory 级别别名**（极低，依赖 #16）
 - **#48 SSR**（依赖 #42 TAA）✅ DONE — Phase 1（朴素线性步进）
-- **#89 SSR Phase 2：Hi-Z 步进 + 空间去噪**（接续 #48，详细设计见下）
+- **#89 SSR Phase 2：Hi-Z 步进 + 空间去噪** ✅ DONE
+- **#95 SSR Phase D：resolve 参数 UI + profiling**（#89 收尾拆出）
 - **#93 ScreenEffect LDR / Tonemap-compute**（#91 分出；@Out ldr 跨缓冲 + Tonemap→compute C1/C2/C3 待定）
 - **#49 Volumetric Fog**（极低）
 - **#56 Stencil Masking for Deferred Lighting**（详细设计见下）
@@ -261,17 +262,109 @@ LOD 阈值说明（屏幕覆盖率）：
 
 ---
 
-## Issue #56 — Stencil Masking for Deferred Lighting
+## Issue #56 — 透明面片支持（Alpha-Test + Forward Blend）+ Deferred Stencil Masking
 
-**优先级：低（小优化，工程量小；收益在大背景场景）**
+**优先级：中（原为纯 stencil 小优化；现扩展为透明面片总 issue —— 植物 alpha-test + 玻璃/水 forward blend，并整合 stencil masking）**
 
-### 目标
+> **2026-07-01 扩展**：本 issue 从"Stencil Masking"升级为**透明面片支持伞 issue**（吸收短条目 X-6「透明材质面片（植物等）」）。原 stencil 设计保留为 **Part B-stencil**；新增 alpha-test（Part C）与 forward 半透明（Part D）。三者共享同一套 RHI/深度/stencil 基建，故合并规划。
 
-GBuffer pass 向深度附件的模板通道写入 1（有几何体的像素），Deferred Lighting pass 开启模板测试仅处理 stencil == 1 的像素，使背景像素在固定功能阶段被拒绝，比当前 shader 内 `if (depth >= 1.0) return` 更彻底（无 fragment invocation）。
+### 背景与现状（源码核验，2026-07-01）
 
-副作用：alpha-test 修复后（植物 `discard` 不写深度/模板），植物镂空区域 stencil = 0，lighting 自动正确跳过。
+| 事实 | 位置 |
+|------|------|
+| `RHIBlendMode{Opaque,AlphaBlend,Additive}` 已存在，pipeline blend 已实现 | `IRHIDevice.hpp:21`、`VulkanDevice.cpp:1768` |
+| glTF `alphaMode`/`alphaCutoff`/`doubleSided` 载入 `MaterialData` 后**在 cook 丢弃** | `GltfLoader.cpp:229`→`MeshData.hpp:54-56`；`tools/importer/MaterialImporter.cpp:22-65 CookMaterial` 未写出 |
+| `.samatc`(JSON) 仅含 params+textures | `MaterialManager.cpp:261-349 LoadMaterial` 无 alpha 反序列化 |
+| `MaterialType`/`MaterialTypeDesc` 的 `blendMode`/`cullMode` 硬编码 Opaque/Back | `MaterialType.hpp:77-82`、`MaterialManager.hpp:27-37` |
+| `DrawItem` 无 alpha/blend/doubleSided 字段 | `SceneRenderer.hpp:220-245` |
+| `deferred_geometry.frag` 无 discard；MaterialParams SSBO=set2、bindless globalTex=set0 | `assets/shaders/deferred_geometry.frag` |
+| 纯延迟管线，**无 forward/透明 pass**；DrawItem 排序仅按 pipeline+VB（无 blend 分组） | `SceneRenderer.cpp:989` |
+| `RHIPipelineDesc` 深度比较**硬编码 `LEQUAL`**，无 `depthCompareOp` 字段 | `VulkanDevice.cpp:1766` |
+| 深度格式 `D32F` | `SceneRenderer.cpp:758 gbKey.depthFormat` |
+| Descriptor set 约定（#72 后）：set0=bindless heap，set1=FrameUniforms+lights+IBL+LTC+shadowMatrix，set2=MaterialParams SSBO / GBuffer inputs，set3=skin | agent 核验 |
+| pass 顺序：Shadow→Skybox→GBuffer→VelocityPrepass→SSAO→DeferredLighting→SSR→SelectionMask→TAA→AutoExposure→Bloom→DoF→MotionBlur→Tonemap→PostFX→… | `architecture.md §Built-in Render Features` |
+| forward 透明可 **100% 复用 set0/set1**（相机/光源/阴影矩阵/IBL/LTC 全在 FrameUniforms），无需改 `FrameUniforms` | `FrameUniforms.hpp:11-36`、agent 核验 |
+
+### 总目标
+
+1. **Alpha-test（MASK，植物/树叶/铁丝网）**：镂空正确显示；用 **depth-prepass + GBuffer EQUAL 主通道**彻底解决 `discard` 导致的 early-Z 失效（现代引擎标准解），而非在 GBuffer frag 里裸 `discard`。
+2. **Forward 半透明（BLEND，玻璃/水/粒子面片）**：新增 forward 透明 pass，per-object back-to-front 排序，复用延迟光照着色数学，alpha-blend 叠加进已点亮 HDR。
+3. **Stencil masking（原 #56）**：depth-prepass / GBuffer 向 stencil 写 1，DeferredLighting 仅处理 stencil==1，背景与镂空区在固定功能阶段被拒绝。三者天然协同——prepass 写 stencil 即为 masking 数据源。
+
+### 总体架构（新 pass 顺序）
+
+```
+Shadow → Skybox
+  → [新] DepthPrepass        // opaque+mask 深度专用；写 depth + stencil=1；mask 采 albedo.a 做 discard
+  → GBuffer                  // depthCompareOp=EQUAL, depthWrite=OFF；零 overdraw，无 discard
+  → VelocityPrepass → SSAO
+  → DeferredLighting         // stencilTest==1；背景/镂空固定功能拒绝
+  → SSR → SelectionMask → TAA
+  → [新] ForwardTransparent  // BLEND 物体，back-to-front，depthTest LEQUAL / depthWrite OFF，alpha blend
+  → Bloom → DoF → MotionBlur → Tonemap → PostFX → …
+```
+
+关键点：`discard` 只出现在**廉价的 DepthPrepass mask frag**（一次 albedo.a 取样），昂贵的 GBuffer PBR 打包 frag 走 `depthCompareOp=EQUAL` + `early_fragment_tests`，被遮挡/被裁片元在着色前即被 early-Z 拒绝 → 从根上消除 discard 的 early-Z 失效与植被 overdraw；GBuffer frag 因此**无需 discard 变体**。
 
 ### 设计
+
+#### Part A — 数据管线打通（alphaMode / alphaCutoff / doubleSided）
+
+链路：`MaterialData`(已有) → `CookMaterial` 写出 → `.samatc` → `LoadMaterial` 反序列化 → `MaterialInstance` 携带 → `BuildDrawList` 分类填 DrawItem。
+
+```cpp
+// 分类枚举（新，放 src/function/material/ 或 RHITypes 附近）
+enum class AlphaMode : uint8_t { Opaque = 0, Mask = 1, Blend = 2 };
+
+// MaterialImporter.cpp CookMaterial — 追加写出
+root["alphaMode"]   = mat.alphaMode;    // "OPAQUE"|"MASK"|"BLEND"
+root["alphaCutoff"] = mat.alphaCutoff;
+root["doubleSided"] = mat.doubleSided;
+
+// MaterialInstance 新增运行时渲染状态（per-instance，覆盖 type 默认）
+struct MaterialRenderState {
+    AlphaMode alphaMode   = AlphaMode::Opaque;
+    float     alphaCutoff = 0.5f;
+    bool      doubleSided = false;
+};
+// LoadMaterial 读 JSON 填 MaterialInstance::m_renderState；
+// alphaCutoff 同时进 MaterialParams SSBO（DepthPrepass mask frag discard 用）
+
+// DrawItem 扩展（SceneRenderer.hpp:220）
+AlphaMode alphaMode   = AlphaMode::Opaque;   // BuildDrawList 从 material 读
+bool      doubleSided = false;
+float     cameraDist  = 0.f;                 // ForwardTransparent 排序键（BLEND）
+```
+
+> `alphaCutoff` 需进 MaterialParams SSBO（尾部追加 float，保持 std430 对齐），`deferred_geometry.frag` 与新 prepass/forward frag 的 SSBO 布局同步。向后兼容：旧 `.samatc` 无 `alphaMode` 字段时默认 `"OPAQUE"`；旧 cook 需 Reimport 才带新字段（无需强制，缺失即 Opaque）。
+
+#### Part B-rhi — RHI 扩展（depthCompareOp + 深度格式 + pipeline state key）
+
+在原 stencil 枚举基础上，`RHIPipelineDesc` 追加深度比较函数字段：
+
+```cpp
+// IRHIDevice.hpp
+RHICompareOp depthCompareOp = RHICompareOp::LessOrEqual;  // 现硬编码 LEQUAL；GBuffer EQUAL 主通道需要
+```
+
+`VulkanDevice::CreatePipeline` 把 `ds.depthCompareOp = ToVkCompareOp(desc.depthCompareOp)`（替换 `VulkanDevice.cpp:1766` 写死的 `VK_COMPARE_OP_LESS_OR_EQUAL`）。`RHICompareOp` 与下方 stencil 设计共用同一枚举。
+
+**Pipeline state cache key 扩展**（关键）：当前 `ShaderProgram` 仅以 `AttachmentKey`(color/depth 格式) 缓存 pipeline。为支持同一 shader 的 {Opaque/Mask/Blend}×{单面/双面}×{EQUAL/LEQUAL}×{depthWrite on/off}×{stencil 配置} 多态 pipeline，需把渲染状态并入 key：
+
+```cpp
+struct PipelineStateKey {                 // 取代/扩展 AttachmentKey 作为 pipeline map key
+    AttachmentKey  attachments;
+    RHICullMode    cullMode;
+    RHIBlendMode   blendMode;
+    RHICompareOp   depthCompareOp;
+    bool           depthWrite;
+    uint32_t       stencilBits;           // 打包 stencilTest/Write/ref/op（见 Part B-stencil）
+};
+// MaterialType::GetOrCreatePipeline(device, PipelineStateKey)
+// BuildDrawList 按 DrawItem.MaterialRenderState 组装 key 取对应 pipeline
+```
+
+以下为原 **stencil** 具体改动（Part B-stencil，depth 格式 `D32F → D24_S8`）：
 
 #### 改动链
 
@@ -347,35 +440,143 @@ pipelineDesc.stencilFront = {
 };
 ```
 
+#### Part C — Alpha-Test（MASK）：两档 DepthPrepassMode（对齐 UE `r.EarlyZPass`）
+
+**不做裸 discard**：在延迟 GBuffer 里直接 `discard` 会使 early-Z 退化到 late-Z、植被 overdraw 全额付费——没有现代引擎把它作为 masked 材质的实际路径，故不设该档。现实最低档就是 **MaskedOnly prepass**（UE `r.EarlyZPass` 亦以 masked prepass 为常态）。做成 `RendererConfig` 的运行时模式枚举：
+
+```cpp
+// RendererConfig 新增
+enum class DepthPrepassMode : uint8_t {
+    MaskedOnly,  // 默认：仅 MASK 走预通道（根治 discard 的 early-Z 失效）；opaque 仍直进 GBuffer
+    Full,        // 优化档：opaque+mask 全走预通道；GBuffer 全 EQUAL/depthWrite off，零 overdraw + stencil 统一
+};
+DepthPrepassMode depthPrepassMode = DepthPrepassMode::MaskedOnly;  // 默认；profiling 后可升 Full
+```
+
+两档行为对照：
+
+| 模式 | 预通道内容 | GBuffer 深度状态 | MASK 处理 | stencil 来源 | 顶点成本 |
+|------|-----------|-----------------|-----------|-------------|---------|
+| **MaskedOnly**（默认，先实现） | 仅 MASK 写 depth+stencil | opaque=LEQUAL/write；MASK=EQUAL/no-write | prepass discard；GBuffer 无 discard | opaque=GBuffer 写，MASK=prepass 写 | opaque ×1，MASK ×2 |
+| **Full**（后续优化） | opaque+mask 写 depth+stencil | 全 EQUAL, depthWrite off | prepass discard；GBuffer 无 discard | 全 prepass 写 | ×2 |
+
+`DepthPrepassFeature`（仿 `ShadowFeature` depth-only + `VelocityPrepassFeature` test-only）按模式决定塞哪些 DrawItem 进预通道 draw 列表；`GBufferFeature` 按模式对 opaque/mask 分别选 `depthCompareOp`/`depthWrite`。
+
+```
+DepthPrepass（depth+stencil 附件，MaskedOnly 只画 MASK / Full 画 opaque+mask）
+  frag=空(opaque, 仅 Full 档) / 采 albedo.a discard(mask)；stencil Replace=1；双面→cullMode None
+→ GBuffer（同一 depth+stencil 附件；已被 prepass 写过的几何走 EQUAL/depthWrite off；否则 LEQUAL/write）
+  MASK 几何 EQUAL + early_fragment_tests → 昂贵 PBR 打包 frag 只在最终可见像素运行，无 discard
+```
+
+**为何根治 early-Z**：`discard` 只在 prepass 的**一次 albedo.a 取样** frag 发生（late-Z 代价压到最低）；GBuffer 里 MASK 几何无 discard、不写深度 → early-Z EQUAL 在着色前拒绝被遮挡/被裁片元。这是 UE5 / Doom-2016 植被/masked 材质标准路径。
+
+**着色器**：
+- `depth_prepass.vert`（= `deferred_geometry.vert` 复用，输出 clip pos + uv）；skinned = `depth_prepass_skinned.vert`（复用骨骼路径 set3）
+- `depth_prepass_opaque.frag`（空 `void main(){}`，仅 Full 档用）
+- `depth_prepass_mask.frag`（读 set2 `t_BaseColor_Idx`+`alphaCutoff`，`if (a < cutoff) discard;`）
+- `deferred_geometry.frag` **不变**（两档均无需在 GBuffer 里 discard/加 cutout 变体）
+
+**VelocityPrepass 兼容**：其 `depthTest=true/depthWrite=false`(LEQUAL) 对已填充深度仍成立（可见片元深度==存储值），两档均无需改动。
+
+#### Part D — Forward 半透明（BLEND）
+
+新增 `ForwardTransparentFeature`，插在 `TAAFeature` 之后、`BloomFeature` 之前：
+
+```cpp
+class ForwardTransparentFeature final : public RenderFeature {
+    // OnInit: 注册 forward_transparent 程序（ProgramCache），set0/1 复用，set2=MaterialParams SSBO，set3=skin
+    // AddPasses:
+    //   1. 收集 alphaMode==Blend 的 DrawItem（BuildDrawList 已分好类）
+    //   2. 按 cameraDist 降序排序（back-to-front）
+    //   3. 单 pass：color=当前已解析 HDR(loadOp Load), depth=opaque 深度(只读测试)
+    //      pipeline: blendMode=AlphaBlend, depthCompareOp=LessOrEqual, depthWrite=OFF,
+    //                cullMode= doubleSided?None:Back, stencilTest=off
+    //   4. 逐 draw 绑 set0(bindless)/set1(frame)/set2(material)/[set3 skin]，DrawIndexed
+    ShaderProgram* m_program = nullptr;
+    ShaderProgram* m_skinnedProgram = nullptr;
+};
+```
+
+**着色器 `forward_transparent.frag`**：把 `deferred_geometry.frag` 的材质取样 + `deferred_lighting.frag` 的着色数学（direct 光照循环 + ShadowFactor PCF + IBL SH 漫反射 + split-sum 镜面）合并成单一前向 frag，输出 `vec4(color, albedo.a)`。着色代码可 `#include` 抽出的公共 `.glsl`（建议把 lighting 数学从 `deferred_lighting.frag` 提取到 `pbr_shading.glsl` 供两处共享，避免复制）。顶点 = `deferred_geometry.vert` 复用。
+
+**HDR handle 衔接**（关键集成点，仿 SSR/DoF 的 `m_outputHandle` 重定向）：透明 pass 需把半透明合成到 **TAA 已解析的不透明色**上，并让 Bloom 及后续都看到结果。实现：在 `handles.taaResolved`（=TAA 输出）上原地 `Load` 混合，然后 `handles.hdr = handles.taaResolved`；因 Bloom threshold 读 `taaResolved`、composite 读写 `hdr`，二者需指向同一合成结果——实现时按现有 feature 循环的 handle 重定向逐一核验（`SceneRenderer.cpp:1486-1500`）。
+
+**放 TAA 之后而非之前**：透明物无速度写入（不在 VelocityPrepass），置于 TAA 前会被历史重投影拖影；置于 TAA 后符合 UE translucency 惯例。代价：透明物不参与 TAA 抗锯齿、且不写深度 → DoF/MotionBlur 对其不精确（主流引擎同样取舍，可接受）。
+
+#### Part E — 编辑器 / 序列化
+
+- `MaterialData`→`.samatc` 已在 Part A；`SceneSerializer` 无需改（alpha 属于材质资产非场景）。
+- 编辑器材质 Inspector（若有材质编辑面板）暴露 alphaMode 下拉 + alphaCutoff slider + doubleSided 勾选；接 #68 ComponentSchema 的 Enum/Slider/Bool 字段类型。
+- `PerformancePanel`：DepthPrepass / ForwardTransparent 耗时；透明 draw 数量。
+
 ### 实施步骤
 
-- [ ] 1. `src/platform/rhi/IRHIDevice.hpp` — 新增 `RHIStencilOp`、`RHICompareOp` enums + `RHIStencilOpState`；`RHIPipelineDesc` 加 stencil 字段
-- [ ] 2. `src/platform/rhi/vulkan/VulkanUtils.cpp` — `ToVkImageLayout(DepthWrite)` 改返回 `VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL`
-- [ ] 3. `src/platform/rhi/vulkan/VulkanCommandList.cpp` — `BeginRenderPass` 深度附件 imageLayout 同步改为 `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`
-- [ ] 4. `src/platform/rhi/vulkan/VulkanDevice.cpp` — `CreatePipeline`：新增 `ToVkStencilOpState` 映射函数；`ds` 填充 stencil 字段；`renderingCI.stencilAttachmentFormat` 设置
-- [ ] 5. `src/function/renderer/SceneRenderer.cpp` — `RenderFrame` 深度纹理格式改为 `RHIFormat::D24_S8`
-- [ ] 6. `GBufferFeature::OnInit` — 所有 GBuffer MaterialType 的 pipeline desc 加模板写入配置（含自定义 shading model）
-- [ ] 7. `DeferredLightingFeature::OnInit` — pipeline 加模板测试配置（`depthTest=false`，`stencilTestEnable=true`）
-- [ ] 8. 验证（RenderDoc）：lighting pass 背景区域无 fragment 调用；PerformancePanel lighting 耗时对比
+**Part A — 数据管线（可独立验证：Reimport 后 .samatc 含新字段）**
+- [ ] A1. `tools/importer/MaterialImporter.cpp CookMaterial` — 写出 `alphaMode`/`alphaCutoff`/`doubleSided`
+- [ ] A2. `MaterialInstance`/`MaterialType` — 新增 `MaterialRenderState`（alphaMode/cutoff/doubleSided）；`AlphaMode` 枚举
+- [ ] A3. `MaterialManager::LoadMaterial` — 反序列化上述字段填 `m_renderState`；`alphaCutoff` 进 MaterialParams SSBO
+- [ ] A4. `MeshData.hpp`/`deferred_geometry.frag` — MaterialParams SSBO 尾部加 `float alphaCutoff`（std430 对齐）
+- [ ] A5. `SceneRenderer.hpp DrawItem` — 加 `alphaMode`/`doubleSided`/`cameraDist`；`BuildDrawList` 从 material 填充
+
+**Part B — RHI（可独立验证：现有场景在 D24_S8 + 新 pipeline key 下渲染无回归）**
+- [ ] B1. `IRHIDevice.hpp` — `RHIStencilOp`/`RHICompareOp` 枚举 + `RHIStencilOpState`；`RHIPipelineDesc` 加 stencil 字段 + `depthCompareOp`
+- [ ] B2. `VulkanUtils.cpp` — `ToVkImageLayout(DepthWrite)` → `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`；新增 `ToVkCompareOp`/`ToVkStencilOp`
+- [ ] B3. `VulkanCommandList.cpp BeginRenderPass` — 深度附件 imageLayout 同步 `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`；支持 stencil clear/load
+- [ ] B4. `VulkanDevice.cpp CreatePipeline` — `ds.depthCompareOp=ToVkCompareOp(...)`（替换写死 LEQUAL）；填 stencil；`renderingCI.stencilAttachmentFormat`
+- [ ] B5. `ShaderProgram` pipeline cache — `AttachmentKey` → `PipelineStateKey`（含 cull/blend/depthCompareOp/depthWrite/stencil）；`GetOrCreatePipeline` 签名更新
+- [ ] B6. `SceneRenderer.cpp` — 深度纹理格式 `D32F → D24_S8`（gbKey + m_rgDepth）
+
+**Part C — Alpha-Test / MaskedOnly 档（先实现；可独立验证：植物镂空正确 + RenderDoc 确认 MASK 几何 GBuffer 无 discard/early-Z EQUAL 生效）**
+- [ ] C1. shaders — `depth_prepass.vert`(+skinned)、`depth_prepass_mask.frag`（`depth_prepass_opaque.frag` 留待 Full 档）
+- [ ] C2. `DepthPrepassFeature`（OnInit 注册程序 + skinDescLayout；AddPasses 仅画 MASK，写 depth+stencil=1，双面 cullMode None）
+- [ ] C3. `SceneRenderer::Init` — 在 GBuffer 之前插入 DepthPrepassFeature；`RendererConfig::depthPrepassMode` 默认 MaskedOnly
+- [ ] C4. `GBufferFeature` — MASK 几何 pipeline 用 `depthCompareOp=EQUAL, depthWrite=OFF` + `early_fragment_tests`；opaque 几何仍 `LEQUAL, depthWrite on`；depth/stencil loadOp=Load（保留 prepass 写入）
+- [ ] C5. `DeferredLightingFeature` — pipeline `stencilTestEnable=true, compareOp=Equal, reference=1`（原 stencil 设计）；opaque GBuffer 亦写 stencil=1
+- [ ] C6. BuildDrawList — 按 alphaMode/doubleSided 选 prepass 与 GBuffer 的 pipeline 变体
+
+**Part C-Full — Full 档（后续优化，可选；可独立验证：RenderDoc 确认 GBuffer 全场零 overdraw）**
+- [ ] CF1. `depth_prepass_opaque.frag`（空 frag）；DepthPrepassFeature 在 Full 档追加 opaque draw
+- [ ] CF2. `GBufferFeature` — Full 档全几何 `EQUAL/depthWrite off`，depth loadOp=Load；MaskedOnly/Full 分支切换
+
+**Part D — Forward 半透明（可独立验证：玻璃/水面片正确混合、被不透明遮挡）**
+- [ ] D1. 抽 `deferred_lighting.frag` 光照数学 → `assets/shaders/pbr_shading.glsl`（供延迟与前向共享）
+- [ ] D2. shaders — `forward_transparent.vert`(复用 deferred_geometry.vert)(+skinned)、`forward_transparent.frag`
+- [ ] D3. `ForwardTransparentFeature`（收集 BLEND + back-to-front 排序 + 单 pass forward 着色）
+- [ ] D4. `SceneRenderer::Init` — 在 TAAFeature 之后、BloomFeature 之前插入
+- [ ] D5. HDR handle 衔接 — 透明合成结果重定向 `handles.hdr`/`taaResolved`；核验 `SceneRenderer.cpp:1486-1500` 循环
+- [ ] D6. BuildDrawList — BLEND 物体不进 GBuffer/prepass draw 列表，单列进透明列表
+
+**Part E — 编辑器 / 收尾**
+- [ ] E1. 材质 Inspector — alphaMode 下拉 / alphaCutoff slider / doubleSided 勾选
+- [ ] E2. `PerformancePanel` — DepthPrepass / ForwardTransparent 耗时 + 透明 draw 计数
+- [ ] E3. demo_project — 加植物(MASK) + 玻璃(BLEND) 验证资产
+- [ ] E4. 验证（RenderDoc）：GBuffer 阶段无 discard、early-Z EQUAL 生效；lighting 背景/镂空无 fragment 调用；透明排序正确
 
 ### 边界情况与约束
 
 | 场景 | 处理 |
 |------|------|
-| `D24_S8` 驱动支持 | RTX 3070 必支持；`VkFormatProperties::optimalTilingFeatures` 含 `DEPTH_STENCIL_ATTACHMENT_BIT` |
-| Alpha-test 植物 | `discard` 不写深度/模板 → stencil = 0 → lighting 正确跳过（依赖 alpha-test bug 先修复）|
-| `D32F` → `D24_S8` 精度 | D24 深度精度下降（24-bit vs 32-bit）；对 Sponza 规模场景不明显；如有需要可改用 D32F_S8（若驱动支持） |
-| GBuffer 多 MaterialType | PBR + 所有自定义 shading model 的 pipeline 均需加 stencil write |
-| ShadowFeature | shadow pipeline 无颜色/模板附件，无需修改 |
-| `AttachmentKey` pipeline cache | `stencilFormat` 是 pipeline 缓存 key 的一部分（`ShaderProgram::AttachmentKey`）；若 AttachmentKey 不含 stencil 字段，需扩展 |
-| 向后兼容 | `RHIPipelineDesc` 默认 `stencilTestEnable=false`，所有现有 pipeline 行为不变 |
+| `D24_S8` 驱动支持 | RTX 3070 必支持；`VkFormatProperties::optimalTilingFeatures` 含 `DEPTH_STENCIL_ATTACHMENT_BIT`；否则回退 `D32F_S8` |
+| `D32F → D24_S8` 精度 | D24 精度略降；Sponza 规模不明显；如需保精度用 `D32F_S8`（多占 stencil 平面显存） |
+| DepthPrepass 顶点成本 | 默认 MaskedOnly：仅 MASK 几何 ×2 顶点（植被通常占比小），opaque 单遍。Full 档 opaque 亦 ×2，换 GBuffer 全场零 overdraw + 统一 stencil，profiling 后再升档 |
+| GBuffer EQUAL 深度必须逐位相等 | prepass 与 GBuffer 用**同一 vert shader + 同一 jitter VP**，保证深度 bit-exact；skinned 用同一骨骼矩阵 |
+| 透明物排序 | per-object 质心距离排序，穿插/自重叠仍有错误（延后 #OIT/WBOIT，见不做） |
+| 透明物无深度/速度 | 不写深度 → DoF/MotionBlur 不精确；不在 VelocityPrepass → 置 TAA 后避免拖影 |
+| 双面材质 | doubleSided → cullMode=None（prepass + GBuffer + forward 三处一致） |
+| 自定义 shading model | 所有 GBuffer MaterialType（PBR + 自定义）pipeline 均需 EQUAL/depthWrite off + stencil；prepass 用统一 depth-only 程序 |
+| ShadowFeature | shadow pipeline 无颜色/stencil 附件，无需改 |
+| 向后兼容 | `RHIPipelineDesc` 默认 `stencilTestEnable=false`/`depthCompareOp=LEQUAL`/`depthWrite=true`，现有 pipeline 行为不变；旧 `.samatc` 缺 alphaMode 视为 Opaque |
+| Reimport | `.samatc` 格式加字段，需 Reimport 才带 alpha（缺失即 Opaque，非破坏性） |
 
-**不做：** 多层 stencil 值（只用 0/1）；物体 ID 写 stencil；stencil shadow volumes。
+**不做：** OIT / WBOIT / per-pixel linked-list（重叠透明穿插留后续独立 issue）；多层 stencil 值（只 0/1）；物体 ID 写 stencil；stencil shadow volumes；alpha-to-coverage（延迟单采样不适用）；透明物投射/接收精确阴影（初版透明不写 shadow map）。
 
 ### 受益 issues
 
-- **#23 帧率优化**：大背景场景 Deferred Lighting 节省 15–30%
-- **植物 alpha-test 修复**：修复后 stencil 使镂空区域在 lighting 中自动正确跳过
+- **#23 帧率优化**：大背景场景 Deferred Lighting 省 15–30%（stencil）；植被 GBuffer overdraw 归零（EQUAL 主通道）
+- **X-6 透明材质面片（植物等）** — 本 issue 直接吸收并实现
+- **#61 ShaderVariantCache**：alpha-cutout 从 GBuffer 变体位移除（改由 prepass 处理），变体系统更简洁
+- **#57 Meshlet**：depth-prepass 亦可作为 Hi-Z 遮挡剔除的深度来源
 
 ---
 
@@ -2239,100 +2440,8 @@ Phase 1 必须先做。Phase 2-7 中 P6 / P7 可与 P3-P5 并行（只要 Phase 
 
 ---
 
-## Issue #89 — SSR Phase 2：Hi-Z 步进 + 空间去噪
-
-**优先级：中（接续 #48 ✅ DONE；解决 #48 遗留的条纹 + 噪点；#48 脚注已预留本阶段）**
-
-> 详细规划 2026-06-29。背景见 #48：当前 `ssr.comp` 为**视空间线性步进 + 几何增长步长（`stepLen *= 1.3`）**，存在两个实测问题：
-> 1. **条纹状反射**（亮地板反射到竖直物体上呈扁长条带）—— 根因是视空间步进在掠射角/远距离下每步跨多个屏幕像素，深度缓冲被欠采样 → 连续反射量化成离散深度带；恒定 `thickness` 命中窗口 + 增长步长把一大段射线落进同一 `hitUV`。
-> 2. **噪点重** —— 全管线对 SSR 仅有 TAA 时间累积，**无空间去噪**；抖动用 `fract(sin(dot))` 白噪声方差大；TAA 邻域 AABB clamp 用含噪当前帧算 box，反过来限制 history 收敛；运动时 blend→0.5 噪点浮出。
->
-> **决策确认（2026-06-29）**：①空间去噪**完整做**（Phase C：stochastic GGX + trace/resolve 拆分 + 邻域 BRDF 加权）；②Hi-Z 存储**先验证单张 R32F mip-chain + per-mip RT view（方案 A）**，RHI 不支持再回退独立 mip 纹理。
-
-### 目标
-
-把线性步进替换为 **Hi-Z（深度 min 金字塔）屏幕空间 cell traversal**，从根上消除条纹并提升长射程命中率 / 降低步进开销；加入**按 roughness 的随机化 + 空间 resolve 去噪**，配合低差异抖动序列，在交给 TAA 前把噪点压到可接受。命中后的 split-sum IBL 高光替换逻辑（`out = hdrIn + conf*(ssrSpec − iblSpec)`）保持不变，不改 `deferred_lighting.frag`。
-
-### 设计
-
-#### A. Hi-Z 深度金字塔构建
-
-镜像现有 **Bloom 金字塔模式**（`SceneRenderer.cpp:3539` 逐 mip 独立纹理 + fullscreen pass）。Hi-Z 仅 SSR 用，故 build passes 内聚在 `SSRFeature`（未来 SSGI/contact shadow 复用再提为独立 `HiZFeature`）。
-
-- **存储**（两方案，Phase A step 1 先验证 RHI）：
-  - **方案 A（推荐）**：单张 `R32F` **mip-chain** 纹理，per-mip RT view 写入、`textureLod(t_HiZ, uv, level)` 任意层采样。需确认 RHI 支持 per-mip image view 作 RenderTarget + 采样完整 mip chain（`RHITextureDesc.mipLevels` 已支持，见 `SceneRenderer.cpp:384`）。
-  - **方案 B（回退）**：独立 mip 纹理（仿 `bloomMip[]`），打进 `sampler2DArray` 供 shader 按 level 索引。不优雅、限定层数，仅在方案 A 不可行时用。
-- **mip 0**：从 `handles.depth`(D32F) copy 为 R32F（保留 NDC depth 直接比较）。
-- **mip i+1 = mip i 的 2×2 min**（NDC depth 近=0，min=最近表面；用于"射线在 cell 全部几何之前则整块跳过"）。非 2 幂分辨率边界用 3×3 覆盖奇数边。
-- 新 shader：`hiz_copy`（depth→mip0）+ `hiz_downsample`（2×2 min）。
-
-#### B. Hi-Z 屏幕空间步进（重写 `ssr.comp` march 段）
-
-替换 `ssr.comp:67-111` 的视空间线性步进 + 二分细化为经典 Hi-Z cell traversal（Uludag *"Hi-Z Screen-Space Cone-Traced Reflections"* 思路）：
-
-```
-在屏幕空间(UV + NDC depth)沿反射射线推进：
-  当前 mip 的 cell 内推进到 cell 边界；取 cell 的 Hi-Z(min)：
-    射线深度比 cell min 更近(在所有几何前) → 该 cell 无遮挡，mip++（粗，跨大步）
-    射线进入 cell(深度 ≥ cell min)        → mip--（细，细化），直到 mip 0 命中
-mip 0 命中时用 thickness 判 ray↔surface z 差，避免穿背面
-```
-
-屏幕空间逐 cell 推进 → 透视正确，**消除条纹**；粗 mip 跨空区 → 长射程便宜且不漏细几何。
-
-#### C. 随机化 + 空间去噪（glossy 反射）
-
-- **低差异抖动**：`ssr.comp:73` 的 `fract(sin(dot))` 白噪声 → Hammersley/蓝噪声序列（用 `u_Frame.frameIndex`，已 mod 256）。低差异，TAA 短窗口即可收敛。
-- **Stochastic GGX 抽样**：按 roughness 用 GGX importance sampling 扰动反射射线方向（每像素一条射线 + 上述抽样序列），取代当前只抖动起点。
-- **拆 trace / resolve 两 pass**（核心架构改动）：
-  - **trace pass**：输出 *反射色* + *hitUV / pdf / mask* 到中间 RT（不再直接合成 hdr）。
-  - **resolve pass**（新 compute，SSR trace 后 / 合成回 hdr 前）：邻域（按 roughness 缩放的核，如 5×5）按 BRDF pdf 加权平均相邻像素命中 → 空间去噪，再做 split-sum 替换合成回 hdr。
-- 最终仍交 TAA 做时序累积。**低差异抽样 + 空间 resolve + TAA 时序**三者叠加，分别压不同频段噪声。
-
-#### D. 管线顺序（feature 序列）
-
-```
-DeferredLighting → [HiZ build → SSR trace → SSR resolve]（SSRFeature 内部多 pass） → … → TAA
-```
-
-复用：`FrameContext::BindTexture/BindStorageImage`、`RGPassBuilder::Read/WriteUAV` + 自动 barrier、`ctx.rg->CreateTexture` 瞬态、`ProgramCache::GetCompute/GetGraphics`、`u_Frame.jitter/frameIndex`、`m_outputHandle` redirect 模式。
-
-### 实施步骤（分阶段，每阶段可独立验证）
-
-**Phase A — Hi-Z 金字塔（独立验证：可视化金字塔层）**
-- [ ] 1. RHI 能力确认：单张 R32F mip-chain 的 per-mip RT view + 完整 mip 采样；不行则回退方案 B
-- [ ] 2. Hi-Z build passes：`hiz_copy`(depth→mip0) + `hiz_downsample`(2×2 min) 逐层；资源创建/绑定仿 bloomMip
-- [ ] 3. 验证：debug view 输出某层 Hi-Z，确认 min-reduce 正确、奇数边界无瑕疵
-
-**Phase B — Hi-Z 步进（独立验证：条纹消失）**
-- [ ] 4. 重写 `ssr.comp` march 段为 Hi-Z cell traversal，保留命中后 split-sum 替换逻辑不变
-- [ ] 5. 验证：镜面/低粗糙度地板反射，确认条纹消除、长射程命中、步进次数下降（Tracy 对比 #48）
-
-**Phase C — 随机化 + 空间去噪（独立验证：噪点下降）**
-- [ ] 6. 抖动序列换 Halton/蓝噪声 + glossy GGX importance sampling 扰动射线
-- [ ] 7. 拆 trace/resolve：trace 输出反射色 + hitUV/pdf/mask 中间 RT；新 `ssr_resolve` 邻域 BRDF 加权合成回 hdr
-- [ ] 8. 验证：glossy 反射噪点显著下降，静止/运动下配合 TAA 均可接受
-
-**Phase D — 收尾**
-- [ ] 9. PostProcess 参数/UI（resolve 半径、stochastic 开关）+ 序列化 + 文档
-- [ ] 10. 性能 profiling 与 #48 对比
-
-### 边界情况与约束
-
-| 项 | 处理 |
-|----|------|
-| **per-mip RT view 的 RHI 支持** | Phase A 最大不确定点 → step 1 先验证；不支持回退独立 mip 纹理（限层数） |
-| 非 2 幂分辨率 | Hi-Z min-reduce 奇数边用 3×3 覆盖，避免漏采样导致跳穿 |
-| 中间 RT 显存 | trace/resolve 拆分增反射色 RGBA16F + hit info RG/RGBA16F；可后续 half-res trace + full-res resolve 省带宽（Phase C 先 full-res） |
-| 与 TAA 关系 | 空间 resolve **不替代** TAA，二者叠加；resolve 后信号更平滑 → TAA 邻域 clamp 副作用更小 |
-| per-pixel velocity 不脱影 | 属 #83 P1 范畴（已在 #83 受益清单记录），本 issue **不含** |
-| **不做** | 多次弹射 / ray-traced 反射 / SSGI（Hi-Z 基础设施为其未来铺路，但本 issue 不实现） |
-
-### 受益 issues
-
-- 为未来 **SSGI / contact shadows** 提供可复用的 Hi-Z 金字塔 + 屏幕空间 traversal 基础设施
-- trace/resolve 多 pass + 中间 RT 模式进一步验证 #88 ScreenEffect 的 compute 基础设施
-
+## Issue #89 — SSR Phase 2：Hi-Z 步进 + 空间去噪 ✅ DONE
+<!-- 接续 #48。5 个 compute pass 内聚于 SSRFeature：HiZ_Copy(depth→R32F mip0) + HiZ_SPD(min 金字塔,复用 #94 SPD 的 min 变体 + SPD_SRC_IMAGE in-place 源) → SSR_Trace(ssr.comp,8-spp GGX 随机化,屏幕空间 Hi-Z DDA `HiZTrace`) → SSR_Resolve(轻 3×3 双边预去噪) → SSR_Temporal(velocity 重投影 + 自适应计数累积 alpha=count/(count+1) + mean±1.5σ 方差裁剪防 ghosting) → split-sum 合成替换 IBL 高光。traversal 血泪 5 修=透视正确视空间深度(消横条带)/cell 深度平面交点 tCross∈[t,tCell](消分形三角洞)/texel 比例 crossOffset(消竖条纹)/屏幕射线视口裁剪(消近平面假命中黑块)/viewR.z≥0 剔除朝相机射线(消下半采黑减 IBL 黑块)。新增 shader hiz_copy/hiz_spd/spd_reduce.glsl/ssr_resolve/ssr_temporal;SSRFeature +Hi-Z 纹理/历史 ping-pong/trace-resolve-temporal 三 set;VelocityPrepass gate 加 ssrEnabled。剩余截断/底面/off-screen 为 SSR 固有→回退 IBL。Phase D(PostProcess resolve 参数 UI + profiling)未做→ #95。 -->
 ---
 
 ## Issue #90 — 文件流操作收敛（File I/O 集中化 / 去重）✅ DONE
@@ -2362,3 +2471,17 @@ DeferredLighting → [HiZ build → SSR trace → SSR resolve]（SSRFeature 内�
 - 关联:#92 已建立"内建 frag feature→compute"范式(C3 可直接复用);#91 已提供 compute .saeffect 执行路径(C1/C2 可复用)。
 
 ---
+
+## Issue #94 — SPD 单趟降采样基础设施（Single Pass Downsampler / mip-chain 生成）✅ DONE
+<!-- 两层基础设施：①per-mip 数组 UAV 绑定 `WriteDescriptorStorageImageArrayMip`(IRHIDevice/VulkanDevice，旧 `...Mip` 委托它 arrayElement=0) + FrameContext `BindStorageImageArrayMip`(m_pendingStorageArrayMips + FlushBindings)；storage-image 数组反射 arraySize→layout descriptorCount。②完整单趟 SPD `assets/shaders/spd_downsample.comp`：tile64/wg256 局部归约 mip1..6 + `coherent image2D u_mips[12]`+`coherent`原子计数器末组接力 mip7..12，单 dispatch 到 4096²，`SPD_REDUCE` 宏可定制(默认 avg，#89 用 min)，LDS-only(vulkan1.0)，无需 RG per-subresource。测试：rhi_interface_demo(接口断言) + examples/spd_test(真机 readback vs CPU box-average，256²/1024² 全 maxErr=0)。既有 mip 操作迁移评估=均不迁移(shadow 金字塔/运行时 mipmap 无实现；AutoExposure 直方图非 mip；Bloom 13-tap Karis 无法用 2×2 SPD 复现)。消费者：#89 Hi-Z(首个)、未来 #57 GPU-driven 遮挡剔除(HZB)。SPD 只服务归约型 mip。 -->
+---
+
+## Issue #95 — SSR Phase D：resolve 参数 UI + profiling（#89 收尾拆出）
+
+**优先级：低（#89 已可用；本 issue 为参数暴露 + 性能）**
+
+从 #89 拆出的收尾项（#89 核心已 DONE 并可视验收通过）：
+
+- **PostProcess 参数暴露 + 序列化**：把当前硬编码的 SSR 去噪参数做成可调 —— resolve 空间半径、temporal 自适应计数上限(现 24)、方差裁剪 K(现 1.5)、每帧采样数(现 8-spp)。经 `PostProcessSettings` + `SceneSerializer` 双向 + `PostProcessPanel` UI（对齐现有 ssr* 字段模式）。
+- **性能 profiling**：8-spp × 5 pass 的实测开销（Tracy scope），与 #48 对比；按需给采样数/半径提供质量档位（低/中/高）。
+- **可选画质增强**：temporal 的 miss-帧 conf 兜底（防罕见闪烁）；neighborhood clamp 对移动反射物体的 ghosting 进一步调优；half-res trace + full-res resolve 省带宽。

@@ -1,0 +1,77 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+
+// SSR spatial pre-resolve (Issue #89 Phase C).
+//
+// A light roughness-scaled bilateral blur over the stochastic trace samples, feeding the
+// temporal accumulator (ssr_temporal.comp) a less-noisy per-frame input. Outputs the
+// resolved reflected RADIANCE + confidence — the IBL split-sum composite happens after
+// temporal accumulation. Spatial blur alone can't denoise 1spp glossy (it just spreads
+// sparse samples into blobs); temporal accumulation is the real denoiser.
+//
+// set=1 (frame) via pbr.glsl (OctDecode / EPSILON / resolution). set=2 (this pass).
+#include "pbr.glsl"
+
+layout(set = 2, binding = 0) uniform sampler2D t_GDepth;
+layout(set = 2, binding = 1) uniform sampler2D t_GNormalMaterial;   // oct-normal + roughness
+layout(set = 2, binding = 2) uniform sampler2D t_SSRRadiance;       // rgb=radiance, a=pdf (<0 mirror)
+layout(set = 2, binding = 3) uniform sampler2D t_SSRHit;            // rg=hitUV, b=conf, a=mask
+layout(set = 2, binding = 4, rgba16f) uniform writeonly image2D u_Out; // rgb=radiance, a=conf
+
+layout(push_constant) uniform PC {
+    float maxRoughness;
+    int   radius;
+    vec2  _pad;
+} pc;
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+    ivec2 px  = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 dim = ivec2(u_Frame.resolution);
+    if (px.x >= dim.x || px.y >= dim.y) return;
+
+    vec2  uv    = (vec2(px) + 0.5) / u_Frame.resolution;
+    float depth = texture(t_GDepth, uv).r;
+    if (depth >= 1.0 - EPSILON) { imageStore(u_Out, px, vec4(0.0)); return; }
+
+    vec4  normalMat = texture(t_GNormalMaterial, uv);
+    vec3  worldN    = OctDecode(normalMat.rg);
+    float roughness = normalMat.b;
+
+    float roughFade = 1.0 - smoothstep(pc.maxRoughness * 0.75, pc.maxRoughness, roughness);
+    if (roughFade <= 0.0) { imageStore(u_Out, px, vec4(0.0)); return; }
+
+    bool  mirror = texelFetch(t_SSRRadiance, px, 0).a < 0.0;
+    int   R      = mirror ? 0 : pc.radius;
+    float sigma  = max(1.5, roughness * float(max(pc.radius, 1)) * 2.0);
+    float inv2s2 = 1.0 / (2.0 * sigma * sigma);
+
+    vec3  accum   = vec3(0.0);
+    float wsum    = 0.0;
+    float confSum = 0.0;
+
+    for (int dy = -R; dy <= R; ++dy)
+    for (int dx = -R; dx <= R; ++dx) {
+        ivec2 q = px + ivec2(dx, dy);
+        if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, dim))) continue;
+
+        vec4 hitData = texelFetch(t_SSRHit, q, 0);
+        if (hitData.a < 0.5) continue;                    // neighbour had no SSR hit
+        vec3 rad = texelFetch(t_SSRRadiance, q, 0).rgb;
+
+        vec3  nq = OctDecode(texture(t_GNormalMaterial, (vec2(q) + 0.5) / u_Frame.resolution).rg);
+        float wN = pow(max(dot(worldN, nq), 0.0), 32.0);
+        float wZ = exp(-abs(texelFetch(t_GDepth, q, 0).r - depth) * 64.0);
+        float wS = exp(-float(dx * dx + dy * dy) * inv2s2);
+        float fw = 1.0 / (1.0 + dot(rad, vec3(0.2126, 0.7152, 0.0722)));  // firefly suppress
+        float w  = wS * wN * wZ * fw;
+
+        accum   += w * rad;
+        wsum    += w;
+        confSum += w * hitData.b;
+    }
+
+    if (wsum <= 1e-6) { imageStore(u_Out, px, vec4(0.0)); return; }
+    imageStore(u_Out, px, vec4(accum / wsum, clamp(confSum / wsum, 0.0, 1.0)));
+}

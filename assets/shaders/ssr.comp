@@ -20,7 +20,9 @@ layout(set = 2, binding = 1) uniform sampler2D t_GAlbedoOcclusion;  // RGBA8: al
 layout(set = 2, binding = 2) uniform sampler2D t_GNormalMaterial;   // RGBA16F: octN.rg + rough.b + metal.a
 layout(set = 2, binding = 3) uniform sampler2D t_HDR;               // lit scene colour to reflect
 layout(set = 2, binding = 4) uniform sampler2D t_AO;                // GTAO (1.0 = no occlusion)
-layout(set = 2, binding = 5, rgba16f) uniform writeonly image2D u_SSROut;
+layout(set = 2, binding = 5, rgba16f) uniform writeonly image2D u_SSRRadiance; // rgb=hit radiance, a=pdf
+layout(set = 2, binding = 6) uniform sampler2D t_HiZ;              // min depth pyramid (Issue #89)
+layout(set = 2, binding = 7, rgba16f) uniform writeonly image2D u_SSRHit;      // rg=hitUV, b=conf, a=mask
 
 layout(push_constant) uniform PC {
     int   maxSteps;
@@ -37,6 +39,149 @@ vec3 ViewPosFromUV(vec2 uv, float d) {
     return c.xyz / c.w;
 }
 
+// View-space Z from an NDC depth (independent of screen xy for a perspective proj).
+float NdcToViewZ(float ndcZ) {
+    vec4 c = u_Frame.invProj * vec4(0.0, 0.0, ndcZ, 1.0);
+    return c.z / c.w;
+}
+
+// ── Stochastic glossy sampling (Issue #89 Phase C) ───────────────────────────
+float RadicalInverse(uint bits) {
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    return float(bits) * 2.3283064365386963e-10;
+}
+vec2 Hammersley(uint i, uint N) { return vec2(float(i) / float(N), RadicalInverse(i)); }
+
+float Hash12(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+// GGX importance sample — microfacet normal around N (view space).
+vec3 ImportanceSampleGGX(vec2 Xi, vec3 N, float roughness) {
+    float a        = roughness * roughness;
+    float phi      = 2.0 * PI * Xi.x;
+    float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a * a - 1.0) * Xi.y + 1e-6));
+    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
+    vec3  H        = vec3(sinTheta * cos(phi), sinTheta * sin(phi), cosTheta);
+    vec3  up       = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    vec3  T        = normalize(cross(up, N));
+    vec3  B        = cross(N, T);
+    return normalize(T * H.x + B * H.y + N * H.z);
+}
+
+// ── Hi-Z screen-space ray march (Issue #89) ──────────────────────────────────
+// p0/p1: screen-space ray endpoints — xy = UV [0,1], z = NDC depth. z0v/z1v are the
+// endpoints' view-space Z. Walks the min-depth pyramid: cells the ray passes entirely
+// in front of are skipped at a coarse mip; where the ray reaches the nearest surface
+// it descends to mip 0 and confirms with a thickness test. Depth is compared in
+// view-space Z reconstructed perspective-correctly (1/z_view is what's linear across
+// the screen), which is what fixes the view-space-march depth banding of #48.
+bool HiZTrace(vec3 p0, vec3 p1, float z0v, float z1v, int maxSteps, float thickness,
+              out vec2 hitUV) {
+    vec2 texSize = vec2(textureSize(t_HiZ, 0));
+    int  maxMip  = textureQueryLevels(t_HiZ) - 1;
+
+    vec3 dir = p1 - p0;
+    if (abs(dir.x) < 1e-7) dir.x = dir.x < 0.0 ? -1e-7 : 1e-7;
+    if (abs(dir.y) < 1e-7) dir.y = dir.y < 0.0 ? -1e-7 : 1e-7;
+
+    // Which cell edge we cross (far edge for +dir, near edge for -dir), plus a sub-texel
+    // nudge in the ray direction so the crossing point always lands INSIDE the next cell —
+    // a fixed t-epsilon under-nudges on some columns, whose rays then re-test the same cell
+    // and get skipped, punching vertical stripe holes.
+    vec2 stepSign    = vec2(dir.x >= 0.0 ? 1.0 : 0.0, dir.y >= 0.0 ? 1.0 : 0.0);
+    vec2 crossOffset = sign(dir.xy) * (0.5 / texSize);
+
+    // Start ~2 texels along the ray to leave the origin surface's own texels.
+    float pixelLen = max(length(dir.xy * texSize), 1.0);
+    float t = min(2.0 / pixelLen, 0.25);
+
+    float invZ0 = 1.0 / z0v, invZ1 = 1.0 / z1v;   // 1/z_view is linear across the screen
+    float dInvZ = invZ1 - invZ0;
+    int   mip = 0;
+    hitUV = p0.xy + dir.xy * t;
+
+    for (int i = 0; i < maxSteps && mip >= 0; ++i) {
+        vec2 uvAt = p0.xy + dir.xy * t;
+        if (any(lessThan(uvAt, vec2(0.0))) || any(greaterThan(uvAt, vec2(1.0)))) return false;
+
+        vec2  cells   = vec2(textureSize(t_HiZ, mip));
+        vec2  cellIdx = floor(uvAt * cells);
+        float minZ    = texelFetch(t_HiZ, ivec2(cellIdx), mip).r;
+        float zvSurf  = NdcToViewZ(minZ);            // nearest surface view Z in this cell
+
+        // Screen-space exit boundary of this cell (+ sub-texel nudge), as a ray parameter.
+        vec2  bound = (cellIdx + stepSign) / cells + crossOffset;
+        vec2  tX    = (bound - p0.xy) / dir.xy;
+        float tCell = min(tX.x, tX.y);
+
+        // Ray param where its view Z reaches the cell's min surface (depth-plane crossing).
+        // The ray depth rises across the cell, so we must test the crossing over the whole
+        // [t, tCell] span — not just the entry — or "enter-in-front, exit-behind" cells get
+        // skipped, punching self-similar (fractal) holes at every mip level.
+        float tCross = (1.0 / zvSurf - invZ0) / dInvZ;
+
+        bool sky = minZ >= 1.0 - EPSILON;
+
+        if (tCross < tCell && !sky) {                // ray crosses this cell's surface
+            if (mip == 0) {
+                float tHit  = max(tCross, t);
+                float zvRay = 1.0 / mix(invZ0, invZ1, tHit);
+                if (zvSurf - zvRay < thickness) { hitUV = p0.xy + dir.xy * tHit; return true; }
+                t = tCell; mip = min(mip + 1, maxMip);   // too far behind → keep searching
+            } else {
+                t = max(t, tCross);                  // move to the crossing, refine
+                mip--;
+            }
+        } else {                                     // stays in front through the cell → skip
+            t = tCell; mip = min(mip + 1, maxMip);
+        }
+        if (t >= 1.0) return false;
+    }
+    return false;
+}
+
+// One stochastic reflection sample: microfacet normal H (view space) → screen-space Hi-Z
+// march. Returns whether it hit + the hit UV.
+bool TraceSample(vec3 viewPos, vec3 viewN, vec3 H, int maxSteps, float thickness, out vec2 hitUV) {
+    hitUV = vec2(0.0);
+    vec3 viewR = reflect(normalize(viewPos), H);
+    if (viewR.z >= 0.0) return false;                 // reflects off-screen (toward camera)
+
+    vec3  rayStart = viewPos + viewN * max(0.05, -viewPos.z * 0.01);
+    float nearVZ   = NdcToViewZ(0.0) * 1.001;
+    float tEnd     = 1000.0;
+    if (rayStart.z + viewR.z * tEnd > nearVZ) tEnd = (nearVZ - rayStart.z) / viewR.z;
+    if (tEnd <= 0.0) return false;
+    vec3 viewEnd = rayStart + viewR * tEnd;
+
+    vec4 h0 = u_Frame.proj * vec4(rayStart, 1.0);
+    vec4 h1 = u_Frame.proj * vec4(viewEnd,  1.0);
+    if (h0.w <= 0.0 || h1.w <= 0.0) return false;
+    vec2 s0 = (h0.xy / h0.w) * 0.5 + 0.5;
+    vec2 s1 = (h1.xy / h1.w) * 0.5 + 0.5;
+
+    float invZ0 = 1.0 / rayStart.z, invZ1 = 1.0 / viewEnd.z;
+    vec2  d = s1 - s0;
+    float tClip = 1.0;
+    if (d.x >  1e-6) tClip = min(tClip, (1.0 - s0.x) / d.x);
+    if (d.x < -1e-6) tClip = min(tClip, (0.0 - s0.x) / d.x);
+    if (d.y >  1e-6) tClip = min(tClip, (1.0 - s0.y) / d.y);
+    if (d.y < -1e-6) tClip = min(tClip, (0.0 - s0.y) / d.y);
+    tClip = clamp(tClip, 0.0, 1.0);
+
+    vec3  p0  = vec3(s0, 0.0);
+    vec3  p1  = vec3(s0 + d * tClip, 0.0);
+    float z1v = 1.0 / mix(invZ0, invZ1, tClip);
+    return HiZTrace(p0, p1, rayStart.z, z1v, maxSteps, thickness, hitUV);
+}
+
 void main() {
     ivec2 px = ivec2(gl_GlobalInvocationID.xy);
     ivec2 dim = ivec2(u_Frame.resolution);
@@ -47,7 +192,7 @@ void main() {
 
     float depth = texture(t_GDepth, uv).r;
     if (depth >= 1.0 - EPSILON) {                 // sky / no geometry
-        imageStore(u_SSROut, px, vec4(hdrIn, 1.0));
+        imageStore(u_SSRRadiance, px, vec4(0.0)); imageStore(u_SSRHit, px, vec4(0.0));
         return;
     }
 
@@ -62,76 +207,50 @@ void main() {
 
     // Roughness fade: above maxRoughness the surface keeps pure IBL specular.
     float roughFade = 1.0 - smoothstep(pc.maxRoughness * 0.75, pc.maxRoughness, roughness);
-    if (roughFade <= 0.0) { imageStore(u_SSROut, px, vec4(hdrIn, 1.0)); return; }
+    if (roughFade <= 0.0) { imageStore(u_SSRRadiance, px, vec4(0.0)); imageStore(u_SSRHit, px, vec4(0.0)); return; }
 
-    // ── View-space ray march ─────────────────────────────────────────────────
-    vec3 viewPos   = ViewPosFromUV(uv, depth);
-    vec3 viewN     = normalize(mat3(u_Frame.view) * worldN);
-    vec3 rayDir    = reflect(normalize(viewPos), viewN);   // incident = camera->point
+    // ── Stochastic multi-sample reflection (Issue #89 Phase C) ───────────────
+    // Take several GGX-importance-sampled rays per pixel per frame and average the ones that
+    // hit (edge-faded). Multiple samples make the per-frame reflection dense enough that the
+    // spatial resolve + temporal accumulation can actually denoise it — 1 spp is too sparse,
+    // producing blobs (spatial) and un-clampable ghosting (temporal). roughness→0 collapses to
+    // a single exact mirror sample, so specular is unchanged from Phase B.
+    vec3 viewPos = ViewPosFromUV(uv, depth);
+    vec3 viewN   = normalize(mat3(u_Frame.view) * worldN);
+    bool mirror  = roughness < 0.05;
+    int  N       = mirror ? 1 : 8;
 
-    // Per-frame jittered start offset → TAA averages the resulting noise.
-    float jitter   = fract(sin(dot(vec2(px) + float(u_Frame.frameIndex), vec2(12.9898, 78.233))) * 43758.5453);
-    float stepLen  = max(0.05, -viewPos.z * 0.04);
-    vec3  rayPos   = viewPos + rayDir * stepLen * (1.0 + jitter);
+    vec3  accum = vec3(0.0);
+    float wsum  = 0.0;   // Σ edge-fade over hits
+    int   hits  = 0;
 
-    bool hit = false;
-    vec2 hitUV = vec2(0.0);
-    for (int i = 0; i < pc.maxSteps; ++i) {
-        if (rayPos.z > -0.001) break;             // crossed near plane / behind camera
-        vec4 clip = u_Frame.proj * vec4(rayPos, 1.0);
-        if (clip.w <= 0.0) break;
-        vec2 sUV = (clip.xy / clip.w) * 0.5 + 0.5;
-        if (sUV.x < 0.0 || sUV.x > 1.0 || sUV.y < 0.0 || sUV.y > 1.0) break;
-
-        float sd = texture(t_GDepth, sUV).r;
-        if (sd < 1.0 - EPSILON) {
-            vec3  sView = ViewPosFromUV(sUV, sd);
-            float delta = sView.z - rayPos.z;     // > 0 → ray is behind the surface
-            if (delta > 0.0 && delta < pc.thickness) { hit = true; hitUV = sUV; break; }
+    for (int i = 0; i < N; ++i) {
+        vec3 H;
+        if (mirror) {
+            H = viewN;
+        } else {
+            vec2 Xi = fract(Hammersley(uint(i), uint(N))
+                          + vec2(Hash12(vec2(px) + float(u_Frame.frameIndex)),
+                                 Hash12(vec2(px) + float(u_Frame.frameIndex) + 17.0)));
+            H = ImportanceSampleGGX(Xi, viewN, roughness);
         }
-        rayPos  += rayDir * stepLen;
-        stepLen *= 1.3;                            // geometric growth extends range
-    }
-
-    if (!hit) { imageStore(u_SSROut, px, vec4(hdrIn, 1.0)); return; }
-
-    // Binary refinement between the last in-front sample and the first behind one.
-    {
-        vec3 a = rayPos - rayDir * stepLen / 1.3;  // previous (in front)
-        vec3 b = rayPos;                           // current  (behind)
-        for (int r = 0; r < 5; ++r) {
-            vec3 mid  = (a + b) * 0.5;
-            vec4 c    = u_Frame.proj * vec4(mid, 1.0);
-            vec2 mUV  = (c.xy / c.w) * 0.5 + 0.5;
-            float sd  = texture(t_GDepth, mUV).r;
-            vec3  sV  = ViewPosFromUV(mUV, sd);
-            if (sV.z - mid.z > 0.0) b = mid; else a = mid;
-            hitUV = mUV;
+        vec2 hUV;
+        if (TraceSample(viewPos, viewN, H, pc.maxSteps, pc.thickness, hUV)) {
+            vec2 e  = smoothstep(vec2(0.0), vec2(0.08), hUV)
+                    * (1.0 - smoothstep(vec2(0.92), vec2(1.0), hUV));
+            float ef = e.x * e.y;
+            accum += ef * textureLod(t_HDR, hUV, 0.0).rgb;
+            wsum  += ef;
+            ++hits;
         }
     }
 
-    // ── Confidence: screen-edge fade × roughness fade × strength ─────────────
-    vec2  edge = smoothstep(vec2(0.0), vec2(0.08), hitUV)
-               * (1.0 - smoothstep(vec2(0.92), vec2(1.0), hitUV));
-    float conf = edge.x * edge.y * roughFade * pc.strength;
+    if (wsum <= 1e-5) { imageStore(u_SSRRadiance, px, vec4(0.0)); imageStore(u_SSRHit, px, vec4(0.0)); return; }
 
-    // ── Replace IBL env-probe specular with the screen-traced reflection ─────
-    // Recomputed identically to deferred_lighting.frag so iblSpec cancels exactly.
-    vec3  worldPos = ReconstructWorldPos(uv, depth, u_Frame.invViewProj);
-    vec3  V        = normalize(u_Frame.cameraPos - worldPos);
-    vec3  Rw       = reflect(-V, worldN);
-    float NdotV    = max(dot(worldN, V), 0.0);
-    vec3  F0       = mix(vec3(0.04), albedo, metallic);
-    vec3  F_ibl    = FresnelSchlickRoughness(NdotV, F0, roughness);
-
-    const float MAX_REFLECTION_LOD = 4.0;
-    vec3  prefiltered = textureLod(t_PrefilteredEnv, Rw, roughness * MAX_REFLECTION_LOD).rgb;
-    vec2  brdfSS      = texture(t_BrdfLut, vec2(NdotV, roughness)).rg;
-    vec3  envBRDF     = F_ibl * brdfSS.x + brdfSS.y;
-
-    vec3  iblSpec  = prefiltered * envBRDF * occlusion;
-    vec3  ssrColor = textureLod(t_HDR, hitUV, 0.0).rgb;
-    vec3  ssrSpec  = ssrColor * envBRDF * occlusion;
-
-    imageStore(u_SSROut, px, vec4(hdrIn + conf * (ssrSpec - iblSpec), 1.0));
+    // radiance = edge-faded mean of the hit samples; conf folds in the on-screen hit fraction.
+    vec3  radiance = accum / wsum;
+    float conf     = (wsum / float(N)) * roughFade * pc.strength;
+    float pdf      = mirror ? -1.0 : 1.0;   // <0 tells the resolve to skip spatial blur (mirror)
+    imageStore(u_SSRRadiance, px, vec4(radiance, pdf));
+    imageStore(u_SSRHit,      px, vec4(0.0, 0.0, conf, 1.0));
 }

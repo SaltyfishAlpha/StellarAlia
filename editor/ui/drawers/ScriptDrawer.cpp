@@ -59,51 +59,63 @@ void DrawScriptField(ScriptComponent& sc, entt::entity e,
     switch (f.kind) {
         case ScriptFieldKind::Bool: {
             bool* p = EnsureValue<bool>(sc, schema, f.name);
-            changedThisField = ImGui::Checkbox(label.c_str(), p);
+            changedThisField = TrackedFieldEdit(p, ctx, "Edit " + f.name,
+                [&label](bool* x){ return ImGui::Checkbox(label.c_str(), x); });
             break;
         }
         case ScriptFieldKind::Int32: {
             int32_t* p = EnsureValue<int32_t>(sc, schema, f.name);
-            int tmp = *p;
-            bool changed = f.hasRange
-                ? ImGui::SliderInt(label.c_str(), &tmp,
-                                   static_cast<int>(f.rangeMin),
-                                   static_cast<int>(f.rangeMax))
-                : ImGui::DragInt(label.c_str(), &tmp);
-            if (changed) { *p = tmp; changedThisField = true; }
+            changedThisField = TrackedFieldEdit(p, ctx, "Edit " + f.name,
+                [&label, &f](int32_t* x){
+                    int tmp = *x;
+                    const bool ch = f.hasRange
+                        ? ImGui::SliderInt(label.c_str(), &tmp,
+                                           static_cast<int>(f.rangeMin),
+                                           static_cast<int>(f.rangeMax))
+                        : ImGui::DragInt(label.c_str(), &tmp);
+                    if (ch) { *x = tmp; return true; }
+                    return false;
+                });
             break;
         }
         case ScriptFieldKind::Float: {
             float* p = EnsureValue<float>(sc, schema, f.name);
-            changedThisField = f.hasRange
-                ? ImGui::SliderFloat(label.c_str(), p, f.rangeMin, f.rangeMax)
-                : ImGui::DragFloat(label.c_str(), p, 0.01f);
+            changedThisField = TrackedFieldEdit(p, ctx, "Edit " + f.name,
+                [&label, &f](float* x){
+                    return f.hasRange
+                        ? ImGui::SliderFloat(label.c_str(), x, f.rangeMin, f.rangeMax)
+                        : ImGui::DragFloat(label.c_str(), x, 0.01f);
+                });
             break;
         }
         case ScriptFieldKind::Vec2: {
             glm::vec2* p = EnsureValue<glm::vec2>(sc, schema, f.name);
-            changedThisField = ImGui::DragFloat2(label.c_str(), glm::value_ptr(*p), 0.01f);
+            changedThisField = TrackedFieldEdit(p, ctx, "Edit " + f.name,
+                [&label](glm::vec2* x){ return ImGui::DragFloat2(label.c_str(), glm::value_ptr(*x), 0.01f); });
             break;
         }
         case ScriptFieldKind::Vec3: {
             glm::vec3* p = EnsureValue<glm::vec3>(sc, schema, f.name);
-            changedThisField = ImGui::DragFloat3(label.c_str(), glm::value_ptr(*p), 0.01f);
+            changedThisField = TrackedFieldEdit(p, ctx, "Edit " + f.name,
+                [&label](glm::vec3* x){ return ImGui::DragFloat3(label.c_str(), glm::value_ptr(*x), 0.01f); });
             break;
         }
         case ScriptFieldKind::Vec4: {
             glm::vec4* p = EnsureValue<glm::vec4>(sc, schema, f.name);
-            changedThisField = ImGui::DragFloat4(label.c_str(), glm::value_ptr(*p), 0.01f);
+            changedThisField = TrackedFieldEdit(p, ctx, "Edit " + f.name,
+                [&label](glm::vec4* x){ return ImGui::DragFloat4(label.c_str(), glm::value_ptr(*x), 0.01f); });
             break;
         }
         case ScriptFieldKind::String: {
             std::string* p = EnsureValue<std::string>(sc, schema, f.name);
-            char buf[512];
-            std::strncpy(buf, p->c_str(), sizeof(buf) - 1);
-            buf[sizeof(buf) - 1] = '\0';
-            if (ImGui::InputText(label.c_str(), buf, sizeof(buf))) {
-                *p = buf;
-                changedThisField = true;
-            }
+            changedThisField = TrackedFieldEdit(p, ctx, "Edit " + f.name,
+                [&label](std::string* x){
+                    char buf[512];
+                    std::strncpy(buf, x->c_str(), sizeof(buf) - 1);
+                    buf[sizeof(buf) - 1] = '\0';
+                    if (ImGui::InputText(label.c_str(), buf, sizeof(buf))) { *x = buf; return true; }
+                    return false;
+                });
             break;
         }
         case ScriptFieldKind::Color: {
@@ -113,9 +125,11 @@ void DrawScriptField(ScriptComponent& sc, entt::entity e,
             if (!std::holds_alternative<glm::vec3>(v) && !std::holds_alternative<glm::vec4>(v))
                 v = glm::vec4{1.f};
             if (auto* p4 = std::get_if<glm::vec4>(&v)) {
-                changedThisField = ImGui::ColorEdit4(label.c_str(), glm::value_ptr(*p4));
+                changedThisField = TrackedFieldEdit(p4, ctx, "Edit " + f.name,
+                    [&label](glm::vec4* x){ return ImGui::ColorEdit4(label.c_str(), glm::value_ptr(*x)); });
             } else if (auto* p3 = std::get_if<glm::vec3>(&v)) {
-                changedThisField = ImGui::ColorEdit3(label.c_str(), glm::value_ptr(*p3));
+                changedThisField = TrackedFieldEdit(p3, ctx, "Edit " + f.name,
+                    [&label](glm::vec3* x){ return ImGui::ColorEdit3(label.c_str(), glm::value_ptr(*x)); });
             }
             break;
         }
@@ -252,7 +266,7 @@ bool ScriptDrawer::TryDraw(entt::registry& reg, entt::entity entity,
 
     bool open = ImGui::CollapsingHeader("Script",
                     HeaderFlags(ImGuiTreeNodeFlags_DefaultOpen));
-    if (RemoveButton("x##rem_script")) { reg.remove<ScriptComponent>(entity); return true; }
+    if (RemoveComponentButton<ScriptComponent>("x##rem_script", reg, entity, ctx, "Remove Script")) return true;
     if (!open) return true;
 
     // ── Script asset (AssetID) ────────────────────────────────────────────────

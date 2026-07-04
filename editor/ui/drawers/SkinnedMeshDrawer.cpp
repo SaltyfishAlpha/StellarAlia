@@ -13,7 +13,9 @@ bool SkinnedMeshDrawer::TryDraw(entt::registry& reg, entt::entity entity,
     auto* sm = reg.try_get<SkinnedMeshComponent>(entity);
     if (!sm) return false;
     bool open = ImGui::CollapsingHeader("Skinned Mesh", HeaderFlags());
-    if (RemoveButton("x##rem_sk")) { reg.remove<SkinnedMeshComponent>(entity); return true; }
+    if (RemoveComponentButton<SkinnedMeshComponent>("x##rem_sk", reg, entity, ctx,
+            "Remove Skinned Mesh", [&scene]{ scene.MarkSkinnedMeshDirty(); }))
+        return true;
     if (!open) return true;
 
     ImGui::PushID("SkinnedMesh");

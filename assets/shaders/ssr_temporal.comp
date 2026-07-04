@@ -1,0 +1,122 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+
+// SSR temporal accumulation (Issue #89 Phase C) — the primary denoiser for stochastic
+// reflections. Each frame the trace takes ONE GGX sample per pixel (advanced per frame);
+// this pass reprojects the accumulated reflection history by per-pixel velocity and blends
+// the current (spatially pre-resolved) reflection into it with an exponential moving
+// average, so many frames' samples converge to a clean result. Then it does the IBL
+// split-sum replacement and writes the composited HDR + the new history.
+//
+// set=1 (frame) via pbr.glsl (IBL LUTs, matrices).  set=2 (this pass).
+#include "pbr.glsl"
+
+layout(set = 2, binding = 0) uniform sampler2D t_GDepth;
+layout(set = 2, binding = 1) uniform sampler2D t_GAlbedoOcclusion;
+layout(set = 2, binding = 2) uniform sampler2D t_GNormalMaterial;
+layout(set = 2, binding = 3) uniform sampler2D t_HDR;           // base scene (holds deferred IBL spec)
+layout(set = 2, binding = 4) uniform sampler2D t_AO;
+layout(set = 2, binding = 5) uniform sampler2D t_Reflection;    // current: rgb=radiance, a=conf
+layout(set = 2, binding = 6) uniform sampler2D t_History;       // prev accum: rgb=radiance, a=conf
+layout(set = 2, binding = 7) uniform sampler2D t_Velocity;      // (currUV - prevUV)
+layout(set = 2, binding = 8, rgba16f) uniform writeonly image2D u_History;  // new accum
+layout(set = 2, binding = 9, rgba16f) uniform writeonly image2D u_Out;      // composited HDR
+
+layout(push_constant) uniform PC {
+    float alpha;         // history weight for the EMA (e.g. 0.92)
+    float historyValid;  // 0 = first frame / after resize → no reprojection
+    vec2  _pad;
+} pc;
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+    ivec2 px  = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 dim = ivec2(u_Frame.resolution);
+    if (px.x >= dim.x || px.y >= dim.y) return;
+
+    vec2 uv    = (vec2(px) + 0.5) / u_Frame.resolution;
+    vec3 hdrIn = texelFetch(t_HDR, px, 0).rgb;
+
+    float depth = texture(t_GDepth, uv).r;
+    if (depth >= 1.0 - EPSILON) {
+        imageStore(u_History, px, vec4(0.0));
+        imageStore(u_Out,     px, vec4(hdrIn, 1.0));
+        return;
+    }
+
+    vec4  albedoOcc = texture(t_GAlbedoOcclusion, uv);
+    vec4  normalMat = texture(t_GNormalMaterial,  uv);
+    vec3  albedo    = albedoOcc.rgb;
+    float occlusion = albedoOcc.a * texture(t_AO, uv).r;
+    vec3  worldN    = OctDecode(normalMat.rg);
+    float roughness = normalMat.b;
+    float metallic  = normalMat.a;
+
+    // ── Temporal accumulate the reflected radiance (adaptive, SVGF-style) ─────
+    // History alpha channel stores an accumulated sample COUNT. The blend is a running
+    // average alpha = count/(count+1): count small (fresh / disoccluded) → ~all current, so
+    // the reflection appears immediately; count large (stable) → strong denoise. Variance
+    // clipping detects a stale reprojected history (camera turned → view-dependent reflection
+    // changed) and shrinks the count → fast update, no flowing ghost. Best of both.
+    vec4  cur     = texelFetch(t_Reflection, px, 0);   // rgb=radiance, a=conf
+    vec3  accRad  = cur.rgb;
+    float count   = 1.0;
+    float accConf = cur.a;
+
+    vec2 vel    = texture(t_Velocity, uv).rg;
+    vec2 prevUV = uv - vel;
+    bool reproj = pc.historyValid > 0.5
+               && all(greaterThanEqual(prevUV, vec2(0.0)))
+               && all(lessThanEqual(prevUV, vec2(1.0)));
+
+    if (reproj) {
+        vec4 hist = texture(t_History, prevUV);        // rgb=radiance, a=count
+
+        vec3 m1 = vec3(0.0), m2 = vec3(0.0);
+        int  cnt = 0;
+        for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 q = clamp(px + ivec2(dx, dy), ivec2(0), dim - 1);
+            vec4  r = texelFetch(t_Reflection, q, 0);
+            if (r.a > 0.01) { m1 += r.rgb; m2 += r.rgb * r.rgb; ++cnt; }
+        }
+        vec3  hc  = hist.rgb;
+        float rej = 0.0;
+        if (cnt > 0) {
+            vec3 mean = m1 / float(cnt);
+            vec3 sig  = sqrt(max(m2 / float(cnt) - mean * mean, vec3(0.0)));
+            hc = clamp(hist.rgb, mean - 1.5 * sig, mean + 1.5 * sig);
+            float lm = dot(mean, vec3(0.2126, 0.7152, 0.0722)) + 1e-3;
+            rej = clamp(length(hist.rgb - hc) / lm, 0.0, 1.0);   // how stale was history
+        }
+        float pcount = hist.a * (1.0 - rej);           // stale → reset toward fresh
+
+        if (cur.a > 0.01) {
+            float alpha = pcount / (pcount + 1.0);     // running-average weight
+            accRad  = mix(cur.rgb, hc, alpha);
+            count   = min(pcount + 1.0, 24.0);
+        } else {
+            accRad  = hc;                              // no current sample → keep bounded history
+            count   = pcount;
+        }
+    }
+
+    imageStore(u_History, px, vec4(accRad, count));
+
+    // ── Split-sum IBL replacement (matches deferred_lighting.frag so iblSpec cancels) ──
+    vec3  worldPos = ReconstructWorldPos(uv, depth, u_Frame.invViewProj);
+    vec3  V        = normalize(u_Frame.cameraPos - worldPos);
+    vec3  Rw       = reflect(-V, worldN);
+    float NdotV    = max(dot(worldN, V), 0.0);
+    vec3  F0       = mix(vec3(0.04), albedo, metallic);
+    vec3  F_ibl    = FresnelSchlickRoughness(NdotV, F0, roughness);
+    const float MAX_REFLECTION_LOD = 4.0;
+    vec3  prefiltered = textureLod(t_PrefilteredEnv, Rw, roughness * MAX_REFLECTION_LOD).rgb;
+    vec2  brdfSS      = texture(t_BrdfLut, vec2(NdotV, roughness)).rg;
+    vec3  envBRDF     = F_ibl * brdfSS.x + brdfSS.y;
+    vec3  iblSpec     = prefiltered * envBRDF * occlusion;
+    vec3  ssrSpec     = accRad * envBRDF * occlusion;
+
+    imageStore(u_Out, px, vec4(hdrIn + accConf * (ssrSpec - iblSpec), 1.0));
+}

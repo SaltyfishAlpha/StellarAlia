@@ -15,11 +15,9 @@ bool MeshRendererDrawer::TryDraw(entt::registry& reg, entt::entity entity,
     if (!mr) return false;
     bool open = ImGui::CollapsingHeader("Mesh Renderer",
                     HeaderFlags(ImGuiTreeNodeFlags_DefaultOpen));
-    if (RemoveButton("x##rem_mr")) {
-        reg.remove<MeshRendererComponent>(entity);
-        scene.MarkMaterialDirty();
+    if (RemoveComponentButton<MeshRendererComponent>("x##rem_mr", reg, entity, ctx,
+            "Remove Mesh Renderer", [&scene]{ scene.MarkMaterialDirty(); }))
         return true;
-    }
     if (!open) return true;
 
     ImGui::PushID("MeshRenderer");
@@ -45,12 +43,33 @@ bool MeshRendererDrawer::TryDraw(entt::registry& reg, entt::entity entity,
             std::snprintf(lbl, sizeof(lbl), "[%zu]", i);
             changed |= DrawAssetIDField(lbl, mr->materialSlots[i], "Material", ctx.assetReg);
         }
-        if (ImGui::SmallButton("+ Add Slot"))
-            mr->materialSlots.emplace_back();
+        if (ImGui::SmallButton("+ Add Slot")) {
+            if (ctx.cmdMgr) {
+                ctx.cmdMgr->Execute(std::make_unique<CallbackCommand>(
+                    "Add Material Slot",
+                    [entity](EditorContext& c){ if (auto* m = c.registry->try_get<MeshRendererComponent>(entity)) { m->materialSlots.emplace_back(); c.scene->MarkMaterialDirty(); } },
+                    [entity](EditorContext& c){ if (auto* m = c.registry->try_get<MeshRendererComponent>(entity)) { if (!m->materialSlots.empty()) m->materialSlots.pop_back(); c.scene->MarkMaterialDirty(); } }),
+                    ctx);
+            } else {
+                mr->materialSlots.emplace_back();
+                scene.MarkMaterialDirty();
+            }
+        }
         if (!mr->materialSlots.empty()) {
             ImGui::SameLine();
-            if (ImGui::SmallButton("- Remove Last"))
-                mr->materialSlots.pop_back();
+            if (ImGui::SmallButton("- Remove Last")) {
+                if (ctx.cmdMgr) {
+                    const AssetID savedSlot = mr->materialSlots.back();
+                    ctx.cmdMgr->Execute(std::make_unique<CallbackCommand>(
+                        "Remove Material Slot",
+                        [entity](EditorContext& c){ if (auto* m = c.registry->try_get<MeshRendererComponent>(entity)) { if (!m->materialSlots.empty()) m->materialSlots.pop_back(); c.scene->MarkMaterialDirty(); } },
+                        [entity, savedSlot](EditorContext& c){ if (auto* m = c.registry->try_get<MeshRendererComponent>(entity)) { m->materialSlots.push_back(savedSlot); c.scene->MarkMaterialDirty(); } }),
+                        ctx);
+                } else {
+                    mr->materialSlots.pop_back();
+                    scene.MarkMaterialDirty();
+                }
+            }
         }
         ImGui::TreePop();
     }

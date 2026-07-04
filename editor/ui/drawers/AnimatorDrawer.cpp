@@ -13,7 +13,7 @@ bool AnimatorDrawer::TryDraw(entt::registry& reg, entt::entity entity,
     if (!anim) return false;
     bool open = ImGui::CollapsingHeader("Animator",
                     HeaderFlags(ImGuiTreeNodeFlags_DefaultOpen));
-    if (RemoveButton("x##rem_anim")) { reg.remove<AnimatorComponent>(entity); return true; }
+    if (RemoveComponentButton<AnimatorComponent>("x##rem_anim", reg, entity, ctx, "Remove Animator")) return true;
     if (!open) return true;
     DrawAssetIDField("Clip Asset", anim->clipAsset, "Animation", ctx.assetReg);
     TrackedFieldEdit(&anim->time, ctx, "Edit Time",

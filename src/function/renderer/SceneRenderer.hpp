@@ -361,8 +361,28 @@ private:
         float m_thickness    = 0.1f;
         float m_strength     = 1.0f;
     private:
-        ComputeProgram*       m_prog = nullptr;  // owned by ProgramCache (Issue #86)
-        RHI::RHIDescSetHandle m_ssrSet;  // set=2: depth/albedo/normal/hdr/AO + SSR_Composite UAV
+        ComputeProgram*       m_prog = nullptr;  // owned by ProgramCache (Issue #86) — trace
+        ComputeProgram*       m_resolveProg  = nullptr;  // Phase C spatial resolve
+        ComputeProgram*       m_temporalProg = nullptr;  // Phase C temporal accumulation
+        RHI::RHIDescSetHandle m_ssrSet;         // trace set=2
+        RHI::RHIDescSetHandle m_resolveSet;     // resolve set=2
+        RHI::RHIDescSetHandle m_temporalSet;    // temporal set=2
+
+        // Ping-pong reflection history for temporal accumulation (Phase C). Persistent,
+        // rebuilt on resize; read reprojected from [1-idx], written to [idx] each frame.
+        RHI::RHITextureHandle m_ssrHistory[2];
+        uint32_t              m_histW = 0, m_histH = 0;
+        int                   m_histIdx = 0;
+        bool                  m_histValid = false;
+
+        // Hi-Z min depth pyramid (Issue #89): built each frame via #94 SPD, sampled by
+        // the ray march. R32F mip-chain, rebuilt on resize.
+        ComputeProgram*       m_hizCopyProg = nullptr;  // depth → Hi-Z mip0
+        ComputeProgram*       m_hizSpdProg  = nullptr;  // min-reduce mip1..N (SPD)
+        RHI::RHIDescSetHandle m_hizCopySet;
+        RHI::RHIDescSetHandle m_hizSpdSet;
+        RHI::RHITextureHandle m_hizTex;
+        uint32_t              m_hizW = 0, m_hizH = 0, m_hizMips = 0;
     };
 
     // GTAO ambient occlusion: 3-pass (main + H blur + V blur).

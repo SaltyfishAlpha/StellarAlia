@@ -1343,7 +1343,34 @@ Current users: `TonemapFeature::m_cgLutTex` (32×32×32 RGBA16F, color grading L
 ### `IRHICommandList::GenerateMipmaps`
 
 Blit chain from mip 0→1→…→N-1. Input must be in `ShaderRead`; output all mips
-in `ShaderRead`. Texture must have `CopySrc` usage bit.
+in `ShaderRead`. Texture must have `CopySrc` usage bit. This is the fixed-function
+(hardware blit) mip path — distinct from the compute mip generation below.
+
+### Per-Mip Storage-Image Writes & SPD (Issue #94)
+
+Two axes to keep separate: **who generates mips** (hardware blit above, or a compute
+shader) and **how a compute shader binds the mips it writes** (the descriptor helpers here).
+
+Compute mip writes bind a texture's mip level as a storage image (UAV):
+- `WriteDescriptorStorageImageMip(ds, binding, tex, mip)` — one mip into a **scalar**
+  `image2D` binding (used by IBL prefilter, which writes one convolved mip at a time).
+- `WriteDescriptorStorageImageArrayMip(ds, binding, arrayElement, tex, mip)` — one mip into
+  a specific **array element** of an `image2D u_mips[N]` binding. The only difference from the
+  scalar variant is VK `dstArrayElement`; the scalar one delegates here with element 0. Lets a
+  single dispatch hold the whole chain (element i → mip i) and write any level. `FrameContext::
+  BindStorageImageArrayMip` is the RG-side deferred wrapper. Storage-image arrays reflect their
+  size (`arraySize`) so the auto-derived descriptor layout gets `descriptorCount = N`.
+
+**SPD — single-pass downsampler** (`assets/shaders/spd_downsample.comp`). Generic reduction
+pyramid (min/max/avg via the `SPD_REDUCE` macro) built in **one dispatch**: each 256-thread
+workgroup reduces a 64×64 source tile to mip1..mip6 in registers+LDS; the last workgroup
+(elected via a `coherent` atomic-counter SSBO) reduces the mip6 image to mip7..mip12. `coherent
+image2D u_mips[12]` makes cross-workgroup mip6 writes visible. LDS-only (no subgroup ops) so it
+compiles at the default `vulkan1.0` target; supports up to 4096² (12 mips). Because it is one
+dispatch writing the whole chain in one UAV state, it needs **no per-subresource render-graph
+tracking**. Applicability = reduction-type mips only: Hi-Z (min, Issue #89), min/max pyramids,
+box mipmaps. NOT IBL prefilter (per-mip convolution, not reduction) nor Bloom (13-tap Karis) nor
+AutoExposure (histogram). Validated headless in `examples/spd_test` (readback vs CPU box-average).
 
 ### `IRHIDevice::GetMemoryStats` → `RHIMemoryStats`
 
@@ -1908,7 +1935,7 @@ Normal encoding uses **Octahedral Normal Encoding** (OctEncode/OctDecode).
 | `VelocityPrepassFeature` (Issue #84) | enabled when `MotionBlurFeature::m_enabled` OR `TAAFeature::m_enabled` (Issue #85) | Per-object writes to `handles.velocity` (RG16F): each visible draw rasterises curr & prev clip-space positions. `gl_Position` uses jittered VP (matches GBuffer depth); the velocity output uses unjittered `currUnjitteredViewProj` × `prevViewProj` so TAA can reproject without jitter compensation. Skinned variant samples curr/prev bone matrices via set=3 bindings 0/2 (`velocityDescSet`) | `velocity_prepass.vert/.frag` (+ `velocity_prepass_skinned.vert` for skinned) |
 | `SSAOFeature` | always registered; disabled → fills ssaoTex with 1.0 | half-res R8 AO → blurred into `ssaoTex` | `ssao.frag` + `ssao_blur.frag` |
 | `DeferredLightingFeature` | always | HDR (transient RGBA16F) | `deferred_lighting.frag` |
-| `SSRFeature` (Issue #48) | always registered; skips if `pp.ssrEnabled==false` | compute pass: view-space ray-march → replaces IBL env-probe specular with screen-traced colour into transient `SSR_Composite` (RGBA16F UAV); sets `handles.hdr` to it. Relies on TAA to denoise the per-frame jitter | `ssr.comp` |
+| `SSRFeature` (Issue #48 / #89) | always registered; skips if `pp.ssrEnabled==false` | 5 compute passes: HiZ_Copy + HiZ_SPD (min pyramid) → SSR_Trace (8-spp GGX, screen-space Hi-Z DDA) → SSR_Resolve (bilateral) → SSR_Temporal (velocity-reprojected adaptive accumulation + variance clip) → composite replaces IBL env-probe specular into `SSR_Composite`; sets `handles.hdr`. See [Screen Space Reflections](#screen-space-reflections-issue-48-phase-1--89-phase-2) | `ssr.comp`, `hiz_copy/hiz_spd.comp`, `ssr_resolve/ssr_temporal.comp` |
 | `SelectionMaskFeature` | always | R8 silhouette mask | `selection_mask.vert/.frag` (+ `selection_mask_skinned.vert` for skinned) |
 | `TAAFeature` | always registered; disabled → passes `handles.hdr` through | TAA-resolved into ping-pong history; `handles.taaResolved` | `taa_resolve.frag` |
 | `AutoExposureFeature` | always registered; skips if `pp.autoExposureEnabled==false` | 256-bin log-lum histogram → weighted percentile EV → exponential-smoothing exposure; 1-frame CPU readback via staging; reads `handles.hdr` (pre-TAA content) | `postfx_histogram.comp`, `postfx_exposure_adapt.comp` |
@@ -2078,47 +2105,60 @@ All three effects use `if (enable > 0.5)` uniform-control-flow — the shader co
 
 **Script API (`StellarAlia.PostProcess`):** see [Scripting System → Script API Surface](#script-api-surface) for the `PostProcess.Vignette` / `.ChromaticAberration` / `.FilmGrain` Unity-style accessors.
 
-### Screen Space Reflections (Issue #48)
+### Screen Space Reflections (Issue #48 Phase 1 → #89 Phase 2)
 
-`SSRFeature` is a single **compute** pass (`ssr.comp`) inserted immediately after
-`DeferredLightingFeature` and before `SelectionMask`/`TAA`, so TAA denoises the per-frame
-ray-march jitter. It is the engine's first compute pass to write a **transient UAV texture**
-and the first to consume the per-frame `frameSet` from compute.
+`SSRFeature` runs a Hi-Z-accelerated, stochastic, temporally-denoised reflection between
+`DeferredLightingFeature` and `SelectionMask`/`TAA`. Phase 2 (#89) replaced Phase 1's
+view-space linear march (which striped) and single-sample-relying-on-TAA denoise with **five
+compute passes** internal to the feature:
 
-**Algorithm (per pixel):** reconstruct view-space position from depth (`u_Frame.invProj`) and
-the G-Buffer normal; reflect the view ray; linear-march the depth buffer with geometric step
-growth + a jittered start, then binary-refine the hit. On a hit, sample the lit HDR at the hit
-UV and **replace the IBL env-probe specular** — recomputing `iblSpec = prefilteredColor *
-(F_ibl·brdfSS.x + brdfSS.y) * occlusion` exactly as `deferred_lighting.frag` does (same
-`occlusion = albedoOcc.a × AO`) so the subtraction cancels and there is no double counting:
-```
-out = hdrIn + conf * (ssrSpec - iblSpec)
-conf = screenEdgeFade × roughnessFade(ssrMaxRoughness) × ssrStrength
-```
-`deferred_lighting.frag` is **unchanged** — SSR is a self-contained "specular correction" pass.
-
-**Data flow / placement:**
 ```
 DeferredLighting (handles.hdr ← lit, incl. iblSpec)
-  → SSR (compute): Read depth + gbufferRT0/1 + hdr + AO + set=1 frame; WriteUAV SSR_Composite
-    SceneRenderer redirects handles.hdr = SSR_Composite (mirrors DoF/MotionBlur output redirect)
-  → SelectionMask → TAA (denoises SSR) → Bloom → …
+  → HiZ_Copy   : depth(D32F) → Hi-Z mip0 (R32F)
+  → HiZ_SPD    : min-reduce mip0 → mip1..N (SPD, #94, reduce = min; imageLoad in-place)
+  → SSR_Trace  : 8 GGX-sampled rays/pixel, screen-space Hi-Z march → SSR_Radiance(rgb=radiance,
+                 a=pdf<0⇒mirror) + SSR_Hit(b=conf, a=mask)
+  → SSR_Resolve: light 3×3 roughness-scaled bilateral pre-blur → SSR_Reflection(rgb=radiance,a=conf)
+  → SSR_Temporal: reproject history by velocity + adaptive-count accumulate + variance clip,
+                 then split-sum composite → SSR_Composite; write new history (ping-pong)
+    SceneRenderer redirects handles.hdr = SSR_Composite
+  → SelectionMask → TAA → Bloom → …
 ```
-Disabled (`ssrEnabled==false`) → `AddPasses` early-returns with `m_outputHandle = {}`, the RG
-skips the transient, zero cost.
 
-**Descriptor sets (compute, mirrors SSAO):** set=1 = `frameSet` (camera + IBL samplers, bound
-via `ComputeProgram`'s `frameLayout`); set=2 = SSR resources (b0 depth, b1 gbufferRT0, b2
-gbufferRT1, b3 hdr, b4 AO — all sampled; b5 `SSR_Composite` storage image). `SSR_Composite` is
-`RGBA16F` (`rgba8` is not a guaranteed storage-image format) with `UnorderedAccess | Sampled`.
+**Hi-Z traversal (`ssr.comp` `HiZTrace`).** Screen-space DDA over the min-depth pyramid: cells
+the ray passes entirely in front of are skipped at a coarse mip, and where it reaches the
+nearest surface it descends to mip 0 + a view-space thickness test. Depth is compared in
+**view-space Z reconstructed perspective-correctly** (1/z_view is what's linear across the
+screen) — this, not the pyramid, is what removes Phase 1's banding. Crossing is found by the
+**depth-plane intersection** over the whole cell span `[t, tCell]` (testing only cell entry
+punches self-similar fractal holes); cell stepping uses a **texel-scaled `crossOffset`** (a
+fixed t-epsilon leaves vertical stripe holes); the screen ray is **clipped to the viewport**
+(a near-plane-projected endpoint degenerates the depth interpolation → false black hits); and
+rays with `viewR.z ≥ 0` (reflecting toward/behind the camera → off-screen) are dropped to IBL.
 
-**Reusable infra added by this feature:**
-- `FrameContext::BindStorageImage(set, binding, RGTextureHandle)` — deferred storage-image
-  (UAV) binding for transient RG textures (counterpart to `BindTexture`/`BindBuffer`); resolved
-  in `FlushBindings` via `WriteDescriptorStorageImage`. First exercise of `RGPassBuilder::WriteUAV`
-  on a texture; the RG auto-emits the `UnorderedAccess(GENERAL) → ShaderRead` barrier for TAA.
-- `ComputeProgram` external `frameLayout` now occupies **set=1** (was set=0); frame samplers
-  are `RHIShaderStage::All`. See [ComputeProgram](#computeprogram).
+**Stochastic + denoise (Phase C).** The trace GGX-importance-samples the reflection direction
+(roughness < 0.05 ⇒ exact mirror, no jitter); 8 samples/pixel/frame make the per-frame signal
+dense enough to denoise. `ssr_resolve.comp` does a light bilateral pre-blur; `ssr_temporal.comp`
+is the primary denoiser — it reprojects the reflection history by `handles.velocity`, blends
+with an **adaptive running-average** (`alpha = count/(count+1)`, count in history alpha: fresh /
+disoccluded ⇒ shows current immediately, stable ⇒ strong denoise) and **variance-clips** the
+reprojected history to the current 3×3 mean±1.5σ (reflections are view-dependent, so geometry
+velocity carries a stale reflection on camera turns; the clip + count reset kill the flowing
+ghost). History is a persistent ping-pong pair, rebuilt on resize.
+
+**Split-sum replacement (unchanged principle).** On the resolved radiance the temporal pass
+recomputes `iblSpec = prefilteredColor·(F_ibl·brdfSS.x + brdfSS.y)·occlusion` exactly as
+`deferred_lighting.frag` does and outputs `hdrIn + conf·(ssrSpec − iblSpec)` (conf = screen-edge
+fade × on-screen hit fraction × roughnessFade(ssrMaxRoughness) × ssrStrength). `deferred_lighting.frag`
+is untouched. Rays that miss / hit off-screen / hit occluded or bottom faces fall back to the
+IBL term — the fundamental SSR limitation, hence SSR + IBL are a fallback hierarchy, not
+alternatives.
+
+**Resources.** Hi-Z = single R32F mip-chain (SSRFeature member, resized) fed by the #94 per-mip
+UAV binding (`WriteDescriptorStorageImageArrayMip`); an atomic counter for the SPD global step is
+a transient `clearOnCreate` SSBO; SSR_Radiance/Hit/Reflection are transient RGBA16F; history is
+2× persistent RGBA16F. `VelocityPrepassFeature`'s gate now includes `ssrEnabled` (SSR reprojection
+consumes `handles.velocity`). Disabled → `AddPasses` early-returns, zero cost.
 
 ### CPU Frustum Culling & BVH
 

@@ -1,0 +1,6 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// SPD downsampler, default 4-way average reduce (Issue #94).
+// All logic lives in the shared core; see spd_reduce.glsl.
+#include "spd_reduce.glsl"

@@ -48,6 +48,7 @@
 #include "ui/drawers/ScriptDrawer.hpp"
 #include "command/commands/EntityCommands.hpp"
 #include "command/commands/TransformCommand.hpp"
+#include "command/commands/ComponentCommands.hpp"
 
 #if __has_include(<nfd.h>)
 #include <nfd.h>
@@ -325,17 +326,18 @@ void EditorMode::BuildContext(Application& app) {
         },
         .makeCommand = [](EditorContext& ctx) -> std::unique_ptr<IEditorCommand> {
             const auto& entitySet = ctx.selection->GetEntitySet();
+            if (entitySet.empty()) return nullptr;
             if (entitySet.size() == 1) {
                 entt::entity e = static_cast<entt::entity>(*entitySet.begin());
                 return std::make_unique<DeleteEntityCommand>(e);
             }
-            // Multi-select delete: non-undoable direct batch delete
-            for (uint32_t bits : entitySet) {
-                entt::entity e = static_cast<entt::entity>(bits);
-                if (ctx.registry->valid(e)) ctx.scene->DestroyEntity(e);
-            }
-            ctx.selection->Clear();
-            return nullptr;
+            // Multi-select delete: one composite step so a single Ctrl+Z restores
+            // the whole batch (each child DeleteEntityCommand snapshots its entity).
+            std::vector<std::unique_ptr<IEditorCommand>> cmds;
+            cmds.reserve(entitySet.size());
+            for (uint32_t bits : entitySet)
+                cmds.push_back(std::make_unique<DeleteEntityCommand>(static_cast<entt::entity>(bits)));
+            return std::make_unique<CompositeCommand>("Delete Entities", std::move(cmds));
         },
     });
     m_actionRegistry.Register({
