@@ -59,7 +59,10 @@ static bool SaveOverridesToFile(
 void EditorShortcutConfig::Load(const std::filesystem::path& configPath) {
     m_configPath = configPath;
     m_overrides.clear();
-    // Missing file is fine — we silently start from defaults.
+    // The default config (bin/editor_shortcuts.sainputmap) is a read-only
+    // template copied from assets/editor/ at build time (sa_copy_assets). A
+    // missing file still falls back to defaults, but the IO::ReadText warning
+    // is kept — it signals a broken build-copy step.
     LoadOverridesFromFile(configPath, m_overrides);
     m_dirty = false;
 }

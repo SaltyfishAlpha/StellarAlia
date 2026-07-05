@@ -120,6 +120,22 @@ function(sa_copy_assets)
             )
         endif()
     endforeach()
+
+    # Editor default shortcut config: read-only template at the bin root.
+    # EditorMode loads <bin>/editor_shortcuts.sainputmap as the built-in
+    # default (ShortcutsPanel disables Save for this path; user configs are
+    # saved elsewhere via ImportFrom/ExportTo).
+    set(_shortcuts_tpl "${CMAKE_SOURCE_DIR}/assets/editor/editor_shortcuts.sainputmap")
+    if(EXISTS "${_shortcuts_tpl}")
+        add_custom_target(StellarAliaCopy_editor_shortcuts ALL
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${_shortcuts_tpl}"
+                "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/editor_shortcuts.sainputmap"
+            COMMENT "Copying editor_shortcuts.sainputmap → bin/"
+        )
+    else()
+        message(WARNING "editor_shortcuts.sainputmap template missing at ${_shortcuts_tpl}")
+    endif()
 endfunction()
 
 # ── 3. Generate AssetsPath.hpp ────────────────────────────────────────────────
