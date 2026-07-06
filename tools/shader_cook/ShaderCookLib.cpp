@@ -219,9 +219,31 @@ static bool GenerateDispatch(const std::vector<ShaderEntry>& entries,
 
 // ── Shader compilation ────────────────────────────────────────────────────────
 
+// Read a captured stderr file and condense it to one line for diagnostics:
+// the first line containing "error", else the first non-empty line.
+static std::string CondenseErrorFile(const fs::path& errFile, std::string& fullText) {
+    std::ifstream f(errFile);
+    if (!f) return {};
+    fullText.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    std::string firstLine, errorLine;
+    std::istringstream ss(fullText);
+    for (std::string line; std::getline(ss, line); ) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+        if (line.empty()) continue;
+        if (firstLine.empty()) firstLine = line;
+        if (line.find("error") != std::string::npos) { errorLine = line; break; }
+    }
+    std::string msg = errorLine.empty() ? firstLine : errorLine;
+    for (char& c : msg) if (c == '\t') c = ' ';
+    if (msg.size() > 300) msg = msg.substr(0, 300) + "…";
+    return msg;
+}
+
 static bool CompileEntry(const ShaderEntry& entry,
                           const fs::path& spvOutDir,
-                          const CookConfig& cfg) {
+                          const fs::path& dispatchDir,
+                          const CookConfig& cfg,
+                          std::string& outError) {
     fs::create_directories(spvOutDir);
 
     const std::string stem  = entry.snakeName + ".gbuffer";
@@ -235,13 +257,31 @@ static bool CompileEntry(const ShaderEntry& entry,
             SA_LOG_ERROR("ShaderCook: cannot write '{}'", fragSrc.string());
             return false;
         }
-        f << entry.gbufferGlsl;
+        // Alias this model's dispatch ID right after #version. Authored code
+        // (and the NewShader template, whose model name is patched at file
+        // creation) can write EncodeShadingFlags(SA_SHADING_MODEL_ID) without
+        // spelling out the name-derived SHADING_MODEL_<UPPER> macro.
+        std::string src = entry.gbufferGlsl;
+        const std::string alias = "#define SA_SHADING_MODEL_ID SHADING_MODEL_"
+                                + SnakeToUpper(entry.snakeName) + "\n";
+        if (const auto vpos = src.find("#version"); vpos != std::string::npos) {
+            const auto eol = src.find('\n', vpos);
+            if (eol != std::string::npos) src.insert(eol + 1, alias);
+        }
+        f << src;
     }
 
     if (!cfg.force && fs::exists(spvPath) && fs::exists(reflPath)) {
-        const auto srcMtime = fs::last_write_time(entry.sourcePath);
-        if (fs::last_write_time(spvPath) >= srcMtime &&
-            fs::last_write_time(reflPath) >= srcMtime) {
+        // The SPV bakes this model's dispatch ID, so it is stale whenever the
+        // generated shading_model_ids.glsl changed (IDs shift when models are
+        // added/removed) — not just when its own source changed. writeIfChanged
+        // keeps the ids file's mtime stable when content is identical.
+        auto newestInput = fs::last_write_time(entry.sourcePath);
+        const fs::path idsFile = dispatchDir / "shading_model_ids.glsl";
+        if (fs::exists(idsFile))
+            newestInput = std::max(newestInput, fs::last_write_time(idsFile));
+        if (fs::last_write_time(spvPath) >= newestInput &&
+            fs::last_write_time(reflPath) >= newestInput) {
             SA_LOG_INFO("ShaderCook: '{}' up to date", entry.snakeName);
             return true;
         }
@@ -251,21 +291,31 @@ static bool CompileEntry(const ShaderEntry& entry,
     for (const auto& inc : cfg.includePaths)
         includes += " -I" + Q(inc);
 
+    // Capture glslc stderr so errors reach the editor Diagnostics panel (the
+    // child process console is invisible in GUI sessions).
+    const fs::path errPath = spvOutDir / (stem + ".frag.err");
     const std::string glslcCmd =
         Q(cfg.glslcPath)
         + " -fshader-stage=frag"
         + includes
         + " " + Q(fragSrc)
-        + " -o " + Q(spvPath);
+        + " -o " + Q(spvPath)
+        + " 2>" + Q(errPath);
 
     SA_LOG_INFO("ShaderCook: compiling {}.frag ...", stem);
     if (const int ret = Exec(glslcCmd); ret != 0) {
-        SA_LOG_ERROR("ShaderCook: glslc failed (exit {}): {}", ret, glslcCmd);
+        std::string fullErr;
+        outError = CondenseErrorFile(errPath, fullErr);
+        if (outError.empty()) outError = "glslc failed (exit " + std::to_string(ret) + ")";
+        SA_LOG_ERROR("ShaderCook: glslc failed (exit {}) for '{}':\n{}",
+                     ret, entry.sourcePath.filename().string(), fullErr);
         std::error_code ec;
         fs::remove(spvPath,  ec);
         fs::remove(reflPath, ec);
+        fs::remove(errPath,  ec);
         return false;
     }
+    { std::error_code ec; fs::remove(errPath, ec); }
 
     if (!cfg.reflToolPath.empty()) {
         const std::string reflCmd =
@@ -276,6 +326,7 @@ static bool CompileEntry(const ShaderEntry& entry,
 
         if (const int ret = Exec(reflCmd); ret != 0) {
             SA_LOG_ERROR("ShaderCook: ShaderReflectTool failed (exit {})", ret);
+            outError = "ShaderReflectTool failed (exit " + std::to_string(ret) + ")";
             std::error_code ec;
             fs::remove(spvPath,  ec);
             fs::remove(reflPath, ec);
@@ -298,6 +349,28 @@ static bool CompileEntry(const ShaderEntry& entry,
 
     SA_LOG_INFO("ShaderCook: cooked '{}' → {}", entry.shadingModel, spvPath.filename().string());
     return true;
+}
+
+// Remove cooked <snake>.gbuffer.frag[.spv|.refl] whose model no longer exists
+// (source .saglsl deleted or @ShadingModel renamed). Without this,
+// RegisterTypesFromShaderDir resurrects the stale type from the leftover .refl
+// on every reload — deleted/renamed models would keep working forever (#106).
+static void PruneOrphanedGbufferOutputs(const fs::path& spvOutDir,
+                                        const std::vector<ShaderEntry>& entries) {
+    std::error_code ec;
+    if (!fs::is_directory(spvOutDir)) return;
+    for (const auto& de : fs::directory_iterator(spvOutDir, ec)) {
+        const std::string fname = de.path().filename().string();
+        const auto pos = fname.find(".gbuffer.frag");
+        if (pos == std::string::npos) continue;
+        const std::string snake = fname.substr(0, pos);
+        const bool live = std::any_of(entries.begin(), entries.end(),
+            [&](const ShaderEntry& e) { return e.snakeName == snake; });
+        if (live) continue;
+        std::error_code rec;
+        fs::remove(de.path(), rec);
+        SA_LOG_INFO("ShaderCook: pruned orphaned '{}'", fname);
+    }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -329,8 +402,16 @@ CookResult CookDirectory(const fs::path& scanDir,
     if (sources.empty()) {
         // Generate empty dispatch so including shaders always compile.
         GenerateDispatch({}, dispatchOutDir);
+        std::ofstream(dispatchOutDir / "shader_models.txt");  // clear mapping (#106)
+        PruneOrphanedGbufferOutputs(spvOutDir, {});           // last .saglsl deleted
         return result;  // success=true, modelCount=0
     }
+
+    auto fail = [&result](const std::string& model, const fs::path& source,
+                          const std::string& message) {
+        result.failedModels.push_back(model);
+        result.failures.push_back({model, source.generic_string(), message});
+    };
 
     // Parse
     std::vector<ShaderEntry> entries;
@@ -339,14 +420,33 @@ CookResult CookDirectory(const fs::path& scanDir,
         std::string err;
         if (!ParseSaGlsl(src, entry, err)) {
             SA_LOG_ERROR("ShaderCook: parse error: {}", err);
-            result.failedModels.push_back(src.stem().string());
+            fail(src.stem().string(), src, err);
         } else {
             entries.push_back(std::move(entry));
         }
     }
 
+    // Sort by snakeName — it drives the SHADING_MODEL_<UPPER> macro, so it is
+    // the identity that must be unique below.
     std::sort(entries.begin(), entries.end(),
-              [](const auto& a, const auto& b) { return a.shadingModel < b.shadingModel; });
+              [](const auto& a, const auto& b) { return a.snakeName < b.snakeName; });
+
+    // Duplicate model names would emit the same SHADING_MODEL_* macro with two
+    // different IDs, which breaks compilation of EVERY model (not just the
+    // duplicate). Keep the first occurrence, fail the rest up front.
+    for (size_t i = 1; i < entries.size(); ) {
+        if (entries[i].snakeName == entries[i - 1].snakeName) {
+            const std::string msg = "duplicate @ShadingModel '" + entries[i].shadingModel
+                                  + "' — already defined by '"
+                                  + entries[i - 1].sourcePath.filename().string() + "'";
+            SA_LOG_ERROR("ShaderCook: {} (in '{}') — skipped",
+                         msg, entries[i].sourcePath.string());
+            fail(entries[i].shadingModel, entries[i].sourcePath, msg);
+            entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(i));
+        } else {
+            ++i;
+        }
+    }
 
     // First-pass dispatch: all parsed entries get IDs before any compilation,
     // so each gbuffer shader can include shading_model_ids.glsl with its own ID.
@@ -358,8 +458,10 @@ CookResult CookDirectory(const fs::path& scanDir,
     // Compile entries
     std::vector<ShaderEntry> goodEntries;
     for (const auto& entry : entries) {
-        if (!CompileEntry(entry, spvOutDir, cfg)) {
-            result.failedModels.push_back(entry.shadingModel);
+        std::string err;
+        if (!CompileEntry(entry, spvOutDir, dispatchOutDir, cfg, err)) {
+            fail(entry.shadingModel, entry.sourcePath,
+                 err.empty() ? "compile failed" : err);
         } else {
             goodEntries.push_back(entry);
         }
@@ -370,16 +472,32 @@ CookResult CookDirectory(const fs::path& scanDir,
     if (!result.failedModels.empty())
         GenerateDispatch(goodEntries, dispatchOutDir);
 
-    // Write / clear cook_errors.txt
+    PruneOrphanedGbufferOutputs(spvOutDir, entries);
+
+    // Write shader_models.txt — tab-separated `source \t shadingModel` for every
+    // parsed entry (#106). EditorMode snapshots it before a cook and diffs after:
+    // same source with a different model = the user renamed @ShadingModel, which
+    // orphans .samat files referencing the old type name → migration prompt.
+    // A file (not CookResult) so it also crosses the CLI process boundary and
+    // survives editor restarts (detects offline renames on next project load).
+    {
+        std::ofstream mm(dispatchOutDir / "shader_models.txt");
+        for (const auto& e : entries)
+            mm << e.sourcePath.generic_string() << '\t' << e.shadingModel << '\n';
+    }
+
+    // Write / clear cook_errors.txt — tab-separated `source \t model \t message`
+    // per line, consumed by EditorMode::CookProjectShaders for the Diagnostics
+    // panel (the cook runs out of process there, so CookResult isn't visible).
     const fs::path errorManifest = dispatchOutDir / "cook_errors.txt";
     {
         std::error_code ec;
-        if (result.failedModels.empty()) {
+        if (result.failures.empty()) {
             fs::remove(errorManifest, ec);
         } else {
             std::ofstream mf(errorManifest);
-            for (const auto& m : result.failedModels)
-                mf << m << '\n';
+            for (const auto& f : result.failures)
+                mf << f.source << '\t' << f.model << '\t' << f.message << '\n';
         }
     }
 
@@ -504,7 +622,8 @@ static bool ParseSaEffect(const fs::path& path, EffectEntry& out, std::string& e
 
 static bool CompileEffectEntry(const EffectEntry& entry,
                                const fs::path& spvOutDir,
-                               const CookConfig& cfg) {
+                               const CookConfig& cfg,
+                               std::string& outError) {
     fs::create_directories(spvOutDir);
 
     const bool        isCompute = (entry.stage == "compute");
@@ -532,19 +651,29 @@ static bool CompileEffectEntry(const EffectEntry& entry,
     for (const auto& inc : cfg.includePaths)
         includes += " -I" + Q(inc);
 
+    // #73-B: capture glslc stderr (same as CompileEntry) so effect syntax
+    // errors reach the Diagnostics panel instead of an invisible child console.
+    const fs::path errPath = spvOutDir / (entry.stem + "." + kind + ".err");
     const std::string glslcCmd =
         Q(cfg.glslcPath)
         + (isCompute ? " -fshader-stage=comp" : " -fshader-stage=frag")
         + includes
         + " " + Q(src)
-        + " -o " + Q(spvPath);
+        + " -o " + Q(spvPath)
+        + " 2>" + Q(errPath);
 
     SA_LOG_INFO("ShaderCook: compiling effect {}.{} ...", entry.stem, kind);
     if (const int ret = Exec(glslcCmd); ret != 0) {
-        SA_LOG_ERROR("ShaderCook: glslc failed (exit {}): {}", ret, glslcCmd);
-        std::error_code ec; fs::remove(spvPath, ec); fs::remove(reflPath, ec);
+        std::string fullErr;
+        outError = CondenseErrorFile(errPath, fullErr);
+        if (outError.empty()) outError = "glslc failed (exit " + std::to_string(ret) + ")";
+        SA_LOG_ERROR("ShaderCook: glslc failed (exit {}) for effect '{}':\n{}",
+                     ret, entry.stem, fullErr);
+        std::error_code ec;
+        fs::remove(spvPath, ec); fs::remove(reflPath, ec); fs::remove(errPath, ec);
         return false;
     }
+    { std::error_code ec; fs::remove(errPath, ec); }
 
     if (!cfg.reflToolPath.empty()) {
         const std::string reflCmd =
@@ -554,6 +683,7 @@ static bool CompileEffectEntry(const EffectEntry& entry,
             + " --glsl " + Q(src);
         if (const int ret = Exec(reflCmd); ret != 0) {
             SA_LOG_ERROR("ShaderCook: ShaderReflectTool failed (exit {})", ret);
+            outError = "ShaderReflectTool failed (exit " + std::to_string(ret) + ")";
             std::error_code ec; fs::remove(spvPath, ec); fs::remove(reflPath, ec);
             return false;
         }
@@ -597,6 +727,22 @@ CookResult CookEffects(const fs::path& scanDir,
                        const CookConfig& cfg) {
     CookResult result;
 
+    // #73-B: effects get their own manifest — cook_errors.txt is owned (written
+    // AND cleared) by CookDirectory in dispatchOutDir, which CookEffects neither
+    // receives nor always runs alongside. Same tab format, read by
+    // EditorMode::CookProjectShaders next to the .saglsl one.
+    const fs::path errorManifest = spvOutDir / "cook_errors_effects.txt";
+    auto writeManifest = [&]() {
+        std::error_code ec;
+        if (result.failures.empty()) {
+            fs::remove(errorManifest, ec);
+        } else {
+            std::ofstream mf(errorManifest);
+            for (const auto& f : result.failures)
+                mf << f.source << '\t' << f.model << '\t' << f.message << '\n';
+        }
+    };
+
     std::vector<fs::path> sources;
     if (fs::is_directory(scanDir)) {
         for (const auto& de : fs::recursive_directory_iterator(
@@ -604,7 +750,16 @@ CookResult CookEffects(const fs::path& scanDir,
             if (de.path().extension() == ".saeffect")
                 sources.push_back(de.path());
     }
-    if (sources.empty()) return result;  // success=true, modelCount=0
+    if (sources.empty()) {
+        writeManifest();   // clear leftover manifest when the last .saeffect is gone
+        return result;     // success=true, modelCount=0
+    }
+
+    auto fail = [&result](const std::string& name, const fs::path& source,
+                          const std::string& message) {
+        result.failedModels.push_back(name);
+        result.failures.push_back({name, source.generic_string(), message});
+    };
 
     std::vector<EffectEntry> good;
     for (const auto& src : sources) {
@@ -612,15 +767,16 @@ CookResult CookEffects(const fs::path& scanDir,
         std::string err;
         if (!ParseSaEffect(src, entry, err)) {
             SA_LOG_ERROR("ShaderCook: parse error: {}", err);
-            result.failedModels.push_back(src.stem().string());
+            fail(src.stem().string(), src, err);
             continue;
         }
-        if (!CompileEffectEntry(entry, spvOutDir, cfg)) {
-            result.failedModels.push_back(entry.name);
+        if (!CompileEffectEntry(entry, spvOutDir, cfg, err)) {
+            fail(entry.name, src, err.empty() ? "compile failed" : err);
             continue;
         }
         good.push_back(std::move(entry));
     }
+    writeManifest();
 
     result.modelCount = static_cast<int>(good.size());
     return result;

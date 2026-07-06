@@ -348,6 +348,7 @@ void RenderGraph::Compile() {
         return slot.format    == tex.format
             && slot.width     == tex.width
             && slot.height    == tex.height
+            && slot.depth     == tex.depth   // Issue #49: 3D volumes must not alias 2D slots
             && slot.mipLevels == tex.mipLevels
             && (static_cast<uint32_t>(slot.usage) & static_cast<uint32_t>(tex.usage))
                == static_cast<uint32_t>(tex.usage);

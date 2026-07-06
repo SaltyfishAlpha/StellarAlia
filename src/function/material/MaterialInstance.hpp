@@ -1,5 +1,7 @@
 #pragma once
 
+#include <set>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -79,6 +81,20 @@ public:
     // Issue #56: pipeline-state overrides from the material asset (.samatc).
     [[nodiscard]] const MaterialRenderState& GetRenderState() const { return m_renderState; }
 
+    // Layered material resolve: a param/texture/state field is "authored" when
+    // the source .samat explicitly carries it. Unauthored fields fall through
+    // to the material layer below (cooked submesh default) at draw-list build
+    // instead of resetting to the shader default. Instances created outside
+    // MaterialManager::LoadMaterial author nothing.
+    [[nodiscard]] bool IsParamAuthored  (std::string_view name) const {
+        return m_authoredParams.count(name) != 0;
+    }
+    [[nodiscard]] bool IsTextureAuthored(std::string_view name) const {
+        return m_authoredTextures.count(name) != 0;
+    }
+    [[nodiscard]] bool IsAlphaModeAuthored()   const { return m_alphaModeAuthored; }
+    [[nodiscard]] bool IsDoubleSidedAuthored() const { return m_doubleSidedAuthored; }
+
 private:
     friend class MaterialType;
     friend class MaterialManager;
@@ -95,6 +111,12 @@ private:
     // for ring upload. In legacy UBO path, it mirrors only the param UBO contents.
     std::vector<uint8_t>           m_uboBlob;
     MaterialRenderState            m_renderState;    // Issue #56
+    // Keys present in the source .samat JSON (see IsParamAuthored above).
+    // std::less<> enables string_view lookup without a temporary std::string.
+    std::set<std::string, std::less<>> m_authoredParams;
+    std::set<std::string, std::less<>> m_authoredTextures;
+    bool                           m_alphaModeAuthored   = false;
+    bool                           m_doubleSidedAuthored = false;
     bool                           m_paramDirty = true;
     RHI::RHIBufferHandle           m_ubo;            // legacy UBO path only; empty in SSBO path
     RHI::RHIDescSetHandle          m_descSet;        // set=1

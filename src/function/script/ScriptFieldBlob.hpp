@@ -32,7 +32,7 @@ namespace StellarAlia {
 //     u16  byteSize
 //   Future versions extend field tail only; reader skips unknown trailing bytes.
 //
-// Field-value blob (ApplyFieldValues / CaptureFieldValues):
+// Field-value blob (ApplyFieldValues / GetClassDefaultsBlob):
 //   u32   recordCount
 //   record records[recordCount]
 //

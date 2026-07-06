@@ -1,6 +1,6 @@
 # StellarAlia Issue 文档
 
-> **最近一次整理**：2026-06-25
+> **最近一次整理**：2026-07-04
 > **状态来源**：源码核验（详见底部"已完成 issue 索引"段）
 
 ---
@@ -9,9 +9,10 @@
 
 | 状态 | 数量 | 列表 |
 |---|---|---|
-| ✅ 已完成 | 39 | #29 #45 #46 #47 **#48** **#56** #58 #62-#67 #69 #72 #73 #74 #75 **#77** #78 #81 #82 #84 #85 **#86** **#88** **#89** **#90** **#91** **#92** **#94** #56b（旧#71热编译）#71 Phase 2 #71 Phase 3a/3b + Vulkan D/E/F/G/H + Cross-dir Vtx Shader + UI Bug 5 项 |
-| ❌ 未完成（带设计） | 14 | #36 #49 #55 #57 #60 #61 #68 #70 #79 #80 #83 **#87** **#93** **#95** |
-| ❌ 未完成（短条目） | 15 | X-1 ~ X-8 + #54 + #73-A + #23 帧率优化伞 + #96 #97 #98 #100（#56 拆出：Full 档/阴影升级+镂空/.saglsl 透明/OIT；#99 已并入 #101 完成） |
+| ✅ 已完成 | 48 | #29 #45 #46 #47 **#48** **#56** #58 #62-#67 #69 #72 #73 **#73-A** **#73-B** #74 #75 **#77** #78 #81 #82 #84 #85 **#86** **#88** **#89** **#90** **#91** **#92** **#94** **#101**（含 #99）**#102**（含 X-8 面片 id 档）**#103** **#104** **#105** **#106** **#107** #56b（旧#71热编译）#71 Phase 2 #71 Phase 3a/3b + Vulkan D/E/F/G/H + Cross-dir Vtx Shader + UI Bug 5 项 |
+| ❌ 未完成（带设计） | 15 | #36 #49 #55 #57 #60 #61 #68 #70 #80 #83 **#87** **#93** **#95** **#108** **#109** |
+| ❌ 未完成（短条目） | 17 | X-1 ~ X-11 + #54 + #23 帧率优化伞 + #96 #97 #98 #100（#56 拆出：Full 档/阴影升级+镂空/.saglsl 透明/OIT；#99 已并入 #101 完成） |
+| ❌ 已关闭（won't-do） | 1 | #79（调研结论见其条目注释） |
 
 **关键指标**：`ScriptApiFunctionTable::version = 7` — 表明脚本 API 已经过 v2→v3（Phase 2）→v4→v5（Phase 3a InputMap）→v6（#81 Transform 重命名）→v7（#47 PostProcess）共五轮扩展。
 
@@ -36,26 +37,27 @@
 - **#48 SSR**（依赖 #42 TAA）✅ DONE — Phase 1（朴素线性步进）
 - **#89 SSR Phase 2：Hi-Z 步进 + 空间去噪** ✅ DONE
 - **#95 SSR Phase D：resolve 参数 UI + profiling**（#89 收尾拆出）
+- **#104 SSR 虚像（hit-point）重投影** ✅ DONE — 消除相机运动时大镜面反射拖尾/重新起噪
+- **#105 半透明前移 TAA 前 + reactive mask** ✅ DONE — 消除透明/背景时序错位 + 边缘抖动；顺带修复 TAA 结果无透明物时不进最终画面的重大缺口
+- **#107 编辑器覆盖层 jitter 抖动：grid/debug line/selection outline 改用 unjittered VP** ✅ DONE — #105 后唯一残余抖动源，UE 式 unjittered 编辑器图元约定
+- **#106 材质引用工作流四件套** ✅ DONE — Inspector 类型下拉重指认 + 紫色错误材质 + recook 改名迁移提示 + slot 通用材质选取；UUID 化明确不做
 - **#93 ScreenEffect LDR / Tonemap-compute**（#91 分出；@Out ldr 跨缓冲 + Tonemap→compute C1/C2/C3 待定）
 - **#49 Volumetric Fog**（极低）
 - **#57 GPU-Driven Meshlet Cluster Culling**（详细设计见下）
 - **#60 Mesh Split/Merge Cook 工具**（详细设计见下）
 - **#70 GameMode + 项目导出**（详细设计见下）
+- **#108 导入格式扩展：OBJ / FBX / DDS / VRM / MMD**（详细设计见下；.blend 直接解析调研结论 = won't-do，走 Blender CLI 转 glTF workaround）
+- **#109 扩展着色模型（NPR/Toon：MToon/MMDToon）**（详细设计见下；以 .saglsl 内容形式发行不碰引擎代码——项目级今天已成立，引擎级发行差 cook 扫描范围）
 
 ### 🟡 中优先级 — 脚本系统延伸
 - **#80 Script Field 复合类型（List<T> + 嵌套 struct）**（依赖 #75，详细设计见下）
-
-### 🟡 中优先级 — 资产/编辑器工作流
-- **#101 导入模型材质工作流：Extract / Remap / 资产级编辑 / per-slot 覆盖**（吸收 #99；详细设计见下）
-
-### 🟢 极低优先级 / cleanup
-- **#79 `ScriptSystem::CaptureFieldValues` 接口空挂**
 
 ### 📋 杂项短条目（暂未独立 issue 编号；标 X-* 临时编号去重）
 
 - **X-1 长耗时操作进度反馈**（低优先级，原序号 #24-a）
   - 启动进度条（高难度）：`OnAttach` 在渲染循环前同步执行，ImGui 无法渲染；需重构为两阶段延迟初始化或独立 splash screen 通道
   - Reimport All 进度条（中难度，最有实际价值）：`ReimportDir` 同步阻塞 UI；改法：拆成逐帧 N 个文件的状态机 + ProgressBar modal，或工作线程 + 原子进度计数器
+  - Shader cook 异步化（#73-A 后补充，模型多时才有感）：`CookProjectShaders` 现同步 `std::system` 阻塞 UI（每变更模型 ~300ms glslc+reflect + deferred_lighting ~120ms）。**明确采用子进程方案而非逐帧状态机**：cook 本就是独立 `StellarAliaShaderCook.exe`，改为后台线程/非阻塞等待子进程退出 + 原子进度计数（"cooking i/N"），完成后走既有 `RequestProjectShaderReload` 帧安全点热换，错误照常读 `cook_errors.txt`
   - 前置：`AssetsPanel` 暴露异步迭代接口
 - **X-2 骨骼可视化美化**（原序号 #27）：骨骼改用球+锥绘制取代线
 - **X-3 Animator 编辑器 imguizmo**（原序号 #31）
@@ -63,9 +65,13 @@
 - **X-5 贝塞尔曲线相机移动**（原序号 #33；依赖 #71 Phase 2 脚本侧 InputAction）
 - **X-6 透明材质面片（植物等）**（原序号 #24-b）
 - **X-7 程序化天空盒 + 物体作为光源方向**（原序号 #23-b）
-- **X-8 调试渲染**（原序号 #22）：面片 id / lod / 随机 / depth 着色
+- **X-8 调试渲染**（原序号 #22）：lod / 随机 / depth 着色 —— 面片 id 档已随 #102 完成（Settings "Debug Views" 分区 + `id_debug_view.frag` 调色板 composite），后续档位在同分区/同 feature 扩展
+- **X-9 重叠对象深度循环拾取**（#102 拆出）：Unity 式同点连点循环选中被遮挡对象。ID buffer 只存最前表面 → 实现为每次循环点击把已命中 drawItem 排除后重渲一次 one-shot ID pass（点击频度低，成本可忽略）。依赖 #102 基建；面片密集叠放场景才有价值
+- **X-11 MaterialOverrideComponent 并入 MeshRendererComponent**（#103 后续调研结论）：Unity/UE 模式 = 材质指派与覆盖全在 renderer 组件上，独立 override 组件无业界对应；#103 已把 per-slot UI 前移，组件仅剩数据壳 + entity-wide 区段。合并牵连 SceneSerializer / 脚本 API #71 MaterialOverrideProxy（动 ScriptApiFunctionTable）/ BuildDrawList 读取点 / undo 命令，中等重构纯概念收益 → 不单独立项，等 #68 ComponentSchema 或 X-10 Prefab 重设计 override 语义时顺势做
+- **X-10 Prefab 系统 + root 优先选中/下钻**（#102 拆出选中部分；prefab 为未来计划的重要概念）：Unity 语义——prefab 资产（可嵌套/variant/实例覆盖序列化）为主体工程；落地后视口点击行为升级为"实例内点击先选 prefab root，双击下钻进子实体"，与 #102 的实体→slot 两级状态机叠加成 root→实体→slot 三级（届时统一梳理，避免认知负担）。选中行为仅是 prefab 的附带项，勿为它单独实施
 - **#54 Reimport 后内存缓存未失效**（低优先级，待复现）— `ReimportDir` 完成后未调 `ClearProjectAssets()` 导致 GPU mesh handle 残留旧数据；曾在 BoomBox.glb 观察到面片破碎，无法稳定复现。修法：reimport 完成触发 `ResourceManager::ClearProjectAssets()`
-- **#73-A `.saglsl` shading model 迁移到 SSBO+bindless 路径**（低优先级）— #72 后内置 PBR 走 SSBO+bindless 零 per-entity desc set 分配，但 `.saglsl` shading models cook 出 `*.gbuffer.frag` 仍声明 `set=2 uniform MaterialParams`（UBO 路径），`MaterialOverrideComponent` 走 `CloneInstance` legacy 路径。改法：更新 `ShaderCookLib` / `NewShader.saglsl` 模板把声明改成 `std430 readonly buffer MaterialParams` + `t_*_Idx` uint 索引，reflection 触发 `usesMaterialParamsSSBO=true`
+- **#73-A `.saglsl` shading model 迁移到 SSBO+bindless 路径** ✅ DONE（2026-07-05）— 模板/demo `.saglsl` 改 `std430 readonly buffer MaterialParams` + `t_*_Idx`（共享 `bindless_textures.glsl` include），反射自动走零 clone SSBO 路径（运行时/cook 侧零改动）；编辑器 `.samat` 默认 params 改从 `MaterialType::params`（反射）生成，删 UBO 文本扫描与 `FindShaderForType`；顺带修复：模板 `@ShadingModel` 硬编码撞名 bug（token 替换 + stem 净化 + cook 注入 `SA_SHADING_MODEL_ID` 别名宏 + 重名模型检测隔离失败）、创建/删除双重 cook 合并进 `m_pendingShaderCook`、去 `--force` 改增量（ids mtime 参与 stale 判断）、glslc stderr 捕获进诊断面板（`cook_errors.txt` 三段 tab 格式）、创建后首次命名同步 `@ShaderName`/`@ShadingModel`（`m_renameIsCreation`，后续改名不动文件内容以免孤儿化 `.samat`）
+- **#73-B `.saeffect` cook 错误面板化** ✅ DONE（2026-07-05）— `CompileEffectEntry` 加 outError 出参 + glslc stderr 捕获（复用 `CondenseErrorFile`）；`CookEffects` fail lambda 填 `failures` 并写/清**独立 manifest** `spvOutDir/cook_errors_effects.txt`（不复用 `cook_errors.txt`：归 CookDirectory 写/清且在 dispatchOutDir，CookEffects 无该参数、可单独运行，append 需跨函数协调"谁先清"）；`CookProjectShaders` manifest 读取 lambda 化依次读两个文件（"Shader"/"Effect" 标签），LoadProject 进程内路径 `fxResult.failures` 直推诊断；hpp 零改动，parse/glslc 两类失败与删光清除均 CLI 验证通过
 - **#74-A 编辑器全局 NOMINMAX** ✅ DONE — `editor/CMakeLists.txt` 对 `StellarAliaEditor` 加 `if(WIN32) target_compile_definitions(... PRIVATE NOMINMAX)`，TU 不再需逐文件 `#define NOMINMAX` 防 Windows.h 宏污染 `numeric_limits::max()`
 
 > 注：原序号 #73 / #74 与下方独立 issue 编号 #73 / #74（Script Inspector 三连）冲突；为避免歧义此处加 -A 后缀。下方"Issue #73 Script Inspector 前置"是已完成的另一 issue。
@@ -114,20 +120,121 @@
 
 ## Issue #49 — Volumetric Fog（体积雾）
 
-**优先级：极低（依赖 #40，实现复杂）**
+**优先级：中（原 #40 依赖已满足：compute 基础设施 / UAV 绑定 / 3D 纹理路径均就绪；PP 系列 #42-#48 全部完成）**
 
 ### 目标
 
-Froxel（视锥体体素）光线积分，支持方向光散射 + 环境 fog。
+Froxel（视锥体体素化）单次散射体积雾：全局均匀介质 + 指数高度衰减，方向光（含 shadow map 可见性 → god rays）+ 点光/聚光解析散射 + SH 环境光散射，HG 相位函数。结果在 Tonemap 前以能量守恒方式（`hdr * T + inscatter`）合成进 HDR。
+
+### 原理概要（详细推导见对话记录 2026-07-05）
+
+- 介质参数：吸收 σa + 外散射 σs = 消光 σt；albedo = σs/σt。
+- 透射率 Beer-Lambert：`T(a→b) = exp(-∫σt ds)`。
+- 单次散射：每点入射光 `L_scat(x,ω) = Σ_lights phase(cosθ)·V(x)·L_i(x)`，V 为 shadow map 可见性。
+- 相位函数 Henyey-Greenstein，g ∈ [-0.9, 0.9]（正值前向散射，太阳周围亮晕）。
+- 最终像素：`L = T(0→d)·L_surface + ∫₀^d T(0→s)·σs(s)·L_scat(s) ds` — 后一项即 froxel 体积中预积分的 inscatter。
+- 切片内积分用 Frostbite 解析式（能量守恒）：`S_int = (S - S·exp(-σt·dz)) / σt`，避免 σt→0 除零需 max(σt, 1e-4)。
+
+### 管线位置（核心决策）
+
+```
+Shadow → Skybox → DepthPrepass → GBuffer → VelocityPrepass → SSAO(GTAO)
+  → DeferredLighting → SSR
+  → ★ VolumetricFog [Inject(comp) → Scatter(comp) → Apply(frag)] ★
+  → (AfterLighting anchor) → ForwardTransparent → SelectionMask
+  → TAA → AutoExposure → Bloom → DoF → MotionBlur → Tonemap → PostFX → …
+```
+
+理由：
+1. **HDR 线性空间、Tonemap 前** — 雾是物理光照量，必须在线性 HDR 域合成。
+2. **TAA 前** — froxel 低分辨率 + 抖动采样噪声靠 TAA 时序降噪（与 SSR 同策略）；同时雾进入 TAA history，时序稳定。
+3. **SSR 后** — SSR 读的是未加雾 HDR，反射像中缺雾是业界通用近似；反之若雾在 SSR 前，SSR 的 IBL 替换差值公式会把雾算进反射差，产生错误。
+4. **ForwardTransparent 前** — 透明物盖在雾上（Phase 1 近似：透明物自身不受雾衰减）；若放透明后则会用不透明深度给透明表面过度上雾且不可修复。Phase 2 正确解法是 forward_transparent.frag 直接采样 scatter volume（froxel 方案的核心优势，postprocess 雾无法做到）。
+5. **Bloom 前** — 强光源周围的亮雾参与 bloom（light shaft 光晕），物理正确。
+6. AfterLighting ScreenEffect 锚点保持在雾之后 — 用户自定义效果拿到的是"完整光照"图像。
 
 ### 设计
 
-- 3D 纹理（160×90×64，RGBA16F）存储 scattering/extinction
-- **Fog Inject compute**：写入每个 froxel 的散射+消光
-- **Fog Scatter compute**：沿深度方向积分透射率
-- **Fog Apply pass**：读 fog 3D 纹理 + depth，叠加到 HDR buffer（Tonemap 之前）
+#### RG 资源（均为瞬态，每帧创建）
 
-暂不规划实施步骤，等前序 PP 系统稳定后再展开。
+| 资源 | 规格 | 用途 |
+|---|---|---|
+| `VolFog_Media` | 3D `ceil(w/8)×ceil(h/8)×64` RGBA16F，UAV+Sampled | Inject 输出：rgb=σs·L_scat（含相位/可见性），a=σt |
+| `VolFog_Integrated` | 同上 | Scatter 输出：rgb=累计 inscatter，a=累计透射率 T |
+| `VolFog_Output` | 2D w×h RGBA16F（HDR_Color） | Apply 输出，RenderFrame 重定向 handles.hdr |
+
+froxel 深度分布：指数切片 `viewZ(k) = near · (fogFar/near)^(k/64)`，近处切片密、远处疏；`fogFar` 为用户参数（默认 64m），与相机 far 无关。
+
+#### Pass 结构（单个 `VolumetricFogFeature`，嵌套于 SceneRenderer.hpp，仿 SSRFeature）
+
+1. **FogInject**（compute，8×8×1，dispatch 覆盖全 volume）
+   - 读：`handles.shadowMap`（invalid 时 push constant 标志跳过阴影项）；set=0/1 frame 数据（invViewProj/cameraPos/irrSH/lightSpaceMatrix/shadowBias/LightUniforms）。
+   - 每 froxel：中心点世界坐标 → 密度 `density · exp(-heightFalloff·(y-heightBase))` → σs/σt → 遍历 LightUniforms（≤8 灯，方向光查 shadow map 单 tap，点/聚光解析衰减）× HG 相位 + SH L0 环境项 → imageStore。
+2. **FogScatter**（compute，8×8×1，dispatch 仅 X×Y，每线程沿 Z 循环 64 步）
+   - front-to-back：`S_int = (S - S·exp(-σt·dz))/max(σt,1e-4)`；`accum += T·S_int`；`T *= exp(-σt·dz)`；逐切片写 `VolFog_Integrated`。
+3. **FogApply**（fullscreen frag，仿 SSR 的重定向合成）
+   - 读 depth + hdr + `VolFog_Integrated`（linear sampler 三线性，硬件免费做 XY 上采样 + Z 插值）；depth→viewZ→切片坐标（反指数映射）；天空像素（depth==1）采样最远切片；`out = hdr·T + inscatter` 写 `VolFog_Output`；feature 设 `m_outputHandle`，RenderFrame 仿 SSR（SceneRenderer.cpp:1635 模式）重定向 handles.hdr。
+
+#### 参数与设置（PostProcessSettings，仿 SSR 块）
+
+```cpp
+// ── Volumetric Fog (Issue #49) ────────────────────────────────────────────
+bool      volFogEnabled       = false;
+float     volFogDensity       = 0.02f;   // 全局消光密度 σt (1/m)
+glm::vec3 volFogAlbedo        = {0.9f, 0.9f, 0.9f}; // 散射反照率 σs/σt
+float     volFogAnisotropy    = 0.6f;    // HG g [-0.9, 0.9]
+float     volFogDistance      = 64.f;    // froxel 体积远端 (m)
+float     volFogHeightBase    = 0.f;     // 高度雾基准 y (m)
+float     volFogHeightFalloff = 0.f;     // 0 = 均匀；>0 指数高度衰减 (1/m)
+float     volFogAmbient       = 0.2f;    // SH 环境散射强度系数
+```
+
+ApplyWorldSettings 同步到 feature 成员（仿 SceneRenderer.cpp:609-613）；SceneSerializer 双向；PostProcessPanel 新增 CollapsingHeader。
+
+#### 新文件
+
+- `assets/shaders/volumetric_common.glsl` — froxel 坐标↔viewZ 指数映射、HG 相位、shadow 单 tap helper
+- `assets/shaders/volumetric_inject.comp`
+- `assets/shaders/volumetric_scatter.comp`
+- `assets/shaders/volumetric_apply.frag`（复用 fullscreen_tri.vert）
+
+### 实施步骤
+
+1. **Shader 先行**：volumetric_common.glsl + 三个新 shader；确认 CMake shader 编译收录 .comp/.frag（同 ssr.comp 路径）；push constants 打包所有 fog 参数 + 相机 near / fogFar + 阴影有效标志。
+2. **Feature 骨架**：VolumetricFogFeature（OnInit：ProgramCache 取 2 个 ComputeProgram + apply 用 ShaderProgram、分配 desc set；AddPasses：disabled 时直接 return 零开销）；插入位置在 SSR 与 AfterLighting 锚点之间（构造顺序：在 ForwardTransparent 插入块之前，同样用 findFeature(m_ssrFeature)+1）；RenderFrame 增加 handles.hdr 重定向分支。先只实现 Apply=透传拷贝验证重定向链路。
+3. **Inject + Scatter 实装**：瞬态 3D 纹理创建（**首个 depth>1 的 RG 瞬态 — 验证 RG 池化对 desc.depth 的匹配**）、BindStorageImage 绑定、两个 dispatch、RAW 依赖链 Inject→Scatter→Apply。RenderDoc 检查 volume 内容。
+4. **Apply 正式版**：depth 重建 viewZ、反指数切片映射、天空像素处理、能量守恒合成。
+5. **设置管道**：PostProcessSettings 8 字段 + ApplyWorldSettings + SceneSerializer 读写 + PostProcessPanel UI（含 albedo ColorEdit3）。
+6. **验证**：demo_project 场景（方向光+阴影+遮挡物）确认 god rays；开关/resize/切换场景稳定；关闭时 RenderDoc 确认零 pass；TAA 开启下观察噪声收敛。
+
+**（1-6 已完成并实测；7-9 为 2026-07-06 实测反馈追加：分层 banding / 透明不受雾 / TAA 开关强度差异）**
+
+7. **Bloom 源一致性修复**（实测问题 3b，顺带修 SSR 同款）：TAA 关闭时 `handles.taaResolved` 停留在帧首默认 `m_rgHdr`（未加雾/未加反射的原始 HDR），Bloom threshold 读到旧图 → 雾光柱/SSR 反射不参与 bloom。修复：RenderFrame 特性循环的 TAA 分支加 else——TAA 未产出时 `handles.taaResolved = handles.hdr`（此刻已是 SSR/fog/透明重定向后的画面）。验证：fog+bloom 开、TAA 关，光柱有辉光；对比关 bloom 确认 TAA 开关差异缩小到去噪部分。
+8. **Inject 采样点 IGN jitter**（实测问题 1 + 3a，去噪第一半）：分层根因 = 阴影可见性只在切片中心采样，阴影边界被量化到 64 切片粒度。修复：inject 里加 Interleaved Gradient Noise `ign(px) = fract(52.9829189·fract(0.06711056x + 0.00583715y))`，用 `u_Frame.frameIndex` 做黄金比时序推进（`fract(ign + frame·0.618034)`）；采样深度 `SliceToDepth(k + jitter)` 替代 `k + 0.5`（把结构化分层换成非结构化噪声，交给 TAA 时序平均=去噪第二半）。**InjectPC 追加 `temporalJitter` 字段（扩到 64B）：TAA 开=1、关=0**——TAA 关闭时退回稳定 banding 而非闪烁噪声（feature 经 renderer.m_taaFeature->m_enabled 判断）。验证：TAA 开光柱平滑无分层；TAA 关回到 banding（稳定不闪）。
+9. **透明 pass 采样 fog volume**（实测问题 2，即 #105 衔接点落地）：`forward_transparent.frag` include volumetric_common + 追加 sampler3D `t_FogVolume` 绑定（**现有 set 布局末尾追加，不重排**）+ PC 追加 fogFar/fogEnabled；片元用 `gl_FragCoord.z → NdcToViewZ → DepthToSlice` 采样，混合前 `color.rgb = color.rgb·T + inscatter`（alpha 混合语义下近似正确：src 端带到表面深度的雾，dst 端保留全程雾）。C++：VolumetricFogFeature 暴露每帧 `m_integratedHandle`（disabled 时 invalid），ForwardTransparentFeature 读 `renderer.m_volFogFeature`，valid 时 `b.Read` + BindTexture、invalid 时绑 hdr 填充 + fogEnabled=0（仿 TAA reactive mask 的 dummy 模式）。验证：雾中玻璃亮度随距离衰减与相邻不透明物一致；fog 关闭时透明渲染逐位不变。
+
+### 边界情况与约束
+
+- **shadowMap 句柄无效**（shadow disabled）：inject 跳过方向光阴影项（可见性=1），不得绑定 invalid 句柄。
+- **RG 纯写 pass 提前调度坑**（#56 经验）：Inject 无读依赖时（阴影关闭）仅靠 Volume A 的 RAW 边约束顺序 — 已够，但注意不要让 Inject 读 handles.hdr 之类制造假依赖。
+- **σt→0 除零**：解析积分分母 max(σt, 1e-4)。
+- **Reversed-Z**：本引擎为标准 Z（clearDepth=1.f），depth==1 判天空。
+- **jitter**：proj 含 Halton 抖动，froxel 体积直接用当帧 view/proj 即可（抖动量 << froxel 尺寸）；~~Phase 1 不做 froxel 内采样点 jitter~~ → 实测 banding 不可接受，已升级为 Step 8（IGN jitter + TAA 收敛，TAA 关时归零抖动）。
+- **sampler**：Apply 需 linear-clamp 采样 3D volume — 确认 BindTexture 走的 frame 全局 sampler 为 linear（LUT 32³ 已验证 sampler3D 路径可用）。
+- **不做（Phase 2+）**：froxel 体积时序 reprojection history（仿 SSR ping-pong 但 3D）、局部雾体积组件、3D 噪声密度、点/聚光 shadow、Script API 暴露。（透明采样 froxel 原在此列，实测后升级为 Step 9。）
+
+### 与现代引擎的差距审计（2026-07-06）
+
+已对齐：太阳采样自己的 shadow map（isSun 标记同时驱动 lightSpaceMatrix 与 fog）、其他方向光无阴影散射、点/聚光解析散射（= UE/HDRP 默认档，二者的逐灯体积阴影默认也是关的）、Frostbite 能量守恒切片积分。
+
+- ✅ **介质自阴影解析近似（2026-07-06 已实现）**：方向光项乘光路透射率 `exp(-σt(y)·min(1/k, fogFar)/ω.y)`——指数高度介质闭式解；`min(1/k, fogFar)` 统一均匀极限（k→0 时光程 clamp 到渲染体积尺度，且随 k 连续，避免小 k 时 1/k 光程把太阳完全消光）；零新资源零新 pass。预期视觉变化：浓雾（density·fogFar 大）时 god rays 整体变暗属物理正确，可用灯光 intensity 补偿。Frostbite 的 volumetric shadow volume 只在引入局部体积/3D 噪声（无闭式解）后才需要。
+- **点/聚光体积阴影**：被引擎缺点光 shadow map（cube/透视）阻塞，属引擎级缺口非雾缺口；落地后 inject 每灯加一次采样即可。
+- **CSM 级联**：单张 60×60 正交 shadow map 限制 god rays 有效范围与精度，引擎级议题（影响所有阴影，非雾专属）。
+
+### 受益 issues
+
+- **#105 透明渲染**：透明 froxel 采样是透明物正确受雾的唯一路径——已升级为本 issue Step 9 直接落地。
+- 未来大气散射 / 局部雾体积 / 高度云均复用 froxel 基础设施与 volumetric_common.glsl。
 
 ---
 
@@ -1604,16 +1711,8 @@ ApplyTo 已是"对 defaults 列表内每个 ActionMapDef 的 actions 逐个 patc
 
 ---
 
-## Issue #79 — `ScriptSystem::CaptureFieldValues` 接口空挂
-
-**优先级：极低**（API 已就位，等 PIE 反向同步 feature 接入）
-
-`ScriptSystem::CaptureFieldValues(uint64_t entityId, ScriptComponent& sc)` 在 #74 实现并暴露，对应 managed 端 `ScriptBridgeEntry.CaptureFieldValues`（两步式 blob 协议）。它把 C# 实例的当前字段值抓回 `sc.fields`，反向于 `InjectFieldValues`。
-
-但 #74 内部**无 caller**。当初保留是为未来"Play→Edit 切换时把游戏运行期修改的值带回编辑器"的 PIE 反向同步功能；目前 PIE 退出时直接销毁 game scene，editor scene 的 ScriptComponent.fields 保留 Inspector 设的值。
-
-**何时启用**：用户希望在 Play 中拖滑块/写脚本改变字段值，回 Edit 时这些变化被持久化（Unity-style "during play, changes are reverted on stop" 的反面行为）—— 这是个 UX 选项，需要明确的产品决定。如果决定支持，挂到 `OnPlayStop` 之前的一次 `CaptureFieldValues` 全实体 sweep 即可。
-
+## Issue #79 — `ScriptSystem::CaptureFieldValues` 接口空挂 ❌ CLOSED (won't do, 2026-07-04)
+<!-- 调研结论：Unity 默认全回滚且官方从未内置持久化（仅 Cinemachine per-component "Save During Play" 与第三方插件）；Unreal 有 "Keep Simulation Changes" 但是逐 actor 显式 opt-in（右键/K 键），无引擎做"OnPlayStop 全实体自动 sweep"——那会把 gameplay 副作用写回 authoring 数据，属反模式。原设计不成立；若未来做选择性 keep-changes，接口需连 UI/undo 一起重新设计，空挂无价值。已删除：ScriptSystem::CaptureFieldValues(hpp/cpp/delegate/load) + ScriptBridgeEntry.CaptureFieldValues export；FieldReflector.CaptureFieldValues 保留（GetClassDefaultsBlob 复用）。 -->
 
 ---
 
@@ -2217,140 +2316,188 @@ Phase 1 必须先做。Phase 2-7 中 P6 / P7 可与 P3-P5 并行（只要 Phase 
 
 ---
 
-## Issue #101 — 导入模型材质工作流：Extract / Remap / 资产级编辑 / per-slot 覆盖
+## Issue #101 — 导入模型材质工作流：Extract / Remap / 资产级编辑 / per-slot 覆盖 ✅ DONE
+<!-- .samesh v6 材质名表（CookedMesh.materialNames + GPUSubMesh::materialName + .samatc "name"，v5 兼容读）；CookMesh 读 .sameta mat_remap_<idx>（mat_remap_name_<idx> 名字错位校验，不符 warn+回退派生材质）；AssetsPanel 右键 "Extract Materials"（派生 .samatc → assets/materials/<stem>_<名>.samat + 新 UUID .sameta + remap 写回 + force recook）；MaterialManager::EvictInstance 定点缓存失效；MaterialAssetInspector 可编辑 + Save（写回 .samat → CookStandaloneMaterial → Evict → MarkMaterialDirty，吸收 #99）；per-slot MaterialSlotOverride（Components.hpp + BuildDrawList base→entity-wide→slot 三层叠加 + SceneSerializer "slots" + MaterialOverrideDrawer slot TreeNode + undo）；MaterialOverrideDrawer::ResolveEffectiveType 改走 MaterialManager，删除 ReadMatTypeName 每帧文件扫描。交互层缺口（槽位↔视口联动）拆出 → #102。 -->
 
-**优先级：中（用户实际痛点：导入模型材质参数不可调；多材质大 mesh 工作流不可用）**
-**吸收 #99（材质资产级编辑）为本 issue 的 Step 7；#99 不再单独实施。**
+---
 
-### 现状核验（2026-07-03 源码调研）
+## Issue #102 — 材质槽位 ↔ 视口联动：submeshIndex 贯通 + GPU ID 拾取 + 正反向高亮 ✅ DONE (2026-07-05)
+<!-- RHIFormat::R32_UINT（VulkanUtils 映射 + bpp 表；clear 只用 0 故 float/uint 位型一致免扩管道）；DrawItem::submeshIndex 贯通；正向：drawer 槽位行 hover → EditorSelection::SetHoveredSlot（帧态）→ EditorMode 镜像 SetHighlightSlot → SelectionMask 收窄单 submesh（outline 零改动；MeshRendererDrawer 补渲全部 submesh 行含 "(mesh default)"）；反向：RequestIdPick → IdPickFeature 按需 pass（R32_UINT 持久缓冲懒建 + RG transient D32、finalState=ShaderRead、id_pass 三件套 push=68B、(entity,submeshIndex) 快照跨帧安全）→ Present 后阻塞 ReadbackTextureMips → TryConsumePickResult；EditorMode 循环状态机：选实体→下钻 slot（FocusSlot：Inspector 行强制展开+SetScrollHereY+闪烁衰减）→同 submesh 再点回实体级，选择变更自动清 focus；RaycastScene/BVHTree::Raycast/RayAABB 删除（worldAABB 保留——透明排序在用，规划修正）；X-8 首档：Settings 独立 "Debug Views" 分区 "Submesh ID" → ID pass 常驻 + id_debug_view.frag Wang-hash 调色板 composite（texelFetch 免 UINT 采样限制，Read+Write swapchain 排序于 Tonemap 后）。遗留：Assets.cmake:36 shader glob 缺 CONFIGURE_DEPENDS（新增 shader 需手动重 configure）；slot UI 双组件冗余 → #103。 -->
 
-**已存在的机制**（"多材质 mesh"的渲染与槽位基建其实是齐全的）：
-- `CookedSubMesh::defaultMaterialID`（v4，`src/resource/cook/CookedMesh.hpp:29`）— 每个 glTF primitive 一个 submesh，内嵌派生材质 UUID（`DeriveMaterialID(fileId, matIndex)`，`tools/importer/MaterialImporter.cpp:12`）
-- `MeshRendererComponent::materialSlots[]`（`Components.hpp:59`）— per-submesh 材质替换，`BuildDrawList` 三层 fallback：slot → defaultMaterialID → 全局默认（`SceneRenderer.cpp:814`）
-- `MeshRendererDrawer` 槽位 UI + `SceneSerializer` "materials" 数组 + 脚本 `MeshRenderer_SetSlotUUID(entity, slot, uuid)` 均已就位
+---
 
-**四个缺口**（两个用户痛点的真正所在）：
-| # | 缺口 | 后果 |
-|---|------|------|
-| A | 导入材质 = cook_cache 里的派生 UUID `.samatc`（cook 产物；`CookMaterial` 文件存在即跳过），无 `.sameta`、不进 AssetRegistry、AssetsPanel 里**不可见**，MaterialAssetInspector（`editor/ui/AssetInspectors.cpp:74`）**只读** | 调参数唯一途径 = 改 DCC 源文件重导 |
-| B | 材质名断链：`.samesh` 不存材质名、`.samatc` 无 `name` 字段（`mat.name` 只打进 cook log） | 槽位 UI 只有裸 UUID，多材质模型（Sponza 级 25 槽）无法辨认哪个槽是哪个材质 |
-| C | 没有"从导入材质创建可编辑 `.samat`"的入口（`.samat` 目前只能手写 JSON） | `materialSlots[]` 机制空转，等于没有 |
-| D | `MaterialOverrideComponent` 整-entity 作用域（scalars/textures 作用于全部 submesh） | 无法只调某一个 submesh 的参数 |
+## Issue #103 — slot UI 合并：per-slot override 编辑嵌入 MeshRenderer 槽位行 ✅ DONE (2026-07-05)
+<!-- 纯 UI 迁移（数据模型/序列化/BuildDrawList 零改动）：新建 SlotOverrideEditor.hpp/cpp（per-slot 覆盖编辑独立单元：继承 combo、scalars/textures 列表、反射 + Add popup、Clear 按钮；首次编辑按需 emplace MaterialOverrideComponent/slot 条目，shared-flag 记录创建物 → undo 精确拆除、redo 重评估）；MeshRendererDrawer 槽位行 TreeNode 化（行头 = 标签 + 资产字段/"(mesh default)"，展开区调用编辑器；effective type 按槽解析 materialAsset>slots[i]>defaultMaterialID 与 BuildDrawList 一致；下钻 focus 自动展开行）；MaterialOverrideDrawer 删除 slot 区段（~260 行）只留 entity-wide；FindParamDef/FindTextureDef 上移 ParamWidgets 共享。两个 ImGui 坑：① DrawAssetIDField 的 TextUnformatted 不识别 "##" 隐藏标签（helper 已改为跳过）；② EndGroup() 会恢复窗口缩进 → 组内 TreePush 导致组后所有内容左移一级（改用 NoTreePushOnOpen + 组外手动 TreePush/TreePop 配平）。 -->
 
-### 现代引擎对照
+---
 
-| 引擎 | 导入材质 | 多材质 mesh | 实例覆盖 |
-|------|---------|------------|---------|
-| Unity | Model Importer → Materials tab：默认嵌入只读；**Extract Materials** 生成 `.mat` 资产；**Remapped Materials 表**存 importer 元数据 | `MeshRenderer.sharedMaterials` per-submesh | MaterialPropertyBlock |
-| UE | 导入直接生成可编辑 UMaterialInstance 资产 | StaticMesh **命名** Material Slots | Component 级 Override Materials 数组 |
-| Godot | 嵌入只读 + "Extract" 到 `.tres` | per-surface material | `surface_material_override` |
+## Issue #104 — SSR 虚像（hit-point）重投影：消除相机运动时的反射拖尾 ✅ DONE (2026-07-05)
+<!-- 反射像素内容=镜中虚像（视差等价于镜面后方 t_s+t_h 处的点），temporal 历史重投影从表面 velocity 改为虚像点 P_v = C + dir·(t_s+t_h) 经 prevViewProj 重投影：ssr.comp HiZTrace/TraceSample 输出视空间 hit 距离（hitDist=(hitZView−rayStart.z)/viewR.z，viewR 单位向量免反投影），edge-fade 加权平均写 SSR_Hit.r（原 rg 已废弃置 0）；ssr_temporal.comp binding 10 读 unresolved SSR_Hit（镜面端样本一致无噪声），按 1−smoothstep(0.05,0.25,roughness) 与 surface 路径混合，tH≤0 回退 surface，variance clipping 保留兜底反射物自身运动；C++ 仅 2 处（BindTexture(m_temporalSet,10,rgHit) + b.Read(rgHit)）。可选增强归 #95：混合阈值参数化、hitUV velocity 补偿反射物运动、双源重投影。 -->
 
-**采纳 Unity 模型**：默认嵌入（派生 `.samatc` 保持只读）+ 显式 Extract 到项目资产 + `.sameta` remap 表。理由：不破坏现有派生 UUID 管线（旧场景零迁移）、"开箱即用"（不 Extract 也能渲染）、remap 存资产元数据 → 对**所有**使用该 mesh 的实体生效且 reimport 存续（对比：往每个实体的 materialSlots 塞 UUID 是场景级、不可复用）。
+---
+
+## Issue #105 — 半透明前移 TAA 前 + reactive mask：消除透明/背景时序错位与边缘抖动 ✅ DONE (2026-07-05)
+<!-- 透明 feature 从 AfterTAA 移到 SSR 后：原地 RMW blend 进 handles.hdr（删 ForwardCopy/ForwardHDR，绘制循环抽 DrawItems 静态函数、shared_ptr 共享 items）+ 第二 pass 输出 R8 ReactiveMask（transparent_reactive.frag 输出 (1,1,1,a)，AlphaBlend 得覆盖率 union，TAA off 时跳过）；taa_resolve.frag binding 4 + blend=max(blend, coverage·0.65)（无 mask 时绑 hdr 填位+权重 0）；AfterTAA 锚点改挂 TAA。实现中发现并修复重大既有缺口：TAA 输出从不回写 hdr（只进 taaResolved 供 bloom threshold），无透明物时 Tonemap 一直读 pre-TAA 未抗锯齿图像——新增 TAA_Copy pass（history→PostTAA_HDR 瞬态，隔离 BloomComposite UAV RMW 防历史渐白）+ handles.hdr 重定向，无条件成立；用户验证：长期无法解决的 TAA 开启后物体边缘抖动随之消失。遗留：编辑器 grid/debug line/selection outline 仍用 jittered VP 画在 TAA 后 → 抖动，拆出 #107。 -->
+
+---
+
+## Issue #106 — 材质引用工作流四件套：Inspector 类型下拉 + 紫色错误材质 + recook 改名迁移提示 + slot 通用材质选取 ✅ DONE (2026-07-05)
+<!-- ① .samat Inspector type 字段改 combo（过滤 usesMaterialParamsSSBO=surface 类型），切换合并式更新 params/textures（保值+补默认），未注册类型红字+同款下拉一键重指认（ParamsJsonFromType 提升到 ui/MaterialJsonUtils.hpp 共享）；② SceneRenderer m_errorMaterial 品红自发光 PBR 实例——ID 有效但 LoadMaterial 失败（unknown type/缺 .samatc/JSON 错）走紫色，未指定仍灰色默认；③ CookDirectory 写 generated/shaders/shader_models.txt（source→model），EditorMode cook 前后 diff 检测 @ShadingModel 改名→modal Migrate All（批量改 .samat type+强制重 cook .samatc+EvictInstance）/Ignore，跨 CLI/进程内/重启三路径；④ DrawMaterialField 共享控件（灰显 fallback 名）接管全部 slot 行与 MaterialOverrideDrawer.materialAsset，materialSlots 赋值自动扩容（整 vector 快照撤销），删除手动 +/− Slot 按钮。验证暴露并修复三个关联缺口：cooked gbuffer 产物从不清理导致删除/改名后旧类型永久复活（新增 PruneOrphanedGbufferOutputs，含空目录分支）；base 材质解析优先级调换为显式 slot > entity materialAsset > cooked 默认（原 materialAsset 无条件压制 slot 使 slot UI 失效），UI slotEffectiveType 同步。UUID 化明确不做（内置类型无 meta）。 -->
+
+---
+
+## Issue #107 — 编辑器覆盖层 jitter 抖动：grid / debug line / selection outline 改用 unjittered VP ✅ DONE (2026-07-05)
+<!-- 覆盖层画在 TAA 后且无 resolve 平均，jittered VP 的 ±0.5px Halton 抖动直接可见；解法=UE 式编辑器图元用 unjittered 矩阵（TAA 收敛像本就在 unjittered 位置）：selection_mask(.vert/_skinned.vert) 与 infinite_grid.frag 的 gl_FragDepth 改用 u_Frame.currUnjitteredViewProj（#85 现成字段，CPU 零新增）；DebugOverlay push constant 改传新增成员 m_currentUnjitteredViewProj（m_currentViewProj 保持 jittered 供 culling/透明排序）。TAA off 时两矩阵相等零行为差异；已知残余=覆盖层与几何体相交边界的亚像素闪烁（深度缓冲本身 jittered），接受；IdPick 不改。未来所有编辑器 gizmo（X-2/X-3）沿用 unjittered 约定。 -->
+
+---
+
+## Issue #108 — 导入格式扩展：OBJ / FBX / DDS / VRM / MMD（+ .blend 调研结论）
+
+**优先级：中低（Phase 独立启动；Phase 1+2 成本最低可先行，Phase 5 MMD 启动前需再细化）**
+
+### 目标
+
+引擎源资产解析类型从"仅 glTF/glb 模型 + stb 可解码图片"扩展到常见 DCC 交换格式：模型补 **OBJ / FBX**，图片补 **DDS（BCn 直通）**，**VRM** 以 glb 容器身份直接可导（几何/皮肤/动画），**MMD PMX/VMD** 占位设计；**.blend 明确不直接解析**（won't-do，理由与 workaround 见下）。
+
+### 现状调研（2026-07-05）
+
+- 模型仅支持 `.gltf/.glb`：`ImportScanner::AssetTypeFromExtension`（`tools/importer/ImportScanner.cpp:13-41`）→ `CookMesh`（`tools/importer/MeshImporter.cpp:253+`）→ `.samesh` v6 + 派生 `.saskelc`/`.saanim`/`.samatc`/`.satex`（Derive*ID 确定性 UUID）。
+- 图片仅支持 stb 可解码的 `.png/.jpg/.jpeg/.bmp/.tga/.hdr` → `CookedTextureFormat::RGBA8/RGBA32F`，`.satex` v1，mipLevels 恒 1（mip 生成未实现）。
+- **关键有利条件**：`SceneData`（`src/resource/types/MeshData.hpp:100`）已是格式无关 IR（meshes/materials/images/nodes/skins/animations 全套）；`MeshImporter.cpp` 仅 3 处调 `GltfLoader::Load`（:264/:577/:645）。换成按扩展名 dispatch 后，材质提取（#101 Extract/Remap）、骨骼/动画 sidecar、slot 联动（#102/#103）整条链路对新格式免费复用，`.samesh` 格式零改动。
+- `RHIFormat` 已有 `BC1/BC3/BC5/BC7_UNORM` + VulkanUtils 映射（`src/platform/rhi/RHITypes.hpp:43-46`）；`CookedTextureFormat` 预留 BC7/ASTC 占位（`CookedTexture.hpp:15-16`）——DDS 直通的落点现成。
+- 无任何 obj/fbx/dds/vrm/pmx/blend 半成品代码；无既有 issue 覆盖此主题。
 
 ### 设计
 
+**库选型**（沿用 `third_party/` vendored 小库风格；**不引入 assimp**——引擎已有自建 IR+cook 链，assimp 体量大且 FBX 单位/pivot 处理与 .blend 支持质量差）：
+
+| 格式 | 库 | 理由 |
+|---|---|---|
+| OBJ | tinyobjloader（header-only, MIT） | 与 stb/tinygltf 同风格 |
+| FBX | ufbx（单文件 C, MIT, 零依赖） | 当前社区最佳 FBX 方案；load opts 内建单位/坐标轴规范化 + geometry transform 烘焙 |
+| 切线生成 | MikkTSpace（单文件 C, zlib） | 行业标准切线空间——Blender/Substance/Unity/UE 烘法线贴图均按 MikkTSpace 约定，手写累加版在镜像 UV/接缝处与烘焙贴图不一致（决策 2026-07-06：切线不手写，法线手写） |
+| DDS | 手写 header 解析（~150 行，无新依赖） | DDS_HEADER + DX10 扩展 header 格式公开且简单，只需直通 |
+| VRM | 无新依赖（tinygltf 现成） | .vrm = glb 容器，扩展名映射即可导入几何/皮肤/动画 |
+| PMX/VMD | saba 解析器剥离 vendored（MIT）或自写（PMX 2.0 spec 公开） | Phase 5 启动前定，暂不加 submodule |
+
+Submodule 添加指令（repo 根执行；`third_party/CMakeLists.txt` 按现有"submodule 优先 + FetchContent fallback"风格注册——tinyobjloader 自带 CMakeLists 可 `add_subdirectory`，ufbx/MikkTSpace 无 → 手写 `add_library(ufbx STATIC ufbx/ufbx.c)` / `add_library(mikktspace STATIC MikkTSpace/mikktspace.c)` + INTERFACE include dir）：
+
 ```
-                    ┌───────── 不 Extract（默认，现状不变）─────────┐
-glb ──CookMesh──►  .samesh (CookedSubMesh.defaultMaterialID ──► 派生 .samatc, 只读)
-        │                                    ▲
-        │  .sameta: mat_remap_<idx>=<uuid>   │ remap 命中时替换
-        │                                    │
-        └── Extract Materials ──► assets/materials/<stem>_<name>.samat（可编辑源资产）
-                                        │ CookStandaloneMaterial
-                                        ▼
-                                  cook_cache/<newUUID>.samatc
-```
-
-#### A. 材质名贯通（可辨认性）
-
-- **`.samesh` v6**：`SameshFormat::Version = 6`；`FileHeader` 不变（48B），skin blob 之后追加 name 表：`uint32 nameCount` + 每项 `uint32 len + bytes`（per-submesh，与 `subMeshes` 平行）。`LoadCookedMesh` 按 `version >= 6` 读取，v5 及以下 name 为空 → **向后兼容，无需全量 reimport**。
-- `CookedMesh` 加 `std::vector<std::string> materialNames`；`MeshImporter::appendPrimitive` 填 glTF material name（空 → `"Material_<idx>"`）。
-- `.samatc` 加 `root["name"] = mat.name`（`CookMaterial` 已持有）。
-- `GPUSubMesh`（`src/resource/ResourceManager.hpp:31`）加 `std::string materialName` 贯通到运行时。
-
-> **既有 workaround 的清算**（2026-07-04 调研）：`MaterialOverrideDrawer.cpp:24-51` 的 `ReadMatTypeName` + `ResolveEffectiveType` 是同类问题的"文件查找"式绕过——popup 打开期间**每帧**打开材质源文件、逐行文本扫描 `"type"` 字段（非 JSON parse，依赖字段单行排版），且依赖 `AssetRegistry::FindByID` → 派生 `.samatc`（无 `.sameta`）整条路失效，Add Override popup 退化为"枚举所有 MaterialType 的全部参数"。
-> **对比结论：数据内嵌（cook 时落盘）优于文件查找**，理由：① `name` 的唯一来源是 glb 源文件，cook 时不落盘则事后任何文件查找都查不到（`type` 至少还在 `.samatc` 里，name 连查的地方都没有，除非全量重 parse glb）；② 文件查找是 editor-only，运行时/脚本 API/统计面板拿不到；③ 每帧磁盘 I/O + 手写文本扫描脆弱；④ registry 依赖使其对导入材质天然失效。内嵌代价极小：`.samatc` 是 JSON，加 key 零成本向后兼容（`j.value("name","")`）；`.samesh` v6 name 表已设计兼容读。
-> **顺带重构**：`ResolveEffectiveType` 改走 `matMgr->LoadMaterial(id, *ctx.resMgr)->GetType()`（按 UUID 经 VFS 解析 `.samatc`、实例有缓存、不依赖 registry、对派生材质同样有效），删除 `ReadMatTypeName` 文件扫描 —— 并入 Step 3。
-
-#### B. Material Extract（导入材质 → 可编辑 `.samat`）
-
-入口：AssetsPanel 中 `.glb/.gltf` 右键 → **"Extract Materials…"**（走 AssetsPresenter，MVP 模式）。行为（对该 glb 的每个 glTF 材质 idx）：
-
-1. 若 `.sameta` 已有 `mat_remap_<idx>` → 跳过（已 extract 过）
-2. 读 `cook_cache/<DeriveMaterialID(fileId, idx)>.samatc` JSON
-3. `IO::WriteJson` → `assets/materials/<glbStem>_<matName>.samat`（目标已存在 → 跳过 + log，MVP 不做改名对话框）
-4. 生成新 `.sameta`（**新随机 UUID**，type=Material）+ `CookStandaloneMaterial`
-5. 写回 glb 的 `.sameta`：`mat_remap_<idx>=<newUUID>`（辅助键 `mat_remap_name_<idx>=<gltfName>` 供错位校验）
-6. 全部完成后 `ReimportFile(glb)` force recook mesh（应用 remap）+ AssetsPanel 刷新
-
-#### C. Material Remap（cook 时应用）
-
-`CookMesh`（`tools/importer/MeshImporter.cpp:242`）开头 `MetaFile::Load(MetaPathFor(entry.sourcePath))` 收集 `mat_remap_<idx>` → `std::map<int, AssetID>`；`appendPrimitive` 中：
-
-```cpp
-sm.defaultMaterialID = remap.count(prim.materialIndex)
-    ? remap.at(prim.materialIndex)
-    : matIDs[prim.materialIndex];   // 原派生路径
+git submodule add https://github.com/tinyobjloader/tinyobjloader.git third_party/tinyobjloader
+git submodule add https://github.com/ufbx/ufbx.git                   third_party/ufbx
+git submodule add https://github.com/mmikk/MikkTSpace.git            third_party/MikkTSpace
 ```
 
-per-node split 与合并 mesh 共用 `appendPrimitive` → 自动同时生效。remap 命中的材质**仍生成**派生 `.samatc`（旧场景/旧 `.samesh` 可能还引用派生 UUID，保留无害）。
+**A. ModelLoader dispatch（Phase 1 基建）**
 
-#### D. MaterialAssetInspector 可编辑（= #99 主体）
-
-- 仅对源文件为 `.samat` 的 Material 资产开放编辑（派生 `.samatc` 无 registry 条目，天然不可选中；Extract 即"使之可编辑"的唯一路径，语义同 Unity）。
-- 编辑控件复用 `ParamWidgets`（#88 的公共反射 param 控件层），`ParamDef[]/TextureDef[]` 从 `MaterialManager::FindType(root["type"])` 反射取；alphaMode 下拉 / doubleSided 勾选 / alphaCutoff slider（顶层字段）。
-- **Save 按钮**（非即时写盘）→ `IO::WriteJson` 写回 `.samat` 源 → `CookStandaloneMaterial(force)` → `MaterialManager::EvictInstance(AssetID)`（**新增**，定点失效缓存实例）→ `scene.MarkMaterialDirty()` 触发 BuildDrawList 重建。
-
-#### E. Per-slot MaterialOverrideComponent（Phase 2，实例级参数差异）
-
-```cpp
-struct MaterialSlotOverride {                      // Components.hpp
-    std::map<std::string, ParamValue> scalars;
-    std::map<std::string, AssetID>    textures;
-    int8_t alphaMode = -1, doubleSided = -1;       // -1 = 继承
-};
-struct MaterialOverrideComponent {
-    // ... 现有 entity-wide 字段全部保留（向后兼容）...
-    std::map<int32_t, MaterialSlotOverride> slotOverrides;   // NEW: key = submesh 索引
-};
+```
+src/resource/loaders/ModelLoader.hpp/.cpp
+    static std::optional<SceneData> Load(const std::string& path);  // 按扩展名 → Gltf/Obj/Fbx/PmxLoader
+    static bool SupportsExtension(std::string ext);                 // ImportScanner/AssetsPanel 共用
 ```
 
-- `BuildDrawList` 叠加次序：base blob → entity-wide scalars/textures → `slotOverrides[si]`（SSBO 路径天然支持——per-draw blob 本就按 submesh 独立分配；legacy UBO 路径 per-slot `CloneInstance`）。
-- `MaterialOverrideDrawer` 加 slot 区段（TreeNode per slot，标签用 A 的材质名）；`SceneSerializer` 加 `"slots"` 对象；undo/redo 复用现有命令模式。
-- 脚本 API 的 slot 参数变体**不在本 issue**（留 #71 延伸，需 bump ScriptApiFunctionTable version）。
+- `MeshImporter.cpp` 3 处 `GltfLoader::Load` → `ModelLoader::Load`。
+- `ImportScanner::AssetTypeFromExtension` 增补各扩展名 → `"Mesh"`/`"Texture"`；`AssetsPanel` 导入对话框 nfd filter 增补。
+- 共享几何工具 `MeshUtils`：法线缺失重算**手写**（面积加权面法线累加，~30 行，无行业约定问题）；切线缺失生成**接 MikkTSpace**（索引网格展开成逐角顶点 → 生成 → hash 焊回，~50 行胶水），仅对缺切线的 primitive 生效——OBJ/FBX/PMX 普遍无 tangent；glTF 自带 TANGENT 的路径不动（现状 GltfLoader.cpp:114 缺失时用默认值 `{1,0,0,1}`，顺带也可接生成）。
+
+**A2. 材质参数透传（Phase 1；调研结论 2026-07-06——基建已具备，只差导入器一处）**
+
+- `.samat`/`.samatc` 的 `params`/`textures` 本就是任意 key→value JSON bag；加载端 `MaterialManager::LoadMaterial`（`MaterialManager.cpp:331-363`）按 `MaterialType::params` 解析（参数定义来自 `.refl` 的 MaterialParams SSBO 反射，`RegisterTypesFromShaderDir` L228-264），**未知 key 静默忽略不报错**——即任意类型 + 任意参数的加载/渲染链路已就绪，零改动。
+- 唯一缺口：`CookMaterial`（`tools/importer/MaterialImporter.cpp:38`）写死 `type="PBR"` + PBR 固定字段。
+- 修法：`MaterialData` IR 加 `std::string shadingModel = "PBR"` + `extraParams`/`extraTextures` 透传 bag，`CookMaterial` 按其写 JSON。未来 VRM/PMX loader 产出 `type="MToon"` + 特有参数即可直接被消费（前提 = 对应 shading model 已注册，见 #109）。
+
+**B. OBJ（Phase 2）**：`ObjLoader` → SceneData。shape 按 material 分 primitive；MTL → `MaterialData` 近似映射（map_Kd→baseColor、map_Bump→normal、Ns→roughness 反演）；无 skin/anim/层级（单 root node identity）。MTL 引用的外部贴图走 `EnsureMeta`（与 gltf 外部贴图同路径）。
+
+**C. DDS（Phase 3）**：
+- `DdsLoader`（header 解析）+ `CookTexture` 增 `.dds` 分支（不走 stb）：BCn block 数据 + 自带 mip 链**直通**进 `.satex`，不解码不重编码；cubemap → 现有 `Flag_Cubemap`。
+- `CookedTextureFormat` 新增 `BC1=4, BC3=5, BC5=6`（`BC7=2` 用现成占位），`.satex` Version → 2（v1 照常可读）。
+- `RHIFormat` 补 `BC1_SRGB/BC3_SRGB/BC7_SRGB`（BC5 恒 linear）+ VulkanUtils 映射；`ResourceManager` 格式映射表扩展（`ResourceManager.cpp:140-151`）。
+- 上传：`vkCmdCopyBufferToImage` 紧密打包（bufferRowLength=0）即可，但 mip 字节尺寸按 block 计算 `max(1,(w+3)/4) * max(1,(h+3)/4) * blockSize`；extent 仍用像素尺寸。
+- 支持 legacy FourCC（DXT1→BC1、DXT5→BC3）与 DX10 header 双路径；DXT3/BC2 少见 → 警告拒绝；BC6H（HDR）可选，不阻塞。
+
+**D. FBX（Phase 4）**：`FbxLoader`（ufbx）→ SceneData。load opts：`target_axes` 右手 Y-up、`target_unit_meters=1`、geometry transform 烘进顶点；`ufbx_triangulate_face` 三角化；skin deformer → `SkinVertex`（4 骨上限 + 权重重归一）；animation stacks → 多 `AnimClip`（与 glTF 多 clip 同构，sidecar 机制照用）；嵌入贴图 → `DeriveImageID`（同 glb），外部贴图 → `EnsureMeta`。材质 lambert/phong + PBR 属性尽力映射。
+
+**E. VRM（Phase 1 顺带）**：`.vrm` 扩展名映射 `"Mesh"` 即可用现有 tinygltf 路径导入几何/皮肤/动画。MToon 材质走 PBR fallback（可能只有 baseColor）——可接受。humanoid 骨骼映射/springbone/expressions 工作量大且依赖 #83，**明确拆后续独立 issue**，不在 #108 范围。
+
+**F. MMD PMX/VMD（Phase 5，占位设计，启动前再细化）**：`PmxLoader` → SceneData：左手→右手 Z 翻转 + 0.08 缩放（meta setting 可调）；BDEF1/2/4 → SkinVertex（SDEF 降级 BDEF2）；材质 PBR 近似（toon/sphere map 不做）；骨骼保留日文名，IK 骨仅作普通骨导入。VMD 是独立动画文件且按骨名寻址 → `.vmd` meta 增 `target_skeleton=<uuid>`（或同目录 pmx 自动配对），贝塞尔插值烘焙采样为 Linear 关键帧。morphs/物理刚体/IK 求解均不做。
+
+**G. .blend（won't-do 直接解析）**：.blend 是 Blender 内部 DNA 内存 dump，版本绑定无稳定 spec，assimp 的支持长年残废；业界（Unity/Godot）一致做法 = 检测本机 Blender 后 headless CLI 转 glTF 再走标准导入。若确需可列可选 Phase：`blender --background <file> --python-expr <gltf export>` → 临时 .glb → 标准路径，editor 设置里配 Blender 路径；默认不做，workaround 文档化为"Blender 手动导出 .glb"。
 
 ### 实施步骤
 
-- [ ] 1. **`.samesh` v6 材质名表**：`CookedMesh.hpp`（`materialNames` + Version=6 + 格式注释）、`CookedMesh.cpp` Save/Load（v5 兼容读）
-- [ ] 2. **导入侧填名**：`MeshImporter.cpp` appendPrimitive 填 `materialNames`；`MaterialImporter.cpp` `.samatc` 加 `"name"`；顺带修 `CookMaterial` 无 force 参数问题（force reimport 时 `.samatc` 不更新的现状 bug，`CookMesh` 的 force 透传）
-- [ ] 3. **运行时贯通**：`ResourceManager` `GPUSubMesh::materialName`；`MeshRendererDrawer` 槽位标签 `"[i] <名>"`；`MaterialOverrideDrawer::ResolveEffectiveType` 改走 `matMgr->LoadMaterial(id, *ctx.resMgr)->GetType()`，删除 `ReadMatTypeName` 每帧文件扫描（对派生材质同样生效，Add Override popup 不再退化为全类型枚举）
-- [ ] 4. **Remap 应用**：`CookMesh` 读 `.sameta` `mat_remap_<idx>` → `appendPrimitive` 替换 `defaultMaterialID`；验证 `ReimportFile` 不重写 `.sameta`（预期只读取；若有重写路径需保留 settings map）
-- [ ] 5. **Extract Materials**：AssetsPanel 右键项 + AssetsPresenter 实现（B 节 6 步流程）；验收：Sponza.glb Extract 后 assets/materials/ 出现命名 `.samat`，场景渲染不变
-- [ ] 6. **MaterialManager::EvictInstance(AssetID)**：定点缓存失效（含 legacy clone 路径的 deferred-destroy 安全）
-- [ ] 7. **MaterialAssetInspector 编辑模式**（吸收 #99）：ParamWidgets 复用 + alphaMode/doubleSided/alphaCutoff + Save→写回+recook+evict+MarkMaterialDirty；验收：改 extracted `.samat` 的 roughness，场景实时生效且重启存续
-- [ ] 8. **（Phase 2）per-slot override**：组件扩展 + `BuildDrawList` 叠加 + `SceneSerializer` + `MaterialOverrideDrawer` slot 区段 + undo 命令
-- [ ] 9. **文档**：`docs/architecture.md` 资产管线段（remap/extract 数据流）+ 组件表（slotOverrides）
+**Phase 1（基建 + VRM）**
+1. `ModelLoader` dispatch + `MeshImporter` 3 处替换 + `ImportScanner` 扩展表 + AssetsPanel nfd filter。
+2. `MeshUtils`：法线手写重算；切线接 vendored MikkTSpace（展开→生成→焊回）。
+3. `MaterialData` 加 `shadingModel` + `extraParams`/`extraTextures` 透传 + `CookMaterial` 按其写 JSON（A2）。
+4. `.vrm` → Mesh 映射，找一个 VRM 模型验证导入（几何+皮肤+动画）。
+
+**Phase 2（OBJ）**
+5. vendored tinyobjloader + `ObjLoader`（几何 + MTL 材质 + 外部贴图）。
+6. demo_project 放测试 obj（含 mtl+贴图），验证 Extract Materials / slot 全链路。
+
+**Phase 3（DDS）**
+7. `CookedTextureFormat` 扩展 + `.satex` v2 Save/Load（v1 兼容读）。
+8. `DdsLoader` + `CookTexture` `.dds` 直通分支（blocks + mips + cubemap）。
+9. `RHIFormat` BC*_SRGB + ResourceManager 映射 + 上传 mip 尺寸 block 计算。
+10. BC1/BC3/BC5/BC7 测试贴图各一（含带完整 mip 链的）验证。
+
+**Phase 4（FBX）**
+11. vendored ufbx + `FbxLoader` 静态网格 + 材质 + 贴图。
+12. FBX 皮肤 + 动画 → SceneData.skins/animations。
+13. 单位/轴规范化验证（Blender 与 Maya 导出的 FBX 各一）。
+
+**Phase 5（MMD）**：占位，启动前细化（可能拆独立 issue）。
 
 ### 边界情况与约束
 
-| 场景 | 处理 |
-|------|------|
-| reimport 后 remap 存续 | remap 存 `.sameta` settings map；`ImportScanner` 只在缺失时新建 `.sameta` → 保留（Step 4 显式验证） |
-| DCC 重导出后 glTF 材质顺序变化 | remap 按 `materialIndex` 键 → 错位风险；用 `mat_remap_name_<idx>` 对比实际名，不符则 warn + 跳过该项 remap（宁可回退派生材质也不错贴） |
-| 旧 `.samesh`（v5）| name 为空，槽位 UI 退回显示 UUID；功能不受影响，reimport 后升 v6 |
-| 场景中已手动设置的 `materialSlots` | 优先级最高于 remap 后的 defaultMaterialID，行为不变 |
-| 多实体共享 extracted `.samat` | 编辑影响全部使用者 —— 与 Unity material asset 语义一致（预期行为）；实例差异走 MaterialOverride |
-| MaterialManager 缓存陈旧 | Step 6 EvictInstance；与 #54（reimport 缓存未失效）同根，基建顺带铺路但不在本 issue 全修 |
-| 真·单 primitive 大网格（DCC 合并时已丢材质边界）| glTF 一 primitive 一材质，引擎无从拆分 → 不做（DCC 侧问题；node 级拆分归 #60） |
-| legacy UBO `.saglsl` 材质放进 slot | 走现有 CloneInstance 路径，无新约束 |
-| `.samat` 编辑的 undo | MVP 不命令化（资产编辑非场景状态，Save 显式确认已是防误）；后续可加 |
-
-**不做**：独立材质编辑器窗口（雏形 = Inspector 内编辑）；非 PBR 类型（自定义 `.saglsl`）材质的 Extract（`.samatc` 仅 PBR 生成）；glTF 写回；per-slot 脚本 API（→ #71 延伸）。
+- `.samesh`/`CookedMesh` 格式**零改动**；所有模型格式收敛到 SceneData 后走同一 cook 后端，#101/#102/#103 材质工作流自动可用；Derive*ID 派生 UUID 规则与 salt 不变。
+- `NeedsRecook` mtime 只看主文件——多文件源（obj+mtl、pmx+贴图）中 mtl 单独改动需手动 Reimport（与现状 gltf+bin 行为一致，不扩坑）。
+- 统一不做：morph targets（与 glTF 现状对齐）、MMD 物理/IK/morphs、VRM 特性集（humanoid/MToon/springbone → 后续 issue）、BCn **编码器**（DDS 只直通不生成；PNG→BC7 离线压缩属未来"纹理压缩 cook pass"）、KTX2/Basis、BC2/DXT3。
+- DDS 是首个多 mip `.satex` 生产者（现状 mipLevels 恒 1）——`LoadTexture`/上传路径的多 mip 分支首次被真实数据覆盖，需验证（GpuIblBake cubemap 已走多 mip，风险低）。
+- 非 4 倍数尺寸的 BCn 小 mip（1×1/2×2）块尺寸仍按整块算，extent 按像素——两处不可混用。
+- FBX 动画若含非 TRS 通道（visibility 等）静默忽略；CubicSpline 类插值降级 Linear（与 glTF 现状一致）。
 
 ### 受益 issues
 
-- **#99**：被 Step 7 吸收，实现后标 done
-- **#54**：`EvictInstance` 为 reimport 缓存失效提供定点工具
-- **#71（MaterialOverrideProxy）**：per-slot 组件语义就绪后，脚本 API 只需加 slot 参数变体
-- **#60（Mesh Split/Merge）**：材质名贯通后 split 输出的槽位可辨认
-- **X-6（透明植物面片）**：Extract 后可直接把导入材质 alphaMode 改 MASK，无需 DCC 重导
+- **X-1 Reimport 进度条**：格式变多导入耗时变长，价值提升。
+- **#83 Skinning roadmap**：FBX/VRM/PMX 带来更多真实骨骼测试资产。
+- **#60 Mesh Split/Merge 工具**：走 `ModelLoader` 后同样吃多格式输入。
+- **#109 扩展着色模型（NPR/Toon）**：A2 材质参数透传是其消费端前置——VRM/PMX 导入器产出 `type="MToon"` 的 `.samatc` 后，#109 提供对应 shading model 即点亮。
+- **未来纹理压缩 cook pass**：BCn 上传 + `.satex` v2 基建就位后，PNG→BC7 离线压缩只差编码器（bc7enc/ispc_texcomp）。
+
+---
+
+## Issue #109 — 扩展着色模型（NPR / Toon：MToon、MMDToon 等）——以内容形式发行，不碰引擎代码
+
+**优先级：低（依赖 #108 Phase 1 的 A2 材质透传；VRM/MMD 导入落地后价值显现）**
+
+### 目标
+
+为 VRM（MToon）/ MMD（toon ramp + sphere map）等非真实感渲染提供着色模型，且**以资产内容（.saglsl）形式存在，不修改引擎 C++ 代码**——对齐 Unity（URP toon = package 内容）/ Godot（shader resource）的 "shaders as content" 路线，避开 UE 式 C++ enum 硬编码 shading model 的扩展痛点。
+
+### 现状调研（2026-07-06）
+
+**项目级已完全成立（零引擎代码）**：`<project>/assets/shaders/MToon.saglsl`（`@ShadingModel MToon` + gbuffer section 的 MaterialParams SSBO + lighting section 的 `EvaluateShading`）→ `CookProjectShaders` cook 出 `.spv/.refl` + 重编 deferred_lighting dispatch → `SceneRenderer::ApplyProjectShaderTypes` → `MaterialManager::RegisterTypesFromShaderDir`（`MaterialManager.cpp:228-264`）按 `.refl` 的 `shadingModel` 字段自动注册 MaterialType（参数列表来自 SSBO 反射）→ `.samat` 写 `type="MToon"` 即用。今天就能做，放进项目 `assets/shaders/` + `assets/materials/` 即可。
+
+**引擎级发行的缺口（本 issue 主要工程量）**：
+1. **引擎内容不被 cook**：shader cook 只扫 `projectDir/assets`（`EditorMode.cpp:961` 与 `CookProjectShaders` :1257），engine assets 目录的 `.saglsl` 完全不参与（`assets/templates/shaders/` 只是创建模板）。要"所有项目开箱可用"需把引擎内容目录（建议新增 `assets/content/shaders/`，与 templates 区分）纳入 cook 扫描 + `RegisterTypesFromShaderDir(isProjectType=false)` 注册为引擎类型（`ClearProjectTypes` 天然不清除）。注意与项目同名 model 的冲突检测（#73-A 已有重名隔离机制可复用）。
+2. **渲染路径覆盖**：自定义 shading model 仅覆盖 deferred 不透明路径；`forward_transparent.frag:2-8` 明注 "PBR only"，Mask/Blend 走不了自定义 model（挂账 #98）。MToon 的透明发丝/描边受此限制——透明档依赖 #98，描边（inverted hull 或 post edge）需要额外 pass，属本 issue 内设计决策。
+3. **消费端**：#108 A2 透传就绪后，VRM/PMX 导入器产出 `type="MToon"`/`"MMDToon"` + 特有参数的 `.samatc`，本 issue 只需提供同名 shading model 内容。
+
+### 实施步骤（草案，启动前细化）
+
+1. 引擎内容目录 `assets/content/shaders/` 纳入 shader cook 扫描（engine cook_cache 输出）+ 引擎类型注册；重名冲突检测。
+2. `MToon.saglsl`：ramp 阴影 + shadeColor + rim + matcap（deferred 档）。
+3. `MMDToon.saglsl`：toon ramp + sphere map add/mul（deferred 档）。
+4. 描边方案决策与实现（inverted hull 第二 pass vs 屏幕空间 edge）；透明档随 #98。
+
+### 边界情况与约束
+
+- 不做引擎 C++ 侧新 shading model 机制——现有 `.saglsl` dispatch 基建已足够，本 issue 是内容 + cook 扫描范围扩展。
+- G-Buffer 布局不变：NPR 参数（ramp/rim 等）须编码进现有 RT 或走 material SSBO 在 lighting section 读——超出 G-Buffer 容量的效果不做。
+- 依赖：#108 A2（参数透传）；透明档依赖 #98；VRM humanoid/springbone 仍归动画系（#83 延伸），与本 issue 无关。
+
+### 受益 issues
+
+- **#108 Phase 5 MMD**：MMDToon 使 PMX 导入观感达到可用线。
+- **X-4 材质可视化编程**：更多 shading model 内容作为节点图目标的验证样例。

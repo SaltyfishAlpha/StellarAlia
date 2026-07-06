@@ -21,6 +21,7 @@ layout(set = 2, binding = 6) uniform sampler2D t_History;       // prev accum: r
 layout(set = 2, binding = 7) uniform sampler2D t_Velocity;      // (currUV - prevUV)
 layout(set = 2, binding = 8, rgba16f) uniform writeonly image2D u_History;  // new accum
 layout(set = 2, binding = 9, rgba16f) uniform writeonly image2D u_Out;      // composited HDR
+layout(set = 2, binding = 10) uniform sampler2D t_SSRHit;       // r=mean view hit distance (Issue #104)
 
 layout(push_constant) uniform PC {
     float alpha;         // history weight for the EMA (e.g. 0.92)
@@ -64,8 +65,31 @@ void main() {
     float count   = 1.0;
     float accConf = cur.a;
 
+    vec3 worldPos = ReconstructWorldPos(uv, depth, u_Frame.invViewProj);
+
+    // ── History reprojection (Issue #104: virtual-image, not surface) ─────────
+    // The pixel's reflection content is the mirror VIRTUAL IMAGE — a point that
+    // parallaxes like it sits behind the mirror at distance t_s + t_h along the
+    // primary view ray (exact for planar mirrors). Reprojecting that point with
+    // prevViewProj tracks the reflection under camera motion; the surface-velocity
+    // path only tracks the mirror itself and made clipping reject the history
+    // every frame the camera moved. Rough surfaces have wide lobes and noisy hit
+    // distances, so blend back toward the surface path by roughness; object motion
+    // in the mirror is still covered by variance clipping below.
     vec2 vel    = texture(t_Velocity, uv).rg;
     vec2 prevUV = uv - vel;
+    float tH = texelFetch(t_SSRHit, px, 0).r;
+    if (tH > 0.0) {
+        vec3  toSurf = worldPos - u_Frame.cameraPos;
+        float tS     = length(toSurf);
+        vec3  Pv     = u_Frame.cameraPos + toSurf * ((tS + tH) / max(tS, 1e-4));
+        vec4  pv     = u_Frame.prevViewProj * vec4(Pv, 1.0);
+        if (pv.w > 0.0) {
+            vec2  prevUVVirtual = (pv.xy / pv.w) * 0.5 + 0.5;
+            float k = 1.0 - smoothstep(0.05, 0.25, roughness);  // mirror→1, rough→0
+            prevUV = mix(prevUV, prevUVVirtual, k);
+        }
+    }
     bool reproj = pc.historyValid > 0.5
                && all(greaterThanEqual(prevUV, vec2(0.0)))
                && all(lessThanEqual(prevUV, vec2(1.0)));
@@ -105,7 +129,6 @@ void main() {
     imageStore(u_History, px, vec4(accRad, count));
 
     // ── Split-sum IBL replacement (matches deferred_lighting.frag so iblSpec cancels) ──
-    vec3  worldPos = ReconstructWorldPos(uv, depth, u_Frame.invViewProj);
     vec3  V        = normalize(u_Frame.cameraPos - worldPos);
     vec3  Rw       = reflect(-V, worldN);
     float NdotV    = max(dot(worldN, V), 0.0);

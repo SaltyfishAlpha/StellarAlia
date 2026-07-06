@@ -65,7 +65,6 @@ struct Ray {
 //
 // Usage per frame:
 //   bvh.Query(frustum, outVec);       // frustum culling
-//   bvh.Raycast(ray, maxDist, t, p);  // nearest hit picking
 //
 // Skinned objects (dynamic AABB) can call UpdateLeaf after animation.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -96,16 +95,6 @@ public:
         QueryNode(0, f, out);
     }
 
-    // Find the closest payload hit by ray within [0, maxDist].
-    // Returns true if any hit was found; outT = hit distance, outPayload = payload.
-    bool Raycast(const Ray& ray, float maxDist, float& outT, T& outPayload) const {
-        if (m_nodes.empty()) return false;
-        outT = maxDist;
-        bool hit = false;
-        RaycastNode(0, ray, outT, outPayload, hit);
-        return hit;
-    }
-
     // Update the world-space AABB of a leaf identified by payload (== comparison).
     // Rebuilds the whole tree — call only when a single leaf changes per frame.
     // For many skinned updates prefer Clear+Insert+Build.
@@ -119,19 +108,6 @@ public:
             }
         }
         Build();
-    }
-
-    // Slab test: ray vs AABB. Returns true if hit in [0, tMax].
-    // Exposed as public for use outside the BVH (e.g. brute-force Phase B picking).
-    static bool RayAABB(const Ray& ray, const glm::vec3& mn, const glm::vec3& mx,
-                        float tMax, float& tHit) {
-        const glm::vec3 t0 = (mn - ray.origin) * ray.invDir;
-        const glm::vec3 t1 = (mx - ray.origin) * ray.invDir;
-        const glm::vec3 tNear = glm::min(t0, t1);
-        const glm::vec3 tFar  = glm::max(t0, t1);
-        const float tMin = std::max({tNear.x, tNear.y, tNear.z});
-        tHit             = std::min({tFar.x,  tFar.y,  tFar.z});
-        return tMin <= tHit && tHit >= 0.f && tMin <= tMax;
     }
 
 private:
@@ -220,46 +196,6 @@ private:
         }
         QueryNode(node.left,  f, out);
         QueryNode(node.right, f, out);
-    }
-
-    void RaycastNode(int idx, const Ray& ray, float& bestT, T& bestPayload,
-                     bool& hit) const {
-        const Node& node = m_nodes[idx];
-        float tBox;
-        if (!RayAABB(ray, node.aabbMin, node.aabbMax, bestT, tBox)) return;
-
-        if (node.left == -1) {
-            // Leaf — test each prim individually.
-            // Accept only if tFar (t) is strictly less than bestT: this correctly
-            // prefers smaller/inner objects (smaller exit distance) over large outer
-            // ones whose AABB entry may still be in front of the current best.
-            for (int i = node.primBegin; i < node.primEnd; ++i) {
-                float t;
-                if (RayAABB(ray, m_prims[i].min, m_prims[i].max, bestT, t) && t < bestT) {
-                    bestT       = t;
-                    bestPayload = m_prims[i].payload;
-                    hit         = true;
-                }
-            }
-            return;
-        }
-
-        // Visit nearer child first for early termination.
-        float tL, tR;
-        const bool hitL = RayAABB(ray, m_nodes[node.left ].aabbMin,
-                                       m_nodes[node.left ].aabbMax, bestT, tL);
-        const bool hitR = RayAABB(ray, m_nodes[node.right].aabbMin,
-                                       m_nodes[node.right].aabbMax, bestT, tR);
-        if (hitL && hitR) {
-            const int near = tL <= tR ? node.left  : node.right;
-            const int far_ = tL <= tR ? node.right : node.left;
-            RaycastNode(near, ray, bestT, bestPayload, hit);
-            RaycastNode(far_, ray, bestT, bestPayload, hit);
-        } else if (hitL) {
-            RaycastNode(node.left,  ray, bestT, bestPayload, hit);
-        } else if (hitR) {
-            RaycastNode(node.right, ray, bestT, bestPayload, hit);
-        }
     }
 };
 

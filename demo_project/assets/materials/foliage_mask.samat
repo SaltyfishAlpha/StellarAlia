@@ -1,13 +1,26 @@
 {
-  "type": "PBR",
-  "version": 1,
   "alphaMode": "MASK",
   "doubleSided": true,
   "params": {
-    "baseColorFactor": [0.3, 0.65, 0.25, 1.0],
-    "roughnessFactor": 0.8,
+    "alphaCutoff": 0.5,
+    "baseColorFactor": [
+      0.3,
+      0.65,
+      0.25,
+      1.0
+    ],
+    "emissiveFactor": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "emissiveIntensity": 1.0,
     "metallicFactor": 0.0,
-    "alphaCutoff": 0.5
+    "normalScale": 1.0,
+    "occlusionStrength": 1.0,
+    "roughnessFactor": 0.8
   },
-  "textures": {}
+  "textures": {},
+  "type": "PBR",
+  "version": 1
 }

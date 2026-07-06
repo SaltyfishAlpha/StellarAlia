@@ -128,6 +128,18 @@ struct PostProcessSettings {
     float ssrThickness    = 0.1f;   // view-space depth tolerance for hit test
     float ssrStrength     = 1.0f;   // [0..1] reflection blend weight
 
+    // ── Volumetric Fog (Issue #49) ───────────────────────────────────────────
+    // Froxel single scattering after SSR / before TAA; TAA denoises the
+    // low-resolution volume. Directional light samples the shadow map (god rays).
+    bool      volFogEnabled       = false;
+    float     volFogDensity       = 0.02f;  // global extinction σt (1/m)
+    glm::vec3 volFogAlbedo        = {0.9f, 0.9f, 0.9f};  // scatter albedo σs/σt
+    float     volFogAnisotropy    = 0.6f;   // HG g [-0.9, 0.9]
+    float     volFogDistance      = 64.f;   // froxel volume far end (m)
+    float     volFogHeightBase    = 0.f;    // height fog reference y (m)
+    float     volFogHeightFalloff = 0.f;    // 0 = uniform; >0 exponential falloff (1/m)
+    float     volFogAmbient       = 0.2f;   // SH ambient scatter factor
+
     // ── Screen Effects (Issue #88) — ordered per-scene custom post-process stack ──
     // Each entry references a cooked .saeffect; only listed effects run. Grouped
     // by injection point at execution time (see EffectInject).

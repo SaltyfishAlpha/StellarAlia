@@ -582,15 +582,16 @@ When present, the render system applies overrides on top of the base `MaterialIn
 - **SSBO-path materials** (e.g. PBR): BuildDrawList packs the override blob into the
   per-frame `MaterialParamRing` and binds set=2 with a dynamic offset — no descriptor
   set allocation per entity.
-- **Legacy UBO-path materials** (e.g. project `.saglsl` `SimpleAlbedo`): falls back to
-  `CloneInstance` which allocates a per-entity descriptor set; the desc set goes through
-  the RHI deferred-destroy queue on entity removal.
+- **Legacy UBO-path materials** (post-fx / screen-effect style types; project `.saglsl`
+  models moved to the SSBO path in #73-A): falls back to `CloneInstance` which allocates
+  a per-entity descriptor set; the desc set goes through the RHI deferred-destroy queue
+  on entity removal.
 
 Entities without this component share the cached instance (no clone, no allocation).
 
 ```cpp
 struct MaterialOverrideComponent {
-    AssetID                           materialAsset;  // invalid = use mesh-default or slot
+    AssetID                           materialAsset;  // fills slots WITHOUT an explicit assignment
     std::map<std::string, ParamValue> scalars;        // named UBO param overrides
     std::map<std::string, AssetID>    textures;       // named texture slot overrides
     std::map<int32_t, MaterialSlotOverride> slotOverrides;  // Issue #101: per-submesh layer
@@ -599,6 +600,21 @@ struct MaterialOverrideComponent {
 // MaterialSlotOverride = {scalars, textures, alphaMode, doubleSided} — applied on
 // top of the entity-wide fields for one submesh index (base → entity → slot).
 ```
+
+**Base-material resolution priority (#106):** explicit `materialSlots[i]` assignment >
+entity-wide `materialAsset` > cooked `defaultMaterialID`. (`materialAsset` originally
+stomped slots for all sub-meshes; demoted to a fallback so the slot UI stays authoritative.)
+When a material ID is **valid but fails to load** (unknown shader type / missing `.samatc` /
+JSON error), BuildDrawList substitutes `SceneRenderer::m_errorMaterial` — a magenta
+emissive PBR instance — instead of the silent neutral-gray `m_defaultMaterial`, so broken
+references are visually distinct from "nothing assigned".
+
+**UI location (Issue #103):** per-slot overrides are edited inside the expanded
+Mesh Renderer slot rows (`SlotOverrideEditor.cpp` — the single slot UI, shared
+hover/focus viewport linkage). `MaterialOverrideDrawer` shows only the
+entity-wide parts (materialAsset / scalars / textures / render state). The first
+edit on a slot creates the component and/or the `slotOverrides` entry on demand;
+the undo command tears down exactly what it created.
 
 ### ColorGradingSettings
 
@@ -994,11 +1010,11 @@ directly from `ColliderComponent` ECS data (no Jolt debug callback needed). Togg
 
 ### Hosting Model
 
-`ScriptSystem::Init` loads `hostfxr` at runtime, initialises a .NET host context pointing at `StellarAlia.ScriptBridge.runtimeconfig.json`, and retrieves ten function-pointer delegates via `get_function_pointer`:
+`ScriptSystem::Init` loads `hostfxr` at runtime, initialises a .NET host context pointing at `StellarAlia.ScriptBridge.runtimeconfig.json`, and retrieves nine function-pointer delegates via `get_function_pointer`:
 
 ```
 Lifecycle:           Initialize | Compile | Instantiate | InvokeLifecycle | RemoveInstance | Unload
-Field reflection:    GetClassSchemaBlob | GetClassDefaultsBlob | ApplyFieldValues | CaptureFieldValues
+Field reflection:    GetClassSchemaBlob | GetClassDefaultsBlob | ApplyFieldValues
 ```
 
 The field-reflection group is loaded the same way as the lifecycle entries but lives outside `ScriptApiFunctionTable` — they are managed→native pull endpoints (Inspector → ALC) rather than native→managed lifecycle drivers.
@@ -1136,7 +1152,7 @@ Schema blob (GetClassSchemaBlob → DecodeSchema):
   Forward-compat: reader switches on schemaVersion; older binaries reading v2
   blobs ignore the trailer because all v1 fields are length-prefixed.
 
-Field-value blob (ApplyFieldValues / CaptureFieldValues / InjectSingleField /
+Field-value blob (ApplyFieldValues / InjectSingleField /
                   Defaults blob / .sascene `script.fields` mirror):
   u32 recordCount;
   record: { str name; u8 kind; u16 payloadLen; byte payload[payloadLen] }
@@ -1150,9 +1166,8 @@ Field-value blob (ApplyFieldValues / CaptureFieldValues / InjectSingleField /
 | Export | Protocol | Purpose |
 |---|---|---|
 | `GetClassSchemaBlob(classNameUtf8, outBuf, capacity)` | two-step | Build & emit schema blob v2 for a `ScriptBase` type |
-| `GetClassDefaultsBlob(classNameUtf8, outBuf, capacity)` | two-step | `Activator.CreateInstance(type)` + `CaptureFieldValues` — captures the C# `= initializer` values so the Inspector seeds with meaningful defaults |
+| `GetClassDefaultsBlob(classNameUtf8, outBuf, capacity)` | two-step | `Activator.CreateInstance(type)` + `FieldReflector.CaptureFieldValues` — captures the C# `= initializer` values so the Inspector seeds with meaningful defaults |
 | `ApplyFieldValues(entityId, blob, blobLen)` | one-shot | Reflection `FieldInfo.SetValue` per record onto the live instance; mismatched kind/payload → record skipped |
-| `CaptureFieldValues(entityId, outBuf, capacity)` | two-step | Inverse of Apply — read instance fields into a value blob (reserved for future PIE→Edit sync) |
 
 **Recognised C# field types** (`FieldReflector.ResolveKind`):
 
@@ -1176,7 +1191,7 @@ Field-value blob (ApplyFieldValues / CaptureFieldValues / InjectSingleField /
 
 **EntityRef translation** (`ScriptSystem::InjectFieldValues` / `InjectSingleField`):
 
-`sc.fields["target"]` stores the persistent `EntityIdComponent.sceneLocalId`, but the C# `Entity` struct holds the live `entt::entity` bits. Native translates before encoding the value blob: `scene.FindBySceneLocalId(sceneLocalId) → entt bits`. A missing/freed target encodes as 0 → `Entity.IsValid` returns false on the managed side. The reverse path is reserved for `CaptureFieldValues` (PIE→Edit sync, not yet wired).
+`sc.fields["target"]` stores the persistent `EntityIdComponent.sceneLocalId`, but the C# `Entity` struct holds the live `entt::entity` bits. Native translates before encoding the value blob: `scene.FindBySceneLocalId(sceneLocalId) → entt bits`. A missing/freed target encodes as 0 → `Entity.IsValid` returns false on the managed side.
 
 **Persistence** (`SceneSerializer`):
 
@@ -1544,7 +1559,10 @@ Render execute:
     DrawIndexed
 ```
 
-**Legacy UBO path** (project `.saglsl` shading models, post-fx materials, etc.):
+**Legacy UBO path** (post-fx materials etc. — project `.saglsl` shading models migrated
+to the SSBO+bindless path in #73-A; the template and demo shaders declare
+`std430 readonly buffer MaterialParams` + `t_*_Idx` and sample via the shared
+`bindless_textures.glsl` include):
 
 ```
 material->SetFloat / SetTexture → memcpy CPU blob, mark dirty
@@ -1976,10 +1994,10 @@ Normal encoding uses **Octahedral Normal Encoding** (OctEncode/OctDecode).
 | `SSAOFeature` | always registered; disabled → fills ssaoTex with 1.0 | half-res R8 AO → blurred into `ssaoTex` | `ssao.frag` + `ssao_blur.frag` |
 | `DeferredLightingFeature` | always | HDR (transient RGBA16F). Issue #56: depth+stencil bound as a **read-only attachment** (stencil test ==1) while the depth plane is simultaneously sampled — `RGPassBuilder::ReadDepthStencil` + `RHIDepthAttachment::readOnly` + descriptor written with DEPTH_STENCIL_READ_ONLY layout. PBR math lives in shared `pbr_shading.glsl`; local shadow sampler renamed `t_GShadowMap` | `deferred_lighting.frag` |
 | `SSRFeature` (Issue #48 / #89) | always registered; skips if `pp.ssrEnabled==false` | 5 compute passes: HiZ_Copy + HiZ_SPD (min pyramid) → SSR_Trace (8-spp GGX, screen-space Hi-Z DDA) → SSR_Resolve (bilateral) → SSR_Temporal (velocity-reprojected adaptive accumulation + variance clip) → composite replaces IBL env-probe specular into `SSR_Composite`; sets `handles.hdr`. See [Screen Space Reflections](#screen-space-reflections-issue-48-phase-1--89-phase-2) | `ssr.comp`, `hiz_copy/hiz_spd.comp`, `ssr_resolve/ssr_temporal.comp` |
-| `SelectionMaskFeature` | always | R8 silhouette mask | `selection_mask.vert/.frag` (+ `selection_mask_skinned.vert` for skinned) |
-| `TAAFeature` | always registered; disabled → passes `handles.hdr` through | TAA-resolved into ping-pong history; `handles.taaResolved` | `taa_resolve.frag` |
-| `ForwardTransparentFeature` (Issue #56) | skips (invalid `m_outputHandle`) when no visible BLEND item | ① copies `taaResolved` into a fresh transient (`ForwardHDR`) — never blends into the TAA ping-pong history in place, ② draws BLEND items back-to-front (per-frame clip.w sort) with AlphaBlend, depth read-only/no-write, PBR-only shading (shadow map via set=1 binding=7). Redirects `handles.hdr = handles.taaResolved = ForwardHDR`; the AfterTAA ScreenEffect anchor is placed after it. BLEND casts no shadow, writes no velocity, not in GBuffer | `deferred_geometry(.vert\|_skinned.vert)` + `forward_transparent.frag`; `fullscreen_tri` + `forward_copy.frag` |
-| `AutoExposureFeature` | always registered; skips if `pp.autoExposureEnabled==false` | 256-bin log-lum histogram → weighted percentile EV → exponential-smoothing exposure; 1-frame CPU readback via staging; reads `handles.hdr` (pre-TAA content) | `postfx_histogram.comp`, `postfx_exposure_adapt.comp` |
+| `ForwardTransparentFeature` (Issue #56 → #105) | runs after SSR / before SelectionMask+TAA; skips when no visible BLEND item | ① blends BLEND items back-to-front (per-frame clip.w sort) in place onto `handles.hdr` (a plain transient at that point — the pre-TAA move is what removed #56's copy-then-blend), AlphaBlend, depth read-only/no-write, PBR-only shading (shadow map via set=1 binding=7); ② when TAA is enabled, redraws the same items into an R8 `ReactiveMask` (coverage union `a + dst·(1−a)` via `(1,1,1,a)` output under AlphaBlend) exposed as `m_reactiveMask` for TAA. BLEND casts no shadow, writes no velocity, not in GBuffer | `deferred_geometry(.vert\|_skinned.vert)` + `forward_transparent.frag` / `transparent_reactive.frag` |
+| `SelectionMaskFeature` | always | R8 silhouette mask; rasterised with the **unjittered** VP (Issue #107 — the outline composites after TAA) | `selection_mask.vert/.frag` (+ `selection_mask_skinned.vert` for skinned) |
+| `TAAFeature` | always registered; disabled → passes `handles.hdr` through | TAA_Resolve into ping-pong history (`handles.taaResolved`); reads `ReactiveMask` at binding 4 to raise the blend floor on transparent coverage (`blendReactive` 0.65, 0 when absent). TAA_Copy (Issue #105) then copies history → transient `PostTAA_HDR` and redirects `handles.hdr` — downstream RMW (BloomComposite UAV add) must never touch the history in place | `taa_resolve.frag`; `fullscreen_tri` + `forward_copy.frag` |
+| `AutoExposureFeature` | always registered; skips if `pp.autoExposureEnabled==false` | 256-bin log-lum histogram → weighted percentile EV → exponential-smoothing exposure; 1-frame CPU readback via staging; reads `handles.hdr` (post-TAA copy since Issue #105) | `postfx_histogram.comp`, `postfx_exposure_adapt.comp` |
 | `BloomFeature` | always registered; skips if `pp.bloomEnabled==false` | threshold reads `taaResolved`; composite writes back to `handles.hdr` | `bloom_*.frag` |
 | `DoFFeature` | always registered; skips if `pp.dofEnabled==false` | CoC from depth → separable near/far Gaussian blur (H+V × 2) → smoothstep composite; sets `handles.hdr` to DoF output | `dof_coc.frag`, `dof_blur.frag`, `dof_composite.frag` |
 | `MotionBlurFeature` | always registered; skips if `pp.motionBlurEnabled==false` | Per-object velocity (filled by `VelocityPrepassFeature`, Issue #84) → TileMax (16×) → NeighborMax (3×3 dilate) → McGuire 2012 reconstruct; sets `handles.hdr` to motion-blur output | `motion_blur_tile_max.frag`, `motion_blur_neighbor_max.frag`, `motion_blur_reconstruct.frag` |
@@ -1987,8 +2005,8 @@ Normal encoding uses **Octahedral Normal Encoding** (OctEncode/OctDecode).
 | `LutTonemapFeature` | hot-swapped in when `pp.tonemapMode==LUT` | LDR (transient `handles.ldr`) | `postfx_lut_tonemap.frag` |
 | `PostFXFeature` (Issue #47) | always registered; never skipped | reads `handles.ldr` → writes swapchain. Single fullscreen pass applies vignette / chromatic aberration / film grain (uniform-control-flow toggles). All three disabled = single `texture()` copy. | `postfx.frag` |
 | `SelectionOutlineFeature` | always | outline on swapchain | `selection_outline_dilate.frag` + composite |
-| `InfiniteGridFeature` | when enabled | XZ grid on swapchain | `infinite_grid.frag` |
-| `DebugOverlayFeature` | always | debug lines on swapchain | `debug_line.vert/.frag` |
+| `InfiniteGridFeature` | when enabled | XZ grid on swapchain; `gl_FragDepth` from the **unjittered** VP (Issue #107; the ray already came from the unjittered `invViewProj`) | `infinite_grid.frag` |
+| `DebugOverlayFeature` | always | debug lines on swapchain; push constant = `m_currentUnjitteredViewProj` (Issue #107; `m_currentViewProj` stays jittered for culling + transparent sort) | `debug_line.vert/.frag` |
 | user `RenderFeature`s | `AddFeature(...)` | custom | custom |
 
 `BloomFeature`, `TAAFeature`, `DoFFeature`, `MotionBlurFeature`, and `SSRFeature` are always in the feature list; their `AddPasses` early-returns when disabled.
@@ -2012,20 +2030,27 @@ struct RendererConfig {
 
 ### TAA (Temporal Anti-Aliasing)
 
-**Placement:** TAA runs after `SelectionMask` and before `Bloom`.
+**Placement:** TAA runs after `ForwardTransparent`/`SelectionMask` and before `Bloom`.
 
 **Data flow:**
 ```
-GBuffer(jittered proj) → VelocityPrepass (Issue #84; gated on MotionBlur OR TAA enabled, Issue #85)
+GBuffer(jittered proj) → VelocityPrepass (Issue #84; gated on MotionBlur OR TAA OR SSR enabled)
   Each visible DrawItem: gl_Position = jittered VP * model, varyings = unjittered VPs * model
   Frag: out_velocity = (unjittered currUV − unjittered prevUV) → handles.velocity
-→ DeferredLighting → TAAFeature
-  TAA_Resolve: Read(handles.hdr, historyRead, depth, handles.velocity) → Write(historyWrite)
-  Reprojection uses handles.velocity directly (Issue #85) — no per-shader jitter compensation needed
+→ DeferredLighting → SSR → ForwardTransparent (Issue #105: blends into handles.hdr in place,
+  writes R8 ReactiveMask when TAA on) → TAAFeature
+  TAA_Resolve: Read(handles.hdr, historyRead, depth, handles.velocity, ReactiveMask?)
+               → Write(historyWrite)
+  Reprojection uses handles.velocity directly (Issue #85); reactive coverage raises the blend
+  floor (max(blend, coverage·0.65)) so velocity-less transparents don't ghost
   handles.taaResolved = rgHistoryWrite
+  TAA_Copy (Issue #105): historyWrite → transient PostTAA_HDR; handles.hdr = PostTAA_HDR
+  (downstream RMW like BloomComposite must never touch the ping-pong history in place;
+  pre-#105 this copy only existed inside ForwardTransparent, so with zero BLEND items the
+  anti-aliased image never reached Tonemap at all — latent gap, fixed here)
 → BloomThreshold reads handles.taaResolved (anti-aliased pre-bloom)
-→ BloomComposite writes handles.hdr
-→ DoFFeature reads handles.hdr (bloom-composited) + handles.depth
+→ BloomComposite adds bloom into handles.hdr (PostTAA_HDR)
+→ DoFFeature reads handles.hdr + handles.depth
   DoF_CoC / DoF_NearH / DoF_NearV / DoF_FarH / DoF_FarV / DoF_Composite
   handles.hdr = dofOutput (RGBA16F transient)
 → MotionBlurFeature reads handles.hdr + handles.velocity + handles.depth
@@ -2036,7 +2061,7 @@ GBuffer(jittered proj) → VelocityPrepass (Issue #84; gated on MotionBlur OR TA
 
 **Jitter:** Halton(2,3) sequence, 8-tap, written to `fu.jitter` (pixel space) and added to `proj[2][0/1]` (NDC offset). `fu.viewProj` is jittered (drives rasterization); `fu.prevViewProj` and `fu.currUnjitteredViewProj` are both unjittered (drive velocity reconstruction).
 
-**Dual viewProj convention (Issues #46 + #85):** the engine maintains both jittered and unjittered current-frame VPs in `FrameUniforms` — mirroring UE5 `nonJitteredProjMatrix` / HDRP `nonJitteredVP`. Rasterization (GBuffer, VelocityPrepass `gl_Position`, SelectionMask, Shadow) uses `fu.viewProj` (jittered) so TAA's sub-pixel sampling works correctly. Velocity computation (VelocityPrepass `v_CurrClip` output) uses `fu.currUnjitteredViewProj`, producing `handles.velocity` free of per-frame jitter offsets. TAA, MotionBlur, and future SSR can therefore read `handles.velocity` directly without per-shader jitter compensation.
+**Dual viewProj convention (Issues #46 + #85 + #107):** the engine maintains both jittered and unjittered current-frame VPs in `FrameUniforms` — mirroring UE5 `nonJitteredProjMatrix` / HDRP `nonJitteredVP`. **Scene** rasterization (GBuffer, VelocityPrepass `gl_Position`, ForwardTransparent, Shadow) uses `fu.viewProj` (jittered) so TAA's sub-pixel sampling works correctly. Velocity computation (VelocityPrepass `v_CurrClip` output) uses `fu.currUnjitteredViewProj`, producing `handles.velocity` free of per-frame jitter offsets — TAA, MotionBlur and SSR read it directly without per-shader jitter compensation. **Editor overlays** (SelectionMask→outline, InfiniteGrid `gl_FragDepth`, DebugOverlay lines via `m_currentUnjitteredViewProj`) use the **unjittered** VP (Issue #107, UE-style): they draw after TAA with no resolve to average the jitter, and the TAA-converged image sits at the unjittered position anyway. Known residual: overlay-vs-geometry intersection boundaries can flicker sub-pixel (the depth buffer itself is jitter-rasterised) — accepted. With TAA off the two matrices are identical, so behaviour is unchanged.
 
 **First-frame guard for `fu.prevViewProj`** (Issue #46): `m_prevUnjitteredViewProj` initialises to `mat4(1.f)`. TAA absorbs this via history weighting, but Motion Blur produces visible garbage from the resulting velocity. `ApplyCameraToUniforms` therefore seeds `m_prevUnjitteredViewProj = currViewProj` on the first call, so frame 0's velocity is exactly zero.
 
@@ -2045,9 +2070,9 @@ GBuffer(jittered proj) → VelocityPrepass (Issue #84; gated on MotionBlur OR TA
 - TAA_Resolve (Issue #85): samples `handles.velocity` directly for prev-UV reprojection — replaces the older depth + `WorldPos × prevViewProj` path. As a result TAA now sees per-object motion and no longer ghosts on moving rigid bodies / animated skinned meshes
 - 3×3 YCoCg AABB neighborhood clamp on history (anti-ghosting) → motion-adaptive blend (`velLen` → blendStatic ↔ blendMotion)
 - `m_historyValid = false` on first frame or resize → shader uses `historyValid = 0` push constant → outputs current unmodified
-- Binding layout (set=2): 0 = current HDR, 1 = history, 2 = depth (kept for layout stability), 3 = `handles.velocity` (Issue #85)
+- Binding layout (set=2): 0 = current HDR, 1 = history, 2 = depth (kept for layout stability), 3 = `handles.velocity` (Issue #85), 4 = transparent `ReactiveMask` (Issue #105; hdr bound as layout-filler + `blendReactive=0` when absent)
 
-**`handles.taaResolved`:** field on `RendererHandles`; equals `handles.hdr` when TAA is disabled, set to `rgHistoryWrite` after `TAAFeature::AddPasses`. `BloomThreshold` reads this to avoid Bloom accumulating in TAA history (prevents progressive brightness).
+**`handles.taaResolved`:** field on `RendererHandles`; equals `handles.hdr` when TAA is disabled, set to `rgHistoryWrite` after `TAAFeature::AddPasses`. `BloomThreshold` reads this to avoid Bloom accumulating in TAA history (prevents progressive brightness). Since Issue #105 the same AddPasses also redirects `handles.hdr` to the `PostTAA_HDR` copy, so the anti-aliased frame reaches DoF/MB/Tonemap unconditionally (previously only via `ForwardTransparentFeature`'s copy, i.e. only when a BLEND item was visible).
 
 **VelocityPrepass gating** (Issue #85): the prepass writes `handles.velocity` whenever **either** `MotionBlurFeature::m_enabled` **or** `TAAFeature::m_enabled` is true. With both features disabled the pass returns immediately and the RG leaves `handles.velocity` unallocated (the greedy slot allocator skips transients with `firstWritePass < 0`).
 
@@ -2159,12 +2184,13 @@ DeferredLighting (handles.hdr ← lit, incl. iblSpec)
   → HiZ_Copy   : depth(D32F) → Hi-Z mip0 (R32F)
   → HiZ_SPD    : min-reduce mip0 → mip1..N (SPD, #94, reduce = min; imageLoad in-place)
   → SSR_Trace  : 8 GGX-sampled rays/pixel, screen-space Hi-Z march → SSR_Radiance(rgb=radiance,
-                 a=pdf<0⇒mirror) + SSR_Hit(b=conf, a=mask)
+                 a=pdf<0⇒mirror) + SSR_Hit(r=mean view hit distance #104, b=conf, a=mask)
   → SSR_Resolve: light 3×3 roughness-scaled bilateral pre-blur → SSR_Reflection(rgb=radiance,a=conf)
-  → SSR_Temporal: reproject history by velocity + adaptive-count accumulate + variance clip,
-                 then split-sum composite → SSR_Composite; write new history (ping-pong)
+  → SSR_Temporal: reproject history by virtual image (smooth) / velocity (rough) + adaptive-count
+                 accumulate + variance clip, then split-sum composite → SSR_Composite;
+                 write new history (ping-pong)
     SceneRenderer redirects handles.hdr = SSR_Composite
-  → SelectionMask → TAA → Bloom → …
+  → ForwardTransparent (blends in place, Issue #105) → SelectionMask → TAA → Bloom → …
 ```
 
 **Hi-Z traversal (`ssr.comp` `HiZTrace`).** Screen-space DDA over the min-depth pyramid: cells
@@ -2181,12 +2207,21 @@ rays with `viewR.z ≥ 0` (reflecting toward/behind the camera → off-screen) a
 **Stochastic + denoise (Phase C).** The trace GGX-importance-samples the reflection direction
 (roughness < 0.05 ⇒ exact mirror, no jitter); 8 samples/pixel/frame make the per-frame signal
 dense enough to denoise. `ssr_resolve.comp` does a light bilateral pre-blur; `ssr_temporal.comp`
-is the primary denoiser — it reprojects the reflection history by `handles.velocity`, blends
-with an **adaptive running-average** (`alpha = count/(count+1)`, count in history alpha: fresh /
-disoccluded ⇒ shows current immediately, stable ⇒ strong denoise) and **variance-clips** the
-reprojected history to the current 3×3 mean±1.5σ (reflections are view-dependent, so geometry
-velocity carries a stale reflection on camera turns; the clip + count reset kill the flowing
-ghost). History is a persistent ping-pong pair, rebuilt on resize.
+is the primary denoiser — it blends the reprojected history with an **adaptive running-average**
+(`alpha = count/(count+1)`, count in history alpha: fresh / disoccluded ⇒ shows current
+immediately, stable ⇒ strong denoise) and **variance-clips** it to the current 3×3 mean±1.5σ.
+History is a persistent ping-pong pair, rebuilt on resize.
+
+**Virtual-image reprojection (#104).** A reflection pixel's content is the mirror virtual image
+— it parallaxes like a point at `P_v = C + dir·(t_s + t_h)` behind the mirror (exact for planar
+mirrors), NOT like the mirror surface, so reprojecting by surface `handles.velocity` mismatched
+the history on every camera move and the variance clip kept resetting the accumulation (moving
+camera ⇒ trailing / re-noising reflections). The trace outputs the edge-fade-weighted mean
+view-space ray length in `SSR_Hit.r` (`hitDist = (hitZView − rayStart.z)/viewR.z`, viewR is
+unit); the temporal pass reprojects `P_v` with `u_Frame.prevViewProj` and blends toward the
+surface-velocity path by roughness (`1 − smoothstep(0.05, 0.25, r)`) — glossy lobes have noisy
+hit distances. `tH ≤ 0` (miss/sky) falls back to the surface path; object motion inside the
+mirror is still covered by the variance clip.
 
 **Split-sum replacement (unchanged principle).** On the resolved radiance the temporal pass
 recomputes `iblSpec = prefilteredColor·(F_ibl·brdfSS.x + brdfSS.y)·occlusion` exactly as
@@ -2209,8 +2244,8 @@ consumes `handles.velocity`). Disabled → `AddPasses` early-returns, zero cost.
 `BVHTree<T>` is a pure-algorithm template (glm only, no ECS dependency) providing:
 - **Build:** median-split on longest centroid axis, O(N log N)
 - **Query(Frustum):** p-vertex half-space test per node; prunes entire subtrees
-- **Raycast(Ray):** slab test, nearest child first for early termination
-- **`RayAABB(ray, mn, mx, tMax, tHit)`:** public static slab test — exposed for reuse outside the BVH (Phase B picking)
+
+(The former `Raycast`/`RayAABB` slab-test API was removed with `RaycastScene` in Issue #102 — editor picking is now GPU ID based; see *Editor ID Picking* below.)
 
 `Frustum::Extract(viewProj)` uses Gribb-Hartmann for Vulkan NDC [0,1] depth (near = row2, far = row3−row2).
 
@@ -2219,22 +2254,28 @@ consumes `handles.velocity`). Disabled → `AddPasses` early-returns, zero cost.
 **Per-frame flow:**
 ```
 BuildDrawList:  GPUSubMesh.boundsMin/Max  →  ArvoAABB(wt*localT)  →  m_bvh.Insert(entity)
-                                          →  DrawItem::worldAABBMin/Max (per submesh, for Phase B)
+                                          →  DrawItem::worldAABBMin/Max (per submesh; transparent
+                                             back-to-front centroid sort, Issue #56)
                 m_bvh.Build()
 RenderFrame:    Frustum::Extract(viewProj)  →  m_bvh.Query  →  m_visibleDrawItems
 GBufferFeature: iterates m_visibleDrawItems (pointers into m_drawItems)
 ```
 
 Skinned meshes set `DrawItem::skipCull = true` and bypass BVH; they are always included in `m_visibleDrawItems`.
-Skinned meshes also store a `worldAABBMin/Max` approximated from bind-pose bounds × world transform, for Phase B picking.
-
-**`SceneRenderer::RaycastScene(ray)`** — two-phase AABB picking:
-- **Phase A:** `m_bvh.Raycast()` — nearest static mesh entity via BVH slab test
-- **Phase B:** brute-force scan of `m_drawItems` where `skipCull==true` using `BVHTree::RayAABB` on `DrawItem::worldAABBMin/Max`; returns closest among both phases
 
 **`GPUSubMesh` bounds** are computed in `ResourceManager::LoadMesh` by iterating raw vertex data (stride=48, first 12 bytes = vec3 position) before GPU upload.
 
 Tracy plot: `SA_PROFILE_PLOT("VisibleDrawItems", ...)` tracks cull ratio per frame.
+
+### Editor ID Picking (Issue #102)
+
+Viewport mouse selection is GPU based (UE HitProxy style), replacing the former AABB `RaycastScene`:
+
+- `SceneRenderer::RequestIdPick(px, py)` queues a pick; the next frame's `IdPickFeature` records a one-shot pass drawing **all** `m_drawItems` into a lazily-created persistent `R32_UINT` buffer (`RenderTarget|Sampled|CopySrc`, own transient D32 depth → nearest surface wins, transparents included). Push constant = `{mat4 model; uint id}` (packed 68 B); `id` = 1-based index into a snapshot `vector<{entity, submeshIndex}>` captured at pass-build time, so the result survives draw-list rebuilds. Shaders: `id_pass.vert/.frag` + `id_pass_skinned.vert`.
+- The buffer is imported with `finalState = ShaderRead` (the layout `ReadbackTextureMips` assumes); after `EndFrame/Present`, `ResolveIdPick()` does a blocking full readback (queue-ordered after the frame) and maps the clicked pixel through the snapshot.
+- `EditorMode` consumes `TryConsumePickResult` next frame with a **cycling click state machine**: first click selects the entity; a second click on the already-selected entity focuses the clicked material slot (`EditorSelection::FocusSlot`) — the viewport keeps that submesh highlighted and the Inspector slot row scrolls into view with a flash; a third click on the same submesh cycles back to the entity level (selection kept, focus cleared). Any selection change also clears the focus. Billboard icons keep their separate 2D screen-distance test and take priority.
+- **Slot highlight (forward direction):** hovering a slot row in `MeshRendererDrawer` (the single slot UI since Issue #103) reports `EditorSelection::SetHoveredSlot` (frame-scoped); `EditorMode` mirrors hover-else-focus into `SceneRenderer::SetHighlightSlot(entity, slot)`, which narrows `SelectionMaskFeature` to that single submesh — the outline pass is untouched.
+- `RHIFormat::R32_UINT` was added for the pick buffer (clear only to 0: float/uint bit-identical, so the float clear path needs no uint branch).
 
 ---
 
@@ -2246,17 +2287,39 @@ Custom shading models are defined in `.saglsl` unified shader files placed in th
 
 ```glsl
 // @ShaderName  "My Shader"
-// @ShadingModel MyShader        // CamelCase; also the MaterialType name
+// @ShadingModel MyShader        // CamelCase GLSL identifier; also the MaterialType name
 // @VertShader   deferred_geometry  // optional, default shown
 
 #pragma sa_section gbuffer
-// Full GLSL fragment shader writing the 3-MRT G-Buffer layout
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_nonuniform_qualifier : enable
+#include "bindless_textures.glsl"        // set=0 globalTex[] + SampleBindless(idx, uv)
+
+// #73-A: SSBO + bindless — reflection detects the StorageBuffer named
+// MaterialParams and puts the type on the zero-clone SSBO path. Texture slots
+// are `uint t_<Name>_Idx` members (0 = default white); MaterialManager strips
+// the `_Idx` suffix so .samat texture keys stay "t_<Name>".
+layout(std430, set = 2, binding = 0) readonly buffer MaterialParams {
+    vec4 baseColorFactor;  // @Color4("Base Color") = 1,1,1,1
+    uint t_BaseColor_Idx;  // @Texture("Albedo Map")
+} u_Mat;
+
+// ... write the 3-MRT G-Buffer; encode this model's dispatch ID via the
+// cook-injected SA_SHADING_MODEL_ID alias (see below), e.g.
+//   out_GData = vec4(0, 0, 0, EncodeShadingFlags(SA_SHADING_MODEL_ID));
 #pragma sa_end_section
 
 #pragma sa_section lighting
 vec3 EvaluateShading(GBufferData gbuf) { ... }
 #pragma sa_end_section
 ```
+
+**`SA_SHADING_MODEL_ID` alias (#73-A).** `CompileEntry` injects
+`#define SA_SHADING_MODEL_ID SHADING_MODEL_<UPPER_SNAKE>` right after `#version`
+into every generated `<snake>.gbuffer.frag`. Authored code never spells out the
+name-derived macro — which is what lets the `NewShader.saglsl` template work with
+create-time token replacement (the template can't know the final macro name).
 
 ### Runtime Cook Flow
 
@@ -2291,7 +2354,10 @@ EditorMode::LoadProject()
 
 Mid-frame UI triggers (create/reimport/delete/rename of `.saglsl` / `.saeffect`) go through
 `SceneRenderer::RequestProjectShaderReload`, which defers `ApplyProjectShaderTypes` to the next
-`RenderFrame` top (destroying pipelines mid-command-buffer is unsafe).
+`RenderFrame` top (destroying pipelines mid-command-buffer is unsafe). The cook itself is
+also deferred (#73-A): `EditorContext::onCookShaders` only sets `m_pendingShaderCook`, so an
+editor-initiated create/rename/delete coalesces with the FileWatcher event for the same write
+into a single `CookProjectShaders` run on the next Update tick (previously two full cooks).
 
 **Cook-path unification (Issue #90).** Both the load-time cook (`LoadProject`) and the
 reimport/create/delete/rename cook (`EditorMode::CookProjectShaders`, run via the CLI) now write to
@@ -2305,6 +2371,40 @@ mirroring the script `m_pendingRecompile` path.
 Outputs land in `cook_cache/shaders/` (SPV + refl) and `cook_cache/generated/shaders/` (dispatch GLSL).
 `cook_cache/.shader_manifest.json` records per-file mtime for incremental cook on subsequent loads.
 
+**Incremental correctness & error surfacing (#73-A).** The editor CLI cook no longer passes
+`--force`; `CompileEntry`'s up-to-date check compares SPV/refl mtimes against **both** the
+`.saglsl` source and `generated/shading_model_ids.glsl` (IDs shift when models are added or
+removed, and the SPV bakes its ID — `writeIfChanged` keeps the ids file's mtime stable when
+content is identical, so unchanged model sets skip recompiles). Duplicate `@ShadingModel`
+names are detected after parse (same snakeName ⇒ same macro): the first occurrence wins, the
+rest fail individually instead of corrupting `shading_model_ids.glsl` for every model. glslc
+stderr is captured per entry (`2> <stem>.frag.err`, invisible child console in GUI sessions
+otherwise); failures land in `CookResult::failures {model, source, message}` and in
+`cook_errors.txt` as tab-separated `source \t model \t message`, which
+`EditorMode::CookProjectShaders` (out-of-process) and `LoadProject` (in-process) both turn
+into Diagnostics-panel errors with the first real compiler message. `.saeffect` failures
+get the same treatment (#73-B) via `CompileEffectEntry`'s stderr capture and a **separate**
+manifest `spvOutDir/cook_errors_effects.txt` — `cook_errors.txt` is owned (written and
+cleared) by `CookDirectory` in `dispatchOutDir`, which `CookEffects` neither receives nor
+always runs alongside; `CookProjectShaders` reads both manifests ("Shader …" / "Effect …"
+diagnostics).
+
+**Stale-type pruning & rename migration (#106).** `CookDirectory` ends every cook with two
+more outputs: it prunes `<snake>.gbuffer.frag[.spv|.refl]` whose model is absent from the
+parsed entry set (source deleted or `@ShadingModel` renamed — otherwise
+`RegisterTypesFromShaderDir` would resurrect the stale type from the leftover `.refl` on
+every reload, keeping deleted models alive forever), and writes
+`generated/shaders/shader_models.txt` (tab-separated `source → model`). EditorMode
+snapshots that file before each cook and diffs after: the same source mapping to a
+different model means the user renamed `@ShadingModel`, which orphans `.samat` files
+referencing the old type name. A modal (`DrawShaderRenameModal`, drawn after `DrawPanels`)
+offers **Migrate All** — rewrites each referencing `.samat`'s `"type"`, force-recooks the
+`.samatc` (it stores the type too), evicts the cached instance — or **Ignore** (orphans
+render magenta until reassigned via the Inspector's shader combo). A rename is skipped
+when another source still provides the old model name (migration would steal live
+materials). Detection works across both cook paths (CLI + in-process LoadProject) and
+across editor restarts, since the mapping is a file.
+
 **Cross-directory vertex shader resolution.** Project material types live in
 `cook_cache/shaders/` but typically reference `deferred_geometry.vert` from the
 engine builtin dir. `FeatureInitContext` carries an `engineShaderDir` field as a
@@ -2317,7 +2417,11 @@ keeping `engineShaderDir` on the engine dir.
 ### Key Properties
 
 - `MaterialType::isProjectType = true` marks types that come from `.saglsl` files; `ClearProjectTypes()` removes them on project switch, preserving builtin types (PBR, DeferredLighting, etc.).
-- `SHADING_MODEL_PBR = 0` is always reserved; custom models are assigned IDs 1..N in alphabetical order.
+- `SHADING_MODEL_PBR = 0` is always reserved; custom models are assigned IDs 1..N in snake-name alphabetical order.
+- **Editor authoring flow (#73-A):** `CreateNewFile(Saglsl)` token-replaces `NewShader` in the template with the file stem **sanitized to a GLSL identifier** (spaces stripped); `CommitRename` syncs `@ShaderName`/`@ShadingModel` to the chosen name **only during the inline rename right after creation** (`m_renameIsCreation` — the header still holds the template placeholder then). Later renames never touch file contents: `.samat` references the model by type name, so renaming the model would orphan them. New materials author no `params` at all: an absent key means *inherit* — the renderer resolves it from the material layer below (see the layered-resolve entry), shader-reflection defaults apply only when no layer authors the key. `ParseSaglslMeta` no longer text-scans the UBO block, it only reads the header annotations.
+- **Material Inspector shader combo (#106):** the `.samat` Inspector's type field is a combo over registered types filtered by `usesMaterialParamsSSBO` (the surface-material contract — PBR + project `.saglsl`; Shadow/Skybox/post-fx excluded). Switching merges rather than resets: existing param values are kept (including keys the new type lacks — switching back restores them); missing keys stay absent = inherit. An unregistered type shows a red warning plus the same combo for one-click reassignment; `Save()` recooks the `.samatc` and evicts the cached instance. Explicit non-goal: UUID-based shader references (builtin types have no source asset/meta — name keys stay).
+- **Layered material resolve:** a `.samat` key that is present is *authored*; absent = inherit. `MaterialInstance` records the authored param/texture/render-state keys of its source JSON (`IsParamAuthored` etc.), and `BuildDrawList` resolves each submesh bottom-up: cooked submesh default → replacement material asset (mesh-renderer slot, else `MaterialOverrideComponent::materialAsset`) → entity-wide override maps → per-slot override maps. `InheritUnauthoredFromLower` copies the lower layer's authored values (name-matched across types; bindless texture indices are global so they transfer) into the effective param blob before the override maps stack on top — shader-reflection defaults apply only when no layer authors a field. `alphaMode`/`doubleSided` fall through the same way. The material Inspector shows unauthored keys as `(inherit)` with per-key `+`/`-` override buttons.
+- **Slot material field (#106):** `DrawMaterialField` (DrawerHelpers) is the shared material picker — grayed `(fallback)` label when unassigned, used by every Mesh Renderer slot row and MaterialOverrideDrawer's `materialAsset`. Slot rows are always assignable; `materialSlots` auto-grows on assignment (gaps stay invalid = cooked default) via an undoable whole-vector `CallbackCommand`, replacing the removed manual "+ Add Slot / − Remove Last" flow.
 - The vertex shader (`deferred_geometry.vert`) is shared — only the fragment shader differs.
 - `StellarAliaShaderCookLib` (`tools/shader_cook/`) is a static library linked by the editor, analogous to `StellarAliaImporter`.
 - **ShaderReflection metadata:** after compiling a `.saglsl` to `.refl`, `ShaderCookLib` injects `ShaderReflection::shadingModel` (from `@ShadingModel`) and `ShaderReflection::vertShader` (from `@VertShader`) into the sidecar file. `RegisterTypesFromShaderDir` reads these fields to auto-register each compiled shader as a `MaterialType` without any hardcoded list.
@@ -2368,8 +2472,10 @@ Phase 2: GPU
    VelocityPrepassFeature::AddPasses()← per-DrawItem prepass writing handles.velocity; gated on MotionBlur enabled (Issue #84)
    SSAOFeature::AddPasses()           ← GTAO 3-pass; disabled → fill 1.0
    DeferredLightingFeature::AddPasses() ← reads ssaoTex binding=5
+   SSRFeature::AddPasses()            ← sets handles.hdr = SSR_Composite when enabled
+   ForwardTransparentFeature::AddPasses() ← blends BLEND items into handles.hdr in place; R8 ReactiveMask (Issue #105)
    SelectionMaskFeature::AddPasses()
-   TAAFeature::AddPasses()            ← jittered resolve; sets handles.taaResolved
+   TAAFeature::AddPasses()            ← jittered resolve; sets handles.taaResolved + handles.hdr = PostTAA_HDR copy (Issue #105)
    AutoExposureFeature::AddPasses()   ← histogram(hdr) + adapt; 1-frame readback feeds tonemap exposure
    BloomFeature::AddPasses()          ← threshold reads taaResolved; composite writes handles.hdr
    DoFFeature::AddPasses()            ← 6 passes (CoC+4×blur+composite); sets handles.hdr = dofOutput when enabled
@@ -2509,7 +2615,7 @@ Each drawer lives in its own `.hpp`/`.cpp` file under `editor/ui/drawers/`:
 | `CameraDrawer` | `CameraComponent` |
 | `DirectionalLightDrawer`, `PointLightDrawer`, `SpotLightDrawer`, `AreaLightDrawer` | all four light types (in `LightDrawers.cpp`) |
 | `StaticMeshDrawer` | `StaticMeshComponent` |
-| `MeshRendererDrawer` | `MeshRendererComponent` |
+| `MeshRendererDrawer` | `MeshRendererComponent` — slot rows expand into the per-slot override editor (`SlotOverrideEditor.cpp`, Issue #103) |
 | `AnimatorDrawer` | `AnimatorComponent` |
 | `SkinnedMeshDrawer` | `SkinnedMeshComponent` |
 | `MaterialOverrideDrawer` | `MaterialOverrideComponent` |
@@ -2762,7 +2868,7 @@ keyboard-nav focus, so WASD camera movement still works when panels are focused.
    calls `Scene::MarkDirty(selected)`
 5. Caches `m_gizmoIsUsing` to suppress cursor capture while dragging
 6. Detects drag-end (`wasUsing && !m_gizmoIsUsing`) → calls `Scene::MarkMaterialDirty()` to
-   rebuild the BVH after a gizmo transform, keeping ray-picking AABBs in sync
+   rebuild the BVH after a gizmo transform, keeping culling AABBs in sync
 
 `TransformDrawer` uses the same pattern: it calls both `MarkDirty(entity)` and
 `MarkMaterialDirty()` whenever position/rotation/scale changes via the Inspector, so
@@ -2774,7 +2880,7 @@ clicking on a scaled entity in the viewport always uses the updated AABB.
 1. Creates a transparent full-screen `##viewport_interact` ImGui window (`NoBringToFrontOnFocus | NoFocusOnAppearing | NoDocking`) as a drop target and picking receiver
 2. Calls `ImGuizmo::SetAlternativeWindow(currentWindow)` so ImGuizmo's `IsHoveringWindow()` check accepts this window as valid — without this, the full-screen overlay makes `g.HoveredWindow` non-null and non-gizmo, causing `mbMouseOver=false` and disabling all gizmo handle hit-tests
 3. `BeginDragDropTargetCustom(win->Rect(), win->ID)` — accepts `"SAASSET"` `.glb/.gltf` drops (vanilla `BeginDragDropTarget` is no-op here since the overlay window submits no item); reads the typed `AssetDragPayload`, computes world spawn position via `RayHitHorizontalPlane(ray, 0)` (or 10-unit fallback), calls `SceneHierarchyPanel::TriggerAssetDrop(path, spawnPos)`
-4. Left-click picking: guarded by `!m_gizmoIsUsing && !ImGuizmo::IsOver() && IsWindowHovered()`; fires `SceneRenderer::RaycastScene(ray)` → `SceneHierarchyPanel::SetSelection(e)` or `ClearSelection()`, which in turn write into `EditorSelection`
+4. Left-click picking: guarded by `!m_gizmoIsUsing && !ImGuizmo::IsOver() && IsWindowHovered()`; billboard icons get a 2D screen-distance test first, otherwise `SceneRenderer::RequestIdPick(px, py)` queues a GPU ID pick (Issue #102). The result is consumed next frame via `TryConsumePickResult` and drives the two-level state machine: select entity → drill into material slot (see *Editor ID Picking*); `SceneHierarchyPanel::SetSelection(e)` / `ClearSelection()` write into `EditorSelection`
 
 `ScreenToWorldRay(sx, sy)` unprojects NDC via `inverse(proj * view)` at depth 0 and 1; `cam.proj` already has the Vulkan Y-flip so `ndcY = (sy/sh)*2−1` is used directly.
 
@@ -2798,8 +2904,14 @@ struct EditorOverlaySettings {
     bool drawGizmo;
     GizmoMode gizmoMode;       // Translate / Rotate / Scale
     bool gizmoWorldSpace;      // World vs Local (Scale always Local)
+    bool debugIdView;          // X-8: fullscreen submesh-ID coloring (Issue #102)
 };
 ```
+
+`debugIdView` lives in the SettingsPanel's separate **"Debug Views"** header (not
+under the Overlay master switch) and is mirrored to `SceneRenderer::SetDebugIdView`
+before the `enabled` early-return, so it keeps working during Play. Future X-8
+modes (lod / depth / random shading) extend that header.
 
 `enabled` is set to `false` by `OnPlayStateChanged(Playing/Paused)` so all overlay
 draw calls are skipped with zero overhead during gameplay.

@@ -94,104 +94,46 @@ static AssetID ReadSourceMeshUUID(const fs::path& sidecarPath) {
     return id;
 }
 
-// Metadata parsed from a .saglsl file header + UBO defaults.
+// Metadata parsed from a .saglsl file header.
 struct SaglslMeta {
-    std::string shaderName;        // @ShaderName  — display name / rename suggestion
-    std::string shadingModel;      // @ShadingModel — mat "type" key, matches registered MaterialType
-    std::string defaultParamsJson; // JSON content for the "params": { ... } block
+    std::string shaderName;   // @ShaderName  — display name / rename suggestion
+    std::string shadingModel; // @ShadingModel — mat "type" key, matches registered MaterialType
 };
 
-// Parses @ShaderName, @ShadingModel, and UBO member defaults from a .saglsl file.
+// Parses @ShaderName / @ShadingModel from a .saglsl header (before the first
+// section pragma). Param defaults are NOT parsed from text anymore — they come
+// from the cooked reflection via MaterialType::params (#73-A).
 static SaglslMeta ParseSaglslMeta(const fs::path& path) {
     SaglslMeta out;
     std::ifstream f(path);
     if (!f) return out;
 
     std::string line;
-    bool inGbuf     = false;
-    bool inUbo      = false;
-    bool paramsFirst = true;
-
     auto trimRight = [](std::string s) {
         while (!s.empty() && (s.back() == '\r' || s.back() == '\n' ||
                                s.back() == ' '  || s.back() == '\t'))
             s.pop_back();
         return s;
     };
-    auto trimLeft = [](const std::string& s) -> size_t {
-        size_t i = 0;
-        while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
-        return i;
-    };
 
     while (std::getline(f, line)) {
         line = trimRight(line);
+        if (line.find("#pragma sa_section") != std::string::npos) break;
 
-        // ── Header annotations (before the first #pragma) ────────────────────
-        if (!inGbuf) {
-            if (line.find("#pragma sa_section gbuffer") != std::string::npos) {
-                inGbuf = true;
-                continue;
-            }
-            // Extract the value following "@KEY " (strips optional surrounding quotes).
-            auto extract = [&](const char* key) -> std::string {
-                const auto pos = line.find(key);
-                if (pos == std::string::npos) return {};
-                size_t s = pos + std::strlen(key);
-                while (s < line.size() && (line[s] == ' ' || line[s] == '\t')) ++s;
-                std::string val = line.substr(s);
-                while (!val.empty() && (val.back() == ' ' || val.back() == '\t')) val.pop_back();
-                if (val.size() >= 2 && val.front() == '"' && val.back() == '"')
-                    val = val.substr(1, val.size() - 2);
-                return val;
-            };
-            if (const auto v = extract("@ShaderName");  !v.empty()) out.shaderName  = v;
-            if (const auto v = extract("@ShadingModel"); !v.empty()) out.shadingModel = v;
-            continue;
-        }
-
-        // ── GBuffer section — stop when section ends ─────────────────────────
-        if (line.find("#pragma sa_end_section") != std::string::npos) break;
-
-        if (!inUbo) {
-            if (line.find("uniform MaterialParams") != std::string::npos)
-                inUbo = true;
-            continue;
-        }
-        if (line.find('}') != std::string::npos) { inUbo = false; continue; }
-
-        // Member line: "    TYPE varName; // @Annotation(...) = default"
-        const auto semi = line.find(';');
-        if (semi == std::string::npos) continue;
-        const auto eq = line.find("= ", semi);  // default is in the comment, after ';'
-        if (eq == std::string::npos) continue;
-
-        std::string defVal = line.substr(eq + 2);
-        while (!defVal.empty() && (defVal.back() == ' ' || defVal.back() == '\t')) defVal.pop_back();
-        if (defVal.empty()) continue;
-
-        // Parse "TYPE varName" from the declaration (before ';').
-        const size_t di = trimLeft(line);
-        std::string decl = line.substr(di, semi - di);
-        const auto sp = decl.find(' ');
-        if (sp == std::string::npos) continue;
-        const std::string typeName = decl.substr(0, sp);
-        const size_t ni = sp + 1 + trimLeft(decl.substr(sp + 1));
-        const std::string varName = decl.substr(ni);
-        if (varName.empty()) continue;
-
-        std::string jsonVal;
-        if (typeName == "float" || typeName == "int" || typeName == "uint")
-            jsonVal = defVal;
-        else if (typeName == "vec2"  || typeName == "vec3"  || typeName == "vec4" ||
-                 typeName == "ivec2" || typeName == "ivec3" || typeName == "ivec4")
-            jsonVal = "[" + defVal + "]";
-        else
-            continue;
-
-        if (!paramsFirst) out.defaultParamsJson += ",\n";
-        out.defaultParamsJson += "    \"" + varName + "\": " + jsonVal;
-        paramsFirst = false;
+        // Extract the value following "@KEY " (strips optional surrounding quotes).
+        auto extract = [&](const char* key) -> std::string {
+            const auto pos = line.find(key);
+            if (pos == std::string::npos) return {};
+            size_t s = pos + std::strlen(key);
+            while (s < line.size() && (line[s] == ' ' || line[s] == '\t')) ++s;
+            std::string val = line.substr(s);
+            while (!val.empty() && (val.back() == ' ' || val.back() == '\t')) val.pop_back();
+            if (val.size() >= 2 && val.front() == '"' && val.back() == '"')
+                val = val.substr(1, val.size() - 2);
+            return val;
+        };
+        if (const auto v = extract("@ShaderName");  !v.empty()) out.shaderName  = v;
+        if (const auto v = extract("@ShadingModel"); !v.empty()) out.shadingModel = v;
     }
     return out;
 }
@@ -387,8 +329,18 @@ void AssetsPanel::CreateNewFile(CreateKind kind, const fs::path& dir)
                         tmpl.empty() ? "no registry" : tmpl.string());
             return;
         }
+        // The .saglsl token drives @ShadingModel, which must be a valid GLSL
+        // identifier — strip the spaces the default stem contains ("New Shader").
+        // Effects keep the raw stem: @Effect is a quoted display name.
+        std::string repl = destPath.stem().string();
+        if (kind == CreateKind::Saglsl) {
+            std::string ident;
+            for (const char c : repl)
+                if (std::isalnum(static_cast<unsigned char>(c)) || c == '_') ident += c;
+            repl = ident.empty() ? "NewShader" : ident;
+        }
         if (!IO::CopyTemplateReplacing(tmpl, destPath, isEffectKind ? "NewEffect" : "NewShader",
-                                       destPath.stem().string()))
+                                       repl))
             return;
     }
     SA_LOG_INFO("AssetsPanel: created '{}'", destPath.string());
@@ -433,13 +385,13 @@ void AssetsPanel::CreateNewFile(CreateKind kind, const fs::path& dir)
     SetSelectedPath(destPath);
     m_renamingPath     = destPath;
     m_renameFocusNext  = true;
+    m_renameIsCreation = true;
     std::snprintf(m_renameNameBuf, sizeof(m_renameNameBuf), "%s", defaultStem.c_str());
 }
 
 void AssetsPanel::CreateMatFromShader(const std::string& typeName,
                                       const fs::path& dir,
-                                      const std::string& baseName,
-                                      const std::string& defaultParamsJson)
+                                      const std::string& baseName)
 {
     // Choose a unique filename derived from the shader's base name.
     fs::path destPath = dir / (baseName + ".samat");
@@ -464,16 +416,11 @@ void AssetsPanel::CreateMatFromShader(const std::string& typeName,
     }
 
     root["type"] = typeName;
-    if (!defaultParamsJson.empty()) {
-        try { root["params"] = json::parse("{" + defaultParamsJson + "}"); }
-        catch (const json::exception& ex) {
-            SA_LOG_WARN("AssetsPanel: could not parse shader defaults for '{}': {}",
-                        typeName, ex.what());
-            root["params"] = json::object();
-        }
-    } else {
-        root["params"] = json::object();
-    }
+    // Author nothing: absent params/textures inherit from the layer below
+    // when the material is slotted (shader defaults when bottom-most). The
+    // inspector offers per-key override buttons.
+    root["params"]   = json::object();
+    root["textures"] = json::object();
 
     std::ofstream f(destPath);
     if (!f) {
@@ -496,6 +443,7 @@ void AssetsPanel::CreateMatFromShader(const std::string& typeName,
     SetSelectedPath(destPath);
     m_renamingPath    = destPath;
     m_renameFocusNext = true;
+    m_renameIsCreation = true;
     std::snprintf(m_renameNameBuf, sizeof(m_renameNameBuf), "%s", baseName.c_str());
 }
 
@@ -626,8 +574,67 @@ void AssetsPanel::CommitRename() {
         }
     }
 
+    // For .saglsl (#73-A): sync @ShaderName / @ShadingModel to the chosen name —
+    // but ONLY for the inline rename right after creation (m_renameIsCreation),
+    // where the header still holds the template's auto-derived placeholder.
+    // A later rename of an existing shader must not touch file contents:
+    // .samat files reference the model by type name, so silently renaming the
+    // model would orphan them. @ShadingModel must stay a valid GLSL identifier,
+    // hence the stem is sanitized the same way CreateNewFile does.
+    const bool isSaglsl = newPath.extension() == ".saglsl";
+    if (isSaglsl && m_renameIsCreation) {
+        const std::string oldStem = m_renamingPath.stem().string();
+        const std::string newStem = newPath.stem().string();
+        auto sanitize = [](const std::string& s) {
+            std::string r;
+            for (const char c : s)
+                if (std::isalnum(static_cast<unsigned char>(c)) || c == '_') r += c;
+            return r;
+        };
+        const std::string newIdent = sanitize(newStem);
+        if (oldStem != newStem && !newIdent.empty()) {
+            if (auto content = IO::ReadText(newPath)) {
+                bool modified = false;
+                // @ShaderName "<display>" — quoted display name.
+                {
+                    const auto tag = content->find("@ShaderName");
+                    const auto q1  = (tag != std::string::npos) ? content->find('"', tag) : std::string::npos;
+                    const auto q2  = (q1  != std::string::npos) ? content->find('"', q1 + 1) : std::string::npos;
+                    if (q2 != std::string::npos) {
+                        const std::string cur = content->substr(q1 + 1, q2 - q1 - 1);
+                        if (cur == oldStem || cur == sanitize(oldStem)) {
+                            content->replace(q1 + 1, q2 - q1 - 1, newStem);
+                            modified = true;
+                        }
+                    }
+                }
+                // @ShadingModel <ident> — unquoted, ends at whitespace/EOL.
+                {
+                    const auto tag = content->find("@ShadingModel");
+                    if (tag != std::string::npos) {
+                        size_t vs = tag + std::strlen("@ShadingModel");
+                        while (vs < content->size() && ((*content)[vs] == ' ' || (*content)[vs] == '\t')) ++vs;
+                        size_t ve = vs;
+                        while (ve < content->size() && (*content)[ve] != ' ' && (*content)[ve] != '\t'
+                               && (*content)[ve] != '\r' && (*content)[ve] != '\n') ++ve;
+                        if ((*content).substr(vs, ve - vs) == sanitize(oldStem)) {
+                            content->replace(vs, ve - vs, newIdent);
+                            modified = true;
+                        }
+                    }
+                }
+                if (modified) {
+                    IO::WriteText(newPath, *content);
+                    SA_LOG_INFO("AssetsPanel: synced @ShaderName/@ShadingModel to '{}' inside '{}'",
+                                newStem, newPath.filename().string());
+                }
+            }
+        }
+    }
+
     m_filePaneDirty    = true;
     m_renamingFromTree = false;
+    m_renameIsCreation = false;
     const fs::path renamedExt = newPath.extension();
     SetSelectedPath(newPath);
     m_renamingPath.clear();
@@ -677,6 +684,7 @@ void AssetsPanel::CreateNewDir(const fs::path& parent) {
     SetSelectedPath(dest);
     m_renamingPath    = dest;
     m_renameFocusNext = true;
+    m_renameIsCreation = true;
     std::snprintf(m_renameNameBuf, sizeof(m_renameNameBuf), "%s", base.c_str());
 }
 
@@ -1024,6 +1032,7 @@ void AssetsPanel::DrawDirPane(const fs::path& dir) {
                     m_renamingPath    = entry.path();
                     m_renameFocusNext = true;
                     m_renamingFromTree = true;
+                    m_renameIsCreation = false;
                     std::snprintf(m_renameNameBuf, sizeof(m_renameNameBuf), "%s", name.c_str());
                 }
                 if (ImGui::MenuItem("Delete")) {
@@ -1078,6 +1087,7 @@ void AssetsPanel::DrawFilePane() {
             m_renamingPath     = m_dblClickPath;
             m_renameFocusNext  = true;
             m_renamingFromTree = false;
+            m_renameIsCreation = false;
             const std::string stem = m_dblClickIsDir
                 ? m_dblClickPath.filename().string()
                 : m_dblClickPath.stem().string();
@@ -1253,6 +1263,7 @@ void AssetsPanel::DrawFilePane() {
                     m_renamingPath     = p;
                     m_renameFocusNext  = true;
                     m_renamingFromTree = false;
+                    m_renameIsCreation = false;
                     std::snprintf(m_renameNameBuf, sizeof(m_renameNameBuf), "%s", name.c_str());
                 }
                 if (ImGui::MenuItem("Delete")) {
@@ -1309,7 +1320,7 @@ void AssetsPanel::DrawFilePane() {
                             m_diagnostics->Push({DiagLevel::Warning, DiagSource::ShaderCook, msg, p});
                     } else {
                         CreateMatFromShader(meta.shadingModel, p.parent_path(),
-                                            p.stem().string(), meta.defaultParamsJson);
+                                            p.stem().string());
                     }
                 }
                 ImGui::Separator();
@@ -1317,6 +1328,7 @@ void AssetsPanel::DrawFilePane() {
                     m_renamingPath     = p;
                     m_renameFocusNext  = true;
                     m_renamingFromTree = false;
+                    m_renameIsCreation = false;
                     std::snprintf(m_renameNameBuf, sizeof(m_renameNameBuf),
                                   "%s", p.stem().string().c_str());
                 }
@@ -1522,67 +1534,6 @@ void AssetsPanel::DrawFilePane() {
     }
 }
 
-// Scan assetsRoot for the .saglsl whose @ShadingModel matches typeName.
-static SaglslMeta FindShaderForType(const std::string& typeName, const fs::path& assetsRoot) {
-    std::error_code ec;
-    for (const auto& de : fs::recursive_directory_iterator(
-             assetsRoot, fs::directory_options::skip_permission_denied, ec)) {
-        if (!de.is_regular_file(ec) || de.path().extension() != ".saglsl") continue;
-        const SaglslMeta m = ParseSaglslMeta(de.path());
-        if (m.shadingModel == typeName) return m;
-    }
-    return {};
-}
-
-// Read the .mat, find its shader, and add any missing UBO default params.
-// Preserves existing param values; only fills in params absent from the file.
-static void UpdateMatDefaultParams(const fs::path& matPath, const fs::path& assetsRoot) {
-    using json = nlohmann::json;
-
-    json root;
-    {
-        std::ifstream f(matPath);
-        if (!f) return;
-        try { root = json::parse(f); }
-        catch (const json::exception& ex) {
-            SA_LOG_WARN("AssetsPanel: JSON error in '{}': {}", matPath.filename().string(), ex.what());
-            return;
-        }
-    }
-
-    const std::string typeName = root.value("type", "");
-    if (typeName.empty()) return;
-
-    const SaglslMeta meta = FindShaderForType(typeName, assetsRoot);
-    if (meta.shadingModel.empty() || meta.defaultParamsJson.empty()) return;
-
-    // Wrap the fragment into a valid JSON object for parsing.
-    json defaults;
-    try { defaults = json::parse("{" + meta.defaultParamsJson + "}"); }
-    catch (...) {
-        SA_LOG_WARN("AssetsPanel: could not parse shader defaults for type '{}'", typeName);
-        return;
-    }
-
-    bool changed = false;
-    auto& params = root["params"];
-    if (!params.is_object()) { params = json::object(); changed = true; }
-
-    for (auto& [key, val] : defaults.items()) {
-        if (!params.contains(key)) {
-            params[key] = val;
-            changed = true;
-        }
-    }
-
-    if (!changed) return;
-
-    std::ofstream f(matPath);
-    if (!f) return;
-    f << root.dump(2) << '\n';
-    SA_LOG_INFO("AssetsPanel: updated params in '{}'", matPath.filename().string());
-}
-
 void AssetsPanel::ReimportFile(const fs::path& srcPath) {
     if (m_cookCacheDir.empty()) {
         SA_LOG_WARN("AssetsPanel::ReimportFile — no cook cache dir configured");
@@ -1613,7 +1564,6 @@ void AssetsPanel::ReimportFile(const fs::path& srcPath) {
     } else if (meta.type == "Texture") {
         Import::CookTexture(entry, outDir, /*force=*/true);
     } else if (meta.type == "Material") {
-        UpdateMatDefaultParams(srcPath, m_assetsRoot);
         Import::CookStandaloneMaterial(srcPath, meta.uuid, outDir, /*force=*/true);
     } else if (meta.type == "Skeleton" || meta.type == "Animation") {
         const AssetID sourceMeshUUID = ReadSourceMeshUUID(srcPath);

@@ -1109,7 +1109,7 @@ void VulkanDevice::UploadTextureData(RHITextureHandle handle,
         region.imageSubresource.mipLevel       = 0;
         region.imageSubresource.baseArrayLayer = 0;
         region.imageSubresource.layerCount     = layers;
-        region.imageExtent                     = {width, height, 1};
+        region.imageExtent                     = {width, height, desc.depth};
         vkCmdCopyBufferToImage(cmd, stagingBuf, img,
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
@@ -2046,6 +2046,7 @@ RHIMemoryStats VulkanDevice::GetMemoryStats() const {
             case RHIFormat::RGBA8_UNORM: case RHIFormat::RGBA8_SRGB:
             case RHIFormat::BGRA8_UNORM: case RHIFormat::BGRA8_SRGB:
             case RHIFormat::RG16F:       case RHIFormat::R32F:
+            case RHIFormat::R32_UINT:
             case RHIFormat::D32F:        case RHIFormat::D24_S8:  bpp = 4; break;
             case RHIFormat::RGBA16F:     case RHIFormat::RG32F:   bpp = 8; break;
             case RHIFormat::RGBA32F:                              bpp = 16; break;

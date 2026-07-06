@@ -1,0 +1,138 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+
+// Volumetric Fog — Inject (Issue #49, pass 1/3).
+//
+// For every froxel: evaluate the participating medium (global density with
+// optional exponential height falloff) and the in-scattered light at its
+// centre — directional light with a single shadow-map tap (god rays), point /
+// spot lights with the same analytic attenuation as pbr_shading.glsl, plus an
+// SH L0 ambient term. Henyey-Greenstein phase for all punctual lights; area
+// lights are skipped (no cheap analytic volume scattering).
+//
+// Output u_Media: rgb = σs · L_scat  (source term),  a = σt (extinction).
+//
+// set=1 (frame): camera matrices + lights + SH.
+// set=2: shadow map + media volume UAV.
+#include "frame_uniforms.glsl"
+#include "volumetric_common.glsl"
+
+layout(set = 2, binding = 0) uniform sampler2D t_FogShadowMap;
+layout(set = 2, binding = 1, rgba16f) uniform writeonly image3D u_Media;
+
+layout(push_constant) uniform PC {
+    float density;        // global extinction σt (1/m)
+    float anisotropy;     // HG g [-0.9, 0.9]
+    float fogFar;         // froxel volume far end (m)
+    float heightBase;     // height fog reference y (m)
+    float heightFalloff;  // 0 = uniform; >0 exponential falloff (1/m)
+    float ambient;        // SH ambient scatter factor
+    float shadowValid;    // 0 = shadow map is a dummy — skip the tap
+    int   sunIndex;       // light index of the sun (shadowed scattering); -1 = none
+    vec4  albedo;         // rgb = σs/σt
+    // Step 8: 1 = jitter the per-froxel sample depth (needs TAA to converge);
+    // 0 = sample slice centres (stable banding, used when TAA is off).
+    float temporalJitter;
+    float _pad1, _pad2, _pad3;
+} pc;
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// View-space Z from an NDC depth (independent of screen xy for a perspective proj).
+float NdcToViewZ(float ndcZ) {
+    vec4 c = u_Frame.invProj * vec4(0.0, 0.0, ndcZ, 1.0);
+    return c.z / c.w;
+}
+
+// Single-tap directional shadow test (no PCF — the froxel volume is coarse
+// and TAA denoises; matches ShadowFactorPCF's coordinate math otherwise).
+float ShadowTap(vec3 worldPos) {
+    vec4 lc = u_Frame.lightSpaceMatrix * vec4(worldPos, 1.0);
+    vec3 p  = lc.xyz / lc.w;
+    vec2 uv = p.xy * 0.5 + 0.5;
+    if (uv.x <= 0.0 || uv.x >= 1.0 || uv.y <= 0.0 || uv.y >= 1.0 || p.z > 1.0)
+        return 1.0;
+    return (p.z - u_Frame.shadowBias > texture(t_FogShadowMap, uv).r) ? 0.0 : 1.0;
+}
+
+void main() {
+    ivec3 size = imageSize(u_Media);
+    ivec3 gid  = ivec3(gl_GlobalInvocationID);
+    if (any(greaterThanEqual(gid, size))) return;
+
+    // Froxel-centre world position: the camera-near and camera-far ray
+    // endpoints are interpolated linearly — valid because the view transform
+    // is affine, so world-space lerp is linear in view depth too.
+    vec2  uv = (vec2(gid.xy) + 0.5) / vec2(size.xy);
+    vec3  W0 = ReconstructWorldPos(uv, 0.0, u_Frame.invViewProj);
+    vec3  W1 = ReconstructWorldPos(uv, 1.0, u_Frame.invViewProj);
+    float d0 = -NdcToViewZ(0.0);
+    float d1 = -NdcToViewZ(1.0);
+    // Step 8: dither the sample depth inside the slice — shadow visibility is
+    // evaluated at one point per froxel, so a shadow edge quantises to slice
+    // granularity (visible banding). IGN + golden-ratio frame advance turns the
+    // banding into noise for TAA to average out.
+    float ign = fract(52.9829189 * fract(0.06711056 * float(gid.x)
+                                       + 0.00583715 * float(gid.y)));
+    float offset = mix(0.5, fract(ign + float(u_Frame.frameIndex) * 0.61803398875),
+                       pc.temporalJitter);
+    float d  = VolFogSliceToDepth(float(gid.z) + offset, float(size.z), pc.fogFar);
+    vec3  worldPos = mix(W0, W1, clamp((d - d0) / max(d1 - d0, 1e-4), 0.0, 1.0));
+
+    float dens = pc.density;
+    if (pc.heightFalloff > 0.0)
+        dens *= exp(-pc.heightFalloff * max(worldPos.y - pc.heightBase, 0.0));
+    float sigmaT = dens;
+    vec3  sigmaS = pc.albedo.rgb * dens;
+
+    vec3 V = normalize(u_Frame.cameraPos - worldPos);
+
+    vec3 L = vec3(0.0);
+    for (int i = 0; i < u_Lights.lightCount; ++i) {
+        LightEntry light = u_Lights.lights[i];
+        if (light.type == 3) continue;
+
+        if (light.type == 0) {
+            vec3 dirN = normalize(light.direction);
+            // Only the sun samples the shadow map — it is rendered from the
+            // sun's lightSpaceMatrix; other directional lights scatter unshadowed.
+            float vis = (i == pc.sunIndex && pc.shadowValid > 0.5) ? ShadowTap(worldPos) : 1.0;
+            // Medium self-shadow: transmittance of the light path through the
+            // fog itself, closed form for exponential height density —
+            //   τ = σt(y)·min(1/k, fogFar)/ω.y
+            // (1/k = equivalent thickness of the exponential layer; the uniform
+            // limit k→0 clamps the path to the rendered volume extent instead).
+            float wy   = max(-dirN.y, 0.01);   // direction toward the sun
+            float hSun = max(worldPos.y - pc.heightBase, 0.0);
+            float Leq  = (pc.heightFalloff > 0.0)
+                             ? min(1.0 / pc.heightFalloff, pc.fogFar) : pc.fogFar;
+            vis *= exp(-pc.density * exp(-pc.heightFalloff * hSun) * Leq / wy);
+            float ph  = VolFogPhaseHG(dot(dirN, V), pc.anisotropy);
+            L += light.color * light.intensity * vis * ph;
+        } else {
+            vec3  toLight = light.position - worldPos;
+            float dist    = length(toLight);
+            vec3  Ldir    = toLight / (dist + EPSILON);
+
+            // Same falloff as pbr_shading.glsl direct loop.
+            float t   = clamp(dist / light.range, 0.0, 1.0);
+            float att = clamp(1.0 - t * t * t * t, 0.0, 1.0) / (dist * dist + 1.0);
+
+            if (light.type == 2) {
+                float cosAngle = dot(-Ldir, normalize(light.direction));
+                float cosInner = cos(light.innerAngle);
+                float cosOuter = cos(light.outerAngle);
+                att *= clamp((cosAngle - cosOuter) / (cosInner - cosOuter + EPSILON),
+                             0.0, 1.0);
+            }
+            float ph = VolFogPhaseHG(dot(-Ldir, V), pc.anisotropy);
+            L += light.color * light.intensity * att * ph;
+        }
+    }
+
+    // Isotropic ambient: mean incoming radiance ≈ SH L0 · Y00. The isotropic
+    // phase integrates to 1 over the sphere, so no extra 1/4π factor.
+    L += max(u_Frame.irrSH[0].rgb, vec3(0.0)) * 0.2820948 * pc.ambient;
+
+    imageStore(u_Media, gid, vec4(sigmaS * L, sigmaT));
+}

@@ -95,10 +95,10 @@ private:
     void RenderCreateMenuContents(const std::filesystem::path& dir);
 
     // Create a .mat from a .saglsl shader, then enter inline rename.
+    // Default params come from the registered MaterialType (cooked reflection).
     void CreateMatFromShader(const std::string& typeName,
                              const std::filesystem::path& dir,
-                             const std::string& baseName,
-                             const std::string& defaultParamsJson = {});
+                             const std::string& baseName);
 
     // Rename m_renamingPath to m_renameNameBuf + original extension.
     void CommitRename();
@@ -168,6 +168,9 @@ private:
     char                  m_renameNameBuf[256] = {};
     bool                  m_renameFocusNext    = false;
     bool                  m_renamingFromTree   = false; // true = rename triggered from left tree
+    bool                  m_renameIsCreation   = false; // true = naming a just-created file:
+                                                        // only then does CommitRename sync
+                                                        // .saglsl @ShaderName/@ShadingModel
 
     // ── Delete confirmation ────────────────────────────────────────────────
     std::filesystem::path m_pendingDeletePath;

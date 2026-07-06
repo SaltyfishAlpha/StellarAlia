@@ -35,10 +35,13 @@ inline void DrawAssetID(const char* label, const AssetID& id) {
 // filterType — "Mesh", "Texture", etc.; nullptr or "" = show all.
 // iconCache  — when set, popup entries with image sources get a thumbnail
 //              (Issue #101: texture pickers on material / override drawers).
+// emptyLabel — shown (grayed) when id is invalid; nullptr = "(none)". Lets
+//              callers surface fallback semantics, e.g. "(mesh default)" (#106).
 inline bool DrawAssetIDField(const char* label, AssetID& id,
                              const char* filterType,
                              const Resource::AssetRegistry* registry,
-                             EditorIconCache* iconCache = nullptr)
+                             EditorIconCache* iconCache = nullptr,
+                             const char* emptyLabel = nullptr)
 {
     if (!registry) {
         DrawAssetID(label, id);
@@ -48,7 +51,7 @@ inline bool DrawAssetIDField(const char* label, AssetID& id,
     ImGui::PushID(label);
     bool changed = false;
 
-    const char* btnLabel = "(none)";
+    const char* btnLabel = (emptyLabel && emptyLabel[0]) ? emptyLabel : "(none)";
     std::string nameStorage;
     if (id.IsValid()) {
         if (const auto* e = registry->FindByID(id)) {
@@ -60,11 +63,22 @@ inline bool DrawAssetIDField(const char* label, AssetID& id,
         }
     }
 
-    ImGui::TextUnformatted(label);
-    ImGui::SameLine();
+    // "##" prefix = hidden label (ImGui convention) — TextUnformatted would
+    // print it literally (Issue #103: slot rows carry the label on the TreeNode).
+    if (!(label[0] == '#' && label[1] == '#')) {
+        ImGui::TextUnformatted(label);
+        ImGui::SameLine();
+    }
     const float clearW   = id.IsValid() ? 26.f : 0.f;
     const float btnWidth = std::max(10.f, ImGui::GetContentRegionAvail().x - clearW);
-    if (ImGui::Button(btnLabel, ImVec2(btnWidth, 0)))
+    const bool grayed = !id.IsValid();
+    if (grayed)
+        ImGui::PushStyleColor(ImGuiCol_Text,
+                              ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+    const bool btnClicked = ImGui::Button(btnLabel, ImVec2(btnWidth, 0));
+    if (grayed)
+        ImGui::PopStyleColor();
+    if (btnClicked)
         ImGui::OpenPopup("##asset_pick");
 
     // Drop target on the picker button — accept SAASSET payload from AssetsPanel.
@@ -149,6 +163,21 @@ inline bool DrawAssetIDField(const char* label, AssetID& id,
 
     ImGui::PopID();
     return changed;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DrawMaterialField (#106) — the shared material-asset picker: MeshRenderer
+// slot rows and MaterialOverrideDrawer's entity-wide replacement both use it,
+// so "unassigned falls back to <X>" reads the same everywhere. Invalid id +
+// grayed fallback label = inherit; picking/dropping a .samat assigns it.
+// ─────────────────────────────────────────────────────────────────────────────
+inline bool DrawMaterialField(const char* label, AssetID& id,
+                              const char* fallbackName,
+                              const Resource::AssetRegistry* registry)
+{
+    const std::string fb = std::string("(") +
+        ((fallbackName && fallbackName[0]) ? fallbackName : "default") + ")";
+    return DrawAssetIDField(label, id, "Material", registry, nullptr, fb.c_str());
 }
 
 // Render a small "×" remove button at the right edge; returns true when clicked.

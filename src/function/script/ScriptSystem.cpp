@@ -206,8 +206,7 @@ bool ScriptSystem::LoadBridgeFunctions(void* loadAndGetFn) {
         && load("Unload",              reinterpret_cast<void**>(&m_fnUnload))
         && load("GetClassSchemaBlob",   reinterpret_cast<void**>(&m_fnGetSchemaBlob))
         && load("GetClassDefaultsBlob", reinterpret_cast<void**>(&m_fnGetDefaultsBlob))
-        && load("ApplyFieldValues",     reinterpret_cast<void**>(&m_fnApplyFields))
-        && load("CaptureFieldValues",   reinterpret_cast<void**>(&m_fnCaptureFields));
+        && load("ApplyFieldValues",     reinterpret_cast<void**>(&m_fnApplyFields));
 }
 
 // ── OnPlayStart ───────────────────────────────────────────────────────────────
@@ -547,17 +546,6 @@ void ScriptSystem::InjectSingleField(uint64_t entityId, const std::string& name,
     EncodeSingleField(name, toEncode, blob);
     if (blob.empty()) return;
     m_fnApplyFields(entityId, blob.data(), static_cast<int>(blob.size()));
-}
-
-void ScriptSystem::CaptureFieldValues(uint64_t entityId, ScriptComponent& sc) {
-    if (!m_fnCaptureFields) return;
-    int needed = m_fnCaptureFields(entityId, nullptr, 0);
-    if (needed >= 0) return;
-    const int blobSize = -needed;
-    std::vector<std::byte> blob(static_cast<size_t>(blobSize));
-    int written = m_fnCaptureFields(entityId, blob.data(), blobSize);
-    if (written != blobSize) return;
-    DecodeFieldValues(blob.data(), blob.size(), sc.fields);
 }
 
 } // namespace StellarAlia

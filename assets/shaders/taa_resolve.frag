@@ -7,6 +7,7 @@ layout(set = 2, binding = 0) uniform sampler2D t_Current;   // RGBA16F, current 
 layout(set = 2, binding = 1) uniform sampler2D t_History;   // RGBA16F, previous TAA result
 layout(set = 2, binding = 2) uniform sampler2D t_Depth;     // D32F, unused after Issue #85 but kept for layout stability
 layout(set = 2, binding = 3) uniform sampler2D t_Velocity;  // RG16F, unjittered per-pixel velocity (Issue #85)
+layout(set = 2, binding = 4) uniform sampler2D t_Reactive;  // R8, transparent coverage (Issue #105; hdr-filler + weight 0 when absent)
 
 layout(location = 0) in  vec2 v_TexCoord;
 layout(location = 0) out vec4 out_Color;
@@ -16,6 +17,7 @@ layout(push_constant) uniform PC {
     float blendMotion;    // history lerp ratio toward current in motion regions  (e.g. 0.5)
     float historyValid;   // 0.0 = first frame or after resize → output current unmodified
     float antiGhosting;   // 1.0 = enable 3×3 neighborhood AABB clamp; 0.0 = skip
+    float blendReactive;  // blend floor at full transparent coverage (Issue #105); 0 = disabled
 };
 
 // ── 3×3 YCoCg neighborhood AABB ──────────────────────────────────────────────
@@ -79,6 +81,12 @@ void main() {
     // velLen in [0, ~1]: 0 = perfectly still, 1 = large motion
     float velLen = clamp(length(vel) * 100.0, 0.0, 1.0);
     float blend  = mix(blendStatic, blendMotion, velLen);
+
+    // Issue #105: transparents write no velocity, so their history reprojects
+    // by the background's motion and ghosts. Raise the blend floor by their
+    // coverage instead of discarding history outright — static transparents
+    // still converge jitter AA.
+    blend = max(blend, texture(t_Reactive, v_TexCoord).r * blendReactive);
 
     out_Color = mix(historyClamped, current, blend);
 }

@@ -16,10 +16,20 @@ struct CookConfig {
     bool                     force = false; // recompile even when outputs are newer
 };
 
+// One failed model with a human-readable reason — mirrored into
+// cook_errors.txt (tab-separated: source, model, message) so the out-of-process
+// editor cook can surface it in the Diagnostics panel.
+struct CookFailure {
+    std::string model;    // model name (file stem when parsing failed)
+    std::string source;   // source .saglsl path
+    std::string message;  // single-line reason: first glslc error, duplicate info, …
+};
+
 struct CookResult {
     bool                     success     = true;
     int                      modelCount  = 0;    // number of custom shading models found
     std::vector<std::string> failedModels;        // model names that failed compilation
+    std::vector<CookFailure> failures;            // same entries, with details
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -168,25 +168,6 @@ public static unsafe class ScriptBridgeEntry
         }
     }
 
-    /// Capture current field values from the C# instance bound to `entityId`.
-    /// Same two-step capacity protocol as GetClassSchemaBlob.
-    [UnmanagedCallersOnly]
-    public static int CaptureFieldValues(ulong entityId, IntPtr outBuf, int capacity) {
-        try {
-            if (s_loader is null) return 0;
-            object? instance = s_loader.GetInstance(entityId);
-            if (instance is null) return 0;
-
-            byte[] blob = FieldReflector.CaptureFieldValues(instance);
-            if (blob.Length > capacity) return -blob.Length;
-            Marshal.Copy(blob, 0, outBuf, blob.Length);
-            return blob.Length;
-        } catch (Exception ex) {
-            StellarAlia.Log.Error($"[Bridge] CaptureFieldValues entity={entityId}: {ex.Message}");
-            return 0;
-        }
-    }
-
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private static string[] MarshalStringArray(IntPtr ptr, int count) {

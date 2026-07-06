@@ -153,6 +153,32 @@ public:
     // Set the screen-space dilation radius for the selection outline (pixels).
     void SetOutlineWidth(float px) { m_selectionOutlineWidth = px; }
 
+    // Issue #102: highlight a single material slot (submesh) instead of the
+    // whole selection subtree. slot < 0 or entt::null disables; takes priority
+    // over SetSelectedEntity in the selection mask when active.
+    void SetHighlightSlot(entt::entity e, int32_t slot) {
+        m_highlightEntity = e;
+        m_highlightSlot   = slot;
+    }
+
+    // ── Issue #102: GPU ID picking ────────────────────────────────────────────
+    // Request an ID pick at a swapchain pixel: the next RenderFrame records a
+    // one-shot pass writing each DrawItem's 1-based index to an R32_UINT buffer
+    // (own depth → nearest surface wins), read back after the frame completes.
+    void RequestIdPick(uint32_t px, uint32_t py);
+
+    struct PickResult {
+        entt::entity entity       = entt::null;
+        uint32_t     submeshIndex = 0;
+        bool         hit          = false;   // false = clicked background
+    };
+    // Returns true exactly once per completed pick and fills `out`.
+    bool TryConsumePickResult(PickResult& out);
+
+    // X-8 debug view: render the ID pass every frame and composite it as
+    // per-submesh hash colors over the swapchain. Zero cost when off.
+    void SetDebugIdView(bool on) { m_debugIdView = on; }
+
     // Enable or disable the infinite XZ grid overlay.
     void SetInfiniteGrid(bool enabled) { m_infiniteGrid = enabled; }
 
@@ -220,12 +246,6 @@ public:
     // then skips velocityDescSet allocation per entity.
     [[nodiscard]] RHI::RHIDescLayoutHandle GetVelocityDescLayout() const;
 
-    // Ray-cast against the scene BVH (render mesh AABBs).
-    // Returns the nearest hit entity, or entt::null when nothing was hit.
-    // Intended for editor mouse-picking (Issue #30).
-    [[nodiscard]] entt::entity RaycastScene(const Core::Ray& ray,
-                                            float maxDist = 1e30f) const;
-
 private:
     // Issue #56: scene depth carries a stencil plane (deferred-lighting stencil
     // masking). Shadow map stays D32F. Swap to D32F_S8 here if D24 precision
@@ -234,6 +254,8 @@ private:
 
     struct DrawItem {
         entt::entity                      entity;
+        // Issue #102: index into GPUMesh::subMeshes (== MeshRenderer slot index).
+        uint32_t                          submeshIndex = 0;
         glm::mat4                         subLocalTransform;
         RHI::RHIBufferHandle              vertexBuffer;
         RHI::RHIBufferHandle              indexBuffer;
@@ -257,7 +279,8 @@ private:
         // skipCull = true for skinned meshes (animated AABB not computed).
         glm::vec3                         localAABBMin { 1e30f};
         glm::vec3                         localAABBMax {-1e30f};
-        // World-space AABB after model transform. Used by RaycastScene Phase B.
+        // World-space AABB after model transform. Used by the transparent
+        // pass's back-to-front centroid sort (Issue #56).
         glm::vec3                         worldAABBMin { 1e30f};
         glm::vec3                         worldAABBMax {-1e30f};
         bool                              skipCull  = false;
@@ -374,12 +397,11 @@ private:
         RHI::RHIDescSetHandle m_gbDescSet;
     };
 
-    // Issue #56 — forward translucency (BLEND materials). Runs after TAA and
-    // before the AfterTAA ScreenEffect anchor:
-    //   1. copies taaResolved into a fresh transient (never blend into the TAA
-    //      ping-pong history in place — next frame reads it as history),
-    //   2. draws BLEND items back-to-front with alpha blending, depth read-only.
-    // Whole feature skips (m_outputHandle invalid) when no BLEND item is visible.
+    // Issue #56 — forward translucency (BLEND materials). Issue #105 moved it
+    // BEFORE TAA (after SSR): blends in place into handles.hdr (a plain
+    // transient at that point, safe to RMW) so transparents get anti-aliased
+    // with the rest of the frame, and renders an R8 coverage mask that TAA uses
+    // to cut history weight on transparent pixels (no velocity → would ghost).
     class ForwardTransparentFeature final : public RenderFeature {
         friend class SceneRenderer;
     public:
@@ -388,14 +410,22 @@ private:
                        const RendererHandles& handles, const entt::registry& reg,
                        uint32_t w, uint32_t h) override;
 
-        // Set when the feature ran; RenderFrame redirects hdr + taaResolved here.
-        RGTextureHandle m_outputHandle;
+        // Set when BLEND items were drawn this frame AND TAA is enabled;
+        // TAAFeature reads it as the reactive mask (invalid → no reactivity).
+        RGTextureHandle m_reactiveMask;
 
     private:
-        ShaderProgram*        m_program        = nullptr;  // deferred_geometry.vert + forward_transparent.frag
-        ShaderProgram*        m_skinnedProgram = nullptr;  // deferred_geometry_skinned.vert + same frag
-        ShaderProgram*        m_copyProgram    = nullptr;  // fullscreen_tri + forward_copy.frag
-        RHI::RHIDescSetHandle m_copyDescSet;               // copy set=2 (t_Source)
+        static void DrawItems(RHI::IRHICommandList& cmd,
+                              const std::vector<std::pair<float, const DrawItem*>>& items,
+                              const RHI::RHIPipelineHandle* pipes,
+                              const entt::registry& reg,
+                              RHI::RHIDescSetHandle bindlessSet,
+                              RHI::RHIDescSetHandle frameSet);
+
+        ShaderProgram*        m_program                = nullptr;  // deferred_geometry.vert + forward_transparent.frag
+        ShaderProgram*        m_skinnedProgram         = nullptr;  // deferred_geometry_skinned.vert + same frag
+        ShaderProgram*        m_reactiveProgram        = nullptr;  // deferred_geometry.vert + transparent_reactive.frag
+        ShaderProgram*        m_reactiveSkinnedProgram = nullptr;  // skinned variant
     };
 
     // Screen Space Reflections (Issue #48): single compute pass after
@@ -445,6 +475,41 @@ private:
         uint32_t              m_hizW = 0, m_hizH = 0, m_hizMips = 0;
     };
 
+    // Volumetric fog (Issue #49): froxel single scattering. Inject evaluates
+    // media + local light per froxel, Scatter integrates transmittance front-to-
+    // back, Apply composites hdr·T + inscatter (after SSR, pre-TAA).
+    class VolumetricFogFeature final : public RenderFeature {
+        friend class SceneRenderer;
+    public:
+        void OnInit    (const FeatureInitContext& ctx) override;
+        void OnShutdown(RHI::IRHIDevice* device)       override;
+        void AddPasses (SceneRenderer& renderer, const FrameContext& ctx,
+                        const RendererHandles& handles, const entt::registry& reg,
+                        uint32_t w, uint32_t h) override;
+
+        // Set by AddPasses when enabled; RenderFrame redirects handles.hdr to this.
+        RGTextureHandle m_outputHandle;
+        // Integrated froxel volume of the current frame (invalid when disabled).
+        // ForwardTransparentFeature declares an RG Read on it (Step 9).
+        RGTextureHandle m_integratedHandle;
+
+        bool      m_enabled       = false;
+        float     m_density       = 0.02f;
+        glm::vec3 m_albedo        = {0.9f, 0.9f, 0.9f};
+        float     m_anisotropy    = 0.6f;
+        float     m_distance      = 64.f;
+        float     m_heightBase    = 0.f;
+        float     m_heightFalloff = 0.f;
+        float     m_ambient       = 0.2f;
+    private:
+        ComputeProgram*       m_injectProg  = nullptr;  // owned by ProgramCache
+        ComputeProgram*       m_scatterProg = nullptr;
+        ShaderProgram*        m_applyProg   = nullptr;
+        RHI::RHIDescSetHandle m_injectSet;   // set=2 (shadow map + media UAV)
+        RHI::RHIDescSetHandle m_scatterSet;  // set=0 (media + integrated UAV)
+        RHI::RHIDescSetHandle m_applySet;    // set=2 (hdr + depth + volume)
+    };
+
     // GTAO ambient occlusion: 3-pass (main + H blur + V blur).
     // Always runs: when disabled writes 1.0 via a single fast pass.
     class SSAOFeature final : public RenderFeature {
@@ -483,6 +548,11 @@ private:
 
         // Set by AddPasses each frame; RenderFrame redirects handles.taaResolved to this.
         RGTextureHandle           m_outputHandle;
+        // Issue #105: transient copy of the resolve (PostTAA_HDR); RenderFrame
+        // redirects handles.hdr here. The copy exists because downstream RMW
+        // writers (BloomComposite UAV add) must never touch the ping-pong
+        // history in place — next frame reads it back (progressive-brightness).
+        RGTextureHandle           m_postTaaHandle;
 
         bool  m_enabled       = false;
         float m_blendStatic   = 0.1f;
@@ -491,6 +561,8 @@ private:
     private:
         MaterialType*         m_taaType = nullptr;
         RHI::RHIDescSetHandle m_resolveSet;  // set=1: binding0=current, binding1=history, binding2=depth
+        ShaderProgram*        m_copyProgram = nullptr;  // fullscreen_tri + forward_copy.frag (Issue #105)
+        RHI::RHIDescSetHandle m_copyDescSet;            // copy set=2 (t_Source = historyWrite)
         // Ping-pong history textures: prevIndex is read, currIndex is written each frame.
         // The resolve pass writes directly to history[currIndex]; m_outputHandle = rgHistoryWrite.
         RHI::RHITextureHandle m_historyTex[2];
@@ -577,6 +649,25 @@ private:
         SceneRenderer* m_owner          = nullptr;
         MaterialType*  m_type           = nullptr;
         ShaderProgram* m_skinnedProgram = nullptr;  // selection_mask_skinned.vert (ProgramCache-owned)
+    };
+
+    // Issue #102: editor mouse picking. When a pick is pending, renders every
+    // DrawItem's 1-based index into the R32_UINT pick buffer with its own
+    // transient depth; SceneRenderer resolves the readback after the frame.
+    class IdPickFeature final : public RenderFeature {
+    public:
+        explicit IdPickFeature(SceneRenderer* owner) : m_owner(owner) {}
+        void OnInit   (const FeatureInitContext& ctx) override;
+        void AddPasses(SceneRenderer& renderer, const FrameContext& ctx,
+                       const RendererHandles& handles, const entt::registry& reg,
+                       uint32_t w, uint32_t h) override;
+    private:
+        SceneRenderer*        m_owner          = nullptr;
+        MaterialType*         m_type           = nullptr;
+        ShaderProgram*        m_skinnedProgram = nullptr;  // id_pass_skinned.vert
+        // X-8 debug view: fullscreen palette composite of the ID buffer.
+        MaterialType*         m_viewType       = nullptr;  // id_debug_view.frag
+        RHI::RHIDescSetHandle m_viewDescSet;
     };
 
     // Fullscreen infinite XZ grid rendered at the Y=0 plane.
@@ -822,6 +913,10 @@ private:
     GpuLtcBake                 m_ltcBake;
 
     std::unique_ptr<MaterialInstance>    m_defaultMaterial;
+    // #106: magenta stand-in when a material ID is VALID but LoadMaterial fails
+    // (unknown type / missing .samatc / JSON error) — distinguishes broken
+    // references from the neutral-gray "no material assigned" default.
+    std::unique_ptr<MaterialInstance>    m_errorMaterial;
     std::vector<DrawItem>                m_drawItems;
 
     // Spatial acceleration — built once per BuildDrawList, queried per frame.
@@ -837,6 +932,7 @@ private:
     VelocityPrepassFeature*  m_velocityPrepassFeature  = nullptr;
     DeferredLightingFeature* m_deferredLightingFeature = nullptr;
     SSRFeature*              m_ssrFeature              = nullptr;
+    VolumetricFogFeature*    m_volFogFeature           = nullptr;  // Issue #49
     SkyboxFeature*           m_skyboxFeature           = nullptr;
     BloomFeature*         m_bloomFeature   = nullptr;
     SSAOFeature*          m_ssaoFeature    = nullptr;
@@ -877,14 +973,37 @@ private:
 
     // ── Debug overlay ─────────────────────────────────────────────────────────
     DebugDraw*  m_debugDraw      = nullptr;  // set by SetDebugDraw; not owned
-    glm::mat4   m_currentViewProj = glm::mat4(1.f);  // updated each RenderFrame
+    glm::mat4   m_currentViewProj = glm::mat4(1.f);  // jittered; culling + transparent sort
+    // Issue #107: debug lines draw after TAA and must rasterise unjittered —
+    // the jittered VP made them wobble ±0.5px with no resolve to average it.
+    glm::mat4   m_currentUnjitteredViewProj = glm::mat4(1.f);
 
     // ── Infinite grid ─────────────────────────────────────────────────────────
     bool m_infiniteGrid = false;
 
     // ── Selection outline ─────────────────────────────────────────────────────
     entt::entity          m_selectionEntity      = entt::null;
+    entt::entity          m_highlightEntity      = entt::null;   // Issue #102
+    int32_t               m_highlightSlot        = -1;           // Issue #102
     float                 m_selectionOutlineWidth = 2.f;
+
+    // Issue #102: ID pick state. The buffer is created lazily on first pick
+    // (and on resize); the snapshot maps id-1 → (entity, submeshIndex),
+    // captured at pass-build time so the result survives draw-list rebuilds.
+    struct IdPickState {
+        bool     pending  = false;  // request queued, pass not yet recorded
+        bool     rendered = false;  // pass recorded this frame → readback after present
+        uint32_t px = 0, py = 0;
+        std::vector<std::pair<entt::entity, uint32_t>> snapshot;
+        PickResult result{};
+        bool     hasResult = false;
+    };
+    void ResolveIdPick();
+    IdPickState           m_idPick;
+    RHI::RHITextureHandle m_idBuffer;
+    uint32_t              m_idBufferW = 0;
+    uint32_t              m_idBufferH = 0;
+    bool                  m_debugIdView = false;   // X-8 debug view
     RHI::RHITextureHandle m_selectionMask;
     RGTextureHandle       m_rgSelectionMask;
     RHI::RHITextureHandle m_dilateH;          // R8 horizontal-dilation intermediate
@@ -936,8 +1055,14 @@ private:
     RGTextureHandle m_rgLdr;
     RGTextureHandle m_rgVelocity;
 
+    // Sun light index of the current frame (Issue #49) — see GatherLights.
+    int m_sunLightIndex = -1;
+
     // ── Frame data helpers (private, called from RenderFrame) ─────────────────
-    [[nodiscard]] LightUniforms GatherLights(const Scene& scene) const;
+    // outSunIndex (Issue #49): index into LightUniforms of the sun directional
+    // light (first isSun=true, else first directional; -1 when none). Drives
+    // lightSpaceMatrix and the volumetric fog shadowed-scattering light.
+    [[nodiscard]] LightUniforms GatherLights(const Scene& scene, int* outSunIndex = nullptr) const;
     void ApplyCameraToUniforms(const CameraData& cam, FrameUniforms& fu, uint32_t w, uint32_t h);
 
     // Shuts down the current tonemap feature, initialises the replacement, and

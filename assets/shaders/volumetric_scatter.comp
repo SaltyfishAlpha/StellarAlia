@@ -1,0 +1,48 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+
+// Volumetric Fog — Scatter (Issue #49, pass 2/3).
+//
+// Front-to-back integration along each froxel column. The per-slice integral
+// uses Frostbite's energy-conserving analytic form (S constant in the slice):
+//     ∫₀^dz exp(-σt·s)·S ds = S · (1 - exp(-σt·dz)) / σt
+// which converges to S/σt for thick slices instead of blowing up like S·dz.
+//
+// One thread per XY column, serial loop over Z — transmittance is a running
+// prefix product so slices cannot be parallelised.
+//
+// Output u_Integrated[k]: rgb = in-scatter accumulated up to the END of slice
+// k, a = transmittance at the same depth (Apply compensates the half-voxel
+// offset when sampling).
+#include "volumetric_common.glsl"
+
+layout(set = 0, binding = 0) uniform sampler3D t_Media;      // rgb=σs·L, a=σt
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image3D u_Integrated;
+
+layout(push_constant) uniform PC {
+    float fogFar;
+} pc;
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+    ivec3 size = imageSize(u_Integrated);
+    ivec2 gid  = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(gid, size.xy))) return;
+
+    vec3  accum     = vec3(0.0);
+    float T         = 1.0;
+    float prevDepth = 0.0;
+    for (int k = 0; k < size.z; ++k) {
+        vec4  media    = texelFetch(t_Media, ivec3(gid, k), 0);
+        float sliceEnd = VolFogSliceToDepth(float(k + 1), float(size.z), pc.fogFar);
+        float dz       = sliceEnd - prevDepth;
+        prevDepth      = sliceEnd;
+
+        float Tslice = exp(-media.a * dz);
+        vec3  Sint   = media.rgb * (1.0 - Tslice) / max(media.a, 1e-4);
+        accum += T * Sint;
+        T     *= Tslice;
+        imageStore(u_Integrated, ivec3(gid, k), vec4(accum, T));
+    }
+}

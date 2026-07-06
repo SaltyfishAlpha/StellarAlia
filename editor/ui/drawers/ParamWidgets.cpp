@@ -1,6 +1,7 @@
 #include "ui/drawers/ParamWidgets.hpp"
 
 #include "ui/drawers/DrawerHelpers.hpp"   // TrackedFieldEdit
+#include "function/material/MaterialManager.hpp"
 
 #include <imgui.h>
 #include <glm/gtc/type_ptr.hpp>
@@ -17,6 +18,22 @@ ParamValue DefaultParamValue(const ParamDef& def) {
         case 8:  return glm::vec2(def.defaultValue[0], def.defaultValue[1]);
         default: return def.defaultValue[0];
     }
+}
+
+const ParamDef* FindParamDef(const std::string& name, const MaterialManager* matMgr) {
+    if (!matMgr) return nullptr;
+    for (const auto& [tname, tptr] : matMgr->GetTypes())
+        for (const auto& p : tptr->params)
+            if (p.name == name) return &p;
+    return nullptr;
+}
+
+const TextureDef* FindTextureDef(const std::string& name, const MaterialManager* matMgr) {
+    if (!matMgr) return nullptr;
+    for (const auto& [tname, tptr] : matMgr->GetTypes())
+        for (const auto& t : tptr->textures)
+            if (t.name == name) return &t;
+    return nullptr;
 }
 
 bool DrawReflectedParam(const ParamDef& def, ParamValue& value, const char* label,

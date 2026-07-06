@@ -30,6 +30,7 @@ enum class RHIFormat : uint32_t {
     RG32F,
     R8_UNORM,
     R32F,
+    R32_UINT,      // Editor ID picking (Issue #102); clear only to 0 (float/uint bit-identical)
     BGRA8_UNORM,   // Common swapchain format (no gamma)
     BGRA8_SRGB,    // Common swapchain format (sRGB, most GPUs prefer this)
 

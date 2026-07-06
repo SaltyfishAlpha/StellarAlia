@@ -309,8 +309,8 @@ internal static class FieldReflector
             }
             case ScriptFieldKind.EntityRef: {
                 w.WriteU16(8);
-                // Capture writes the raw entt::entity bits — native translates
-                // back to sceneLocalId on decode (ScriptSystem::CaptureFieldValues).
+                // Capture writes the raw entt::entity bits. Only the defaults
+                // probe (GetClassDefaultsBlob) reaches here, so this is always 0.
                 ulong bits = 0;
                 if (raw != null) {
                     var idField = typeof(StellarAlia.Entity).GetField(

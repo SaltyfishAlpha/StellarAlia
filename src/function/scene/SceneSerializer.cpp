@@ -188,6 +188,14 @@ nlohmann::json SceneSerializer::SerializeToJson(const Scene& scene) {
             ppj["ssrMaxSteps"]        = pp.ssrMaxSteps;
             ppj["ssrThickness"]       = pp.ssrThickness;
             ppj["ssrStrength"]        = pp.ssrStrength;
+            ppj["volFogEnabled"]       = pp.volFogEnabled;
+            ppj["volFogDensity"]       = pp.volFogDensity;
+            ppj["volFogAlbedo"]        = Vec3ToJson(pp.volFogAlbedo);
+            ppj["volFogAnisotropy"]    = pp.volFogAnisotropy;
+            ppj["volFogDistance"]      = pp.volFogDistance;
+            ppj["volFogHeightBase"]    = pp.volFogHeightBase;
+            ppj["volFogHeightFalloff"] = pp.volFogHeightFalloff;
+            ppj["volFogAmbient"]       = pp.volFogAmbient;
 
             // Screen Effects (Issue #88) — ordered per-scene stack.
             json fxArr = json::array();
@@ -362,7 +370,8 @@ nlohmann::json SceneSerializer::SerializeToJson(const Scene& scene) {
             ej["directionalLight"] = {
                 {"color",      Vec3ToJson(l->color)},
                 {"intensity",  l->intensity},
-                {"castShadow", l->castShadow}
+                {"castShadow", l->castShadow},
+                {"isSun",      l->isSun}
             };
         }
         if (const auto* l = reg.try_get<PointLightComponent>(e)) {
@@ -554,6 +563,14 @@ bool SceneSerializer::DeserializeFromJson(Scene& scene, const nlohmann::json& ro
             pp.ssrMaxSteps        = ppj.value("ssrMaxSteps",        pp.ssrMaxSteps);
             pp.ssrThickness       = ppj.value("ssrThickness",       pp.ssrThickness);
             pp.ssrStrength        = ppj.value("ssrStrength",        pp.ssrStrength);
+            pp.volFogEnabled       = ppj.value("volFogEnabled",       pp.volFogEnabled);
+            pp.volFogDensity       = ppj.value("volFogDensity",       pp.volFogDensity);
+            if (ppj.contains("volFogAlbedo")) pp.volFogAlbedo = JsonToVec3(ppj["volFogAlbedo"]);
+            pp.volFogAnisotropy    = ppj.value("volFogAnisotropy",    pp.volFogAnisotropy);
+            pp.volFogDistance      = ppj.value("volFogDistance",      pp.volFogDistance);
+            pp.volFogHeightBase    = ppj.value("volFogHeightBase",    pp.volFogHeightBase);
+            pp.volFogHeightFalloff = ppj.value("volFogHeightFalloff", pp.volFogHeightFalloff);
+            pp.volFogAmbient       = ppj.value("volFogAmbient",       pp.volFogAmbient);
 
             // Screen Effects (Issue #88) — ordered per-scene stack.
             pp.screenEffects.clear();
@@ -795,6 +812,7 @@ bool SceneSerializer::DeserializeFromJson(Scene& scene, const nlohmann::json& ro
             if (lj.contains("color")) l.color = JsonToVec3Color(lj["color"]);
             l.intensity  = lj.value("intensity",  l.intensity);
             l.castShadow = lj.value("castShadow", l.castShadow);
+            l.isSun      = lj.value("isSun",      l.isSun);
             reg.emplace<DirectionalLightComponent>(e, l);
         }
         if (ej.contains("pointLight")) {

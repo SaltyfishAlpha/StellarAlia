@@ -31,8 +31,14 @@
 #include "function/scene/SceneSerializer.hpp"
 
 #include "core/logs/Log.hpp"
+#include "core/io/FileIO.hpp"
 #include "function/animation/AnimationSystem.hpp"
+#include "function/material/MaterialManager.hpp"
+#include "importer/MaterialImporter.hpp"
+#include "resource/MetaFile.hpp"
 #include "shader_cook/ShaderCookLib.hpp"
+
+#include <nlohmann/json.hpp>
 #include "ui/EditorIcons.hpp"
 #include "ui/drawers/TagDrawer.hpp"
 #include "ui/drawers/TransformDrawer.hpp"
@@ -78,6 +84,10 @@ namespace StellarAlia::Editor {
 // File-static drop target: GLFW drop callback can't capture, so we use this
 // single-editor-instance shortcut.  Cleared in OnDetach.
 static AssetsPanel* s_dropTarget = nullptr;
+
+// #106: defined above CookProjectShaders; also used by LoadProject's cook block.
+static std::unordered_map<std::string, std::string>
+ReadShaderModelMap(const fs::path& dispatchDir);
 
 void EditorMode::OnAttach(Application& app) {
     m_app = &app;
@@ -281,7 +291,10 @@ void EditorMode::BuildContext(Application& app) {
             p.empty() ? fs::path{} : fs::path(p) / "assets",
             m_app->GetDesc().engineAssetsDir);
     };
-    m_ctx.onCookShaders   = [this]() { CookProjectShaders(); };
+    // Defer to the next Update tick instead of cooking inline: the FileWatcher
+    // also flags .saglsl/.saeffect writes, so an editor-initiated create/rename/
+    // delete would otherwise trigger the same full cook twice in one frame.
+    m_ctx.onCookShaders   = [this]() { m_pendingShaderCook = true; };
     m_ctx.onProjectSelected = [this](fs::path path) { m_pendingProjectLoad = std::move(path); };
 
     // ── Register editor actions ───────────────────────────────────────────────
@@ -420,6 +433,7 @@ void EditorMode::OnRenderUI(RHI::IRHICommandList* cmd) {
     }
 
     m_ui.DrawPanels();
+    DrawShaderRenameModal();   // #106: @ShadingModel rename → .samat migration
     DrawImGuizmo();
     HandleViewportInteraction();
     m_ui.Render(cmd);
@@ -547,9 +561,11 @@ void EditorMode::OnUpdate(float dt) {
 }
 
 void EditorMode::DrawOverlays() {
+    m_app->GetRenderer().SetDebugIdView(m_overlaySettings.debugIdView);
     if (!m_overlaySettings.enabled) {
         m_app->GetRenderer().SetSelectedEntity(entt::null);
         m_app->GetRenderer().SetInfiniteGrid(false);
+        m_app->GetRenderer().SetHighlightSlot(entt::null, -1);
         return;
     }
 
@@ -690,6 +706,20 @@ void EditorMode::DrawOverlays() {
     m_app->GetRenderer().SetSelectedEntity(
         (m_overlaySettings.drawSelectionAABB && hasMesh) ? selected : entt::null);
     m_app->GetRenderer().SetOutlineWidth(m_overlaySettings.outlineWidth);
+
+    // Issue #102: mirror the Inspector's hovered material slot to the renderer
+    // (hover wins over the persistent drill-down focus), then clear the hover —
+    // slot UI rows re-report it every frame.
+    {
+        entt::entity hlE = m_selection.GetHoveredSlotEntity();
+        int32_t      hlS = m_selection.GetHoveredSlot();
+        if (hlE == entt::null || hlS < 0) {
+            hlE = m_selection.GetFocusedSlotEntity();
+            hlS = m_selection.GetFocusedSlot();
+        }
+        m_app->GetRenderer().SetHighlightSlot(hlE, hlS);
+        m_selection.ClearHoveredSlot();
+    }
 
     if (selected == entt::null) return;
 
@@ -946,10 +976,15 @@ void EditorMode::LoadProject(const fs::path& saprojectPath) {
             cookCfg.includePaths = { StellarAliaApp::ENGINE_SHADER_SRC_DIR, dispatchOut.string() };
 
             if (hasSaglsl) {
+                const auto modelsBefore = ReadShaderModelMap(dispatchOut);   // #106
                 const auto cookResult = ShaderCook::CookDirectory(assetsDir, spvOut, dispatchOut, cookCfg);
+                DetectShaderTypeRenames(modelsBefore, dispatchOut, assetsDir); // #106
                 if (!cookResult.failedModels.empty()) {
                     SA_LOG_WARN("EditorMode: {} shading model(s) failed to cook",
                                 cookResult.failedModels.size());
+                    for (const auto& f : cookResult.failures)
+                        m_diagnostics.Push({DiagLevel::Error, DiagSource::ShaderCook,
+                            "Shader '" + f.model + "': " + f.message, fs::path(f.source)});
                 }
 
                 if (cookResult.modelCount > 0) {
@@ -966,9 +1001,13 @@ void EditorMode::LoadProject(const fs::path& saprojectPath) {
             // Issue #88: cook declarative ScreenEffects (.saeffect) into the same dir.
             if (hasSaeffect) {
                 const auto fxResult = ShaderCook::CookEffects(assetsDir, spvOut, cookCfg);
-                if (!fxResult.failedModels.empty())
+                if (!fxResult.failedModels.empty()) {
                     SA_LOG_WARN("EditorMode: {} screen effect(s) failed to cook",
                                 fxResult.failedModels.size());
+                    for (const auto& f : fxResult.failures)
+                        m_diagnostics.Push({DiagLevel::Error, DiagSource::ShaderCook,
+                            "Effect '" + f.model + "': " + f.message, fs::path(f.source)});
+                }
             }
 
             // Issue #90: prune cooked effects whose source was deleted (roots out the
@@ -1063,6 +1102,130 @@ void EditorMode::SaveScene() {
     }
 }
 
+// #106: parse generated/shaders/shader_models.txt (tab-separated source → model,
+// written by ShaderCook::CookDirectory) into a map for before/after rename diff.
+static std::unordered_map<std::string, std::string>
+ReadShaderModelMap(const fs::path& dispatchDir) {
+    std::unordered_map<std::string, std::string> map;
+    std::ifstream f(dispatchDir / "shader_models.txt");
+    std::string line;
+    while (std::getline(f, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+        const auto tab = line.find('\t');
+        if (tab == std::string::npos) continue;
+        map[line.substr(0, tab)] = line.substr(tab + 1);
+    }
+    return map;
+}
+
+void EditorMode::DetectShaderTypeRenames(
+        const std::unordered_map<std::string, std::string>& before,
+        const fs::path& dispatchDir,
+        const fs::path& assetsDir) {
+    if (before.empty()) return;   // no previous state (first cook into this cache)
+    const auto after = ReadShaderModelMap(dispatchDir);
+
+    for (const auto& [src, newName] : after) {
+        const auto it = before.find(src);
+        if (it == before.end() || it->second == newName) continue;
+        const std::string& oldName = it->second;
+
+        // If another source still provides the old model, its materials are NOT
+        // orphaned — migrating would steal them from a live type.
+        bool oldStillExists = false;
+        for (const auto& [s2, m2] : after)
+            if (s2 != src && m2 == oldName) { oldStillExists = true; break; }
+        if (oldStillExists) continue;
+
+        const bool alreadyPending = std::any_of(
+            m_pendingTypeRenames.begin(), m_pendingTypeRenames.end(),
+            [&](const ShaderTypeRename& r) {
+                return r.source == src && r.oldName == oldName && r.newName == newName;
+            });
+        if (alreadyPending) continue;
+
+        int count = 0;
+        std::error_code ec;
+        for (const auto& de : fs::recursive_directory_iterator(
+                 assetsDir, fs::directory_options::skip_permission_denied, ec)) {
+            if (!de.is_regular_file(ec) || de.path().extension() != ".samat") continue;
+            nlohmann::json j;
+            if (IO::ReadJson(de.path(), j) && j.value("type", "") == oldName)
+                ++count;
+        }
+
+        SA_LOG_WARN("EditorMode: @ShadingModel renamed '{}' → '{}' in '{}' "
+                    "({} referencing .samat)", oldName, newName, src, count);
+        m_pendingTypeRenames.push_back({src, oldName, newName, count});
+    }
+}
+
+void EditorMode::DrawShaderRenameModal() {
+    if (m_pendingTypeRenames.empty()) return;
+    if (!ImGui::IsPopupOpen("Shading Model Renamed"))
+        ImGui::OpenPopup("Shading Model Renamed");
+
+    const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal("Shading Model Renamed", nullptr,
+                                ImGuiWindowFlags_AlwaysAutoResize))
+        return;
+
+    ImGui::TextUnformatted("A shader's @ShadingModel was renamed. Materials referencing\n"
+                           "the old name show the magenta error material until migrated.");
+    ImGui::Separator();
+    for (const auto& r : m_pendingTypeRenames)
+        ImGui::Text("'%s' \xe2\x86\x92 '%s'   (%s, %d material%s)",
+                    r.oldName.c_str(), r.newName.c_str(),
+                    fs::path(r.source).filename().string().c_str(),
+                    r.samatCount, r.samatCount == 1 ? "" : "s");
+    ImGui::Separator();
+
+    if (ImGui::Button("Migrate All")) {
+        for (const auto& r : m_pendingTypeRenames)
+            MigrateSamatTypes(r.oldName, r.newName);
+        m_pendingTypeRenames.clear();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Ignore")) {
+        m_pendingTypeRenames.clear();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+void EditorMode::MigrateSamatTypes(const std::string& oldName, const std::string& newName) {
+    const auto& desc = m_app->GetDesc();
+    if (desc.projectDir.empty()) return;
+    const fs::path assetsDir    = fs::path(desc.projectDir) / "assets";
+    const fs::path cookCacheDir = fs::path(desc.projectDir) / "cook_cache";
+
+    int migrated = 0;
+    std::error_code ec;
+    for (const auto& de : fs::recursive_directory_iterator(
+             assetsDir, fs::directory_options::skip_permission_denied, ec)) {
+        if (!de.is_regular_file(ec) || de.path().extension() != ".samat") continue;
+        nlohmann::json j;
+        if (!IO::ReadJson(de.path(), j) || j.value("type", "") != oldName) continue;
+        j["type"] = newName;
+        if (!IO::WriteJson(de.path(), j)) continue;
+
+        // The cooked .samatc stores the type too — recook, then drop the cached
+        // instance so the next BuildDrawList reloads under the new type.
+        Import::MetaFile meta;
+        if (Import::MetaFile::Load(Import::MetaFile::MetaPathFor(de.path()), meta) &&
+            meta.uuid.IsValid()) {
+            Import::CookStandaloneMaterial(de.path(), meta.uuid, cookCacheDir, /*force=*/true);
+            if (m_ctx.matMgr) m_ctx.matMgr->EvictInstance(meta.uuid);
+        }
+        ++migrated;
+    }
+    if (migrated > 0 && m_ctx.scene) m_ctx.scene->MarkMaterialDirty();
+    SA_LOG_INFO("EditorMode: migrated {} material(s) '{}' → '{}'",
+                migrated, oldName, newName);
+}
+
 void EditorMode::CookProjectShaders() {
     const auto& desc = m_app->GetDesc();
     if (desc.projectDir.empty()) {
@@ -1105,8 +1268,7 @@ void EditorMode::CookProjectShaders() {
         " --glslc \""        + glslcPath   + "\""
         " --reflect-tool \"" + reflExe.generic_string() + "\""
         " --include \""      + incEng      + "\""
-        " --include \""      + dispatchOut + "\""
-        " --force";
+        " --include \""      + dispatchOut + "\"";
 
 #ifdef _WIN32
     cmd = "\"" + cmd + "\""; // cmd.exe outer-quote trick
@@ -1114,25 +1276,38 @@ void EditorMode::CookProjectShaders() {
 
     SA_LOG_INFO("EditorMode: cooking project shaders...");
     m_diagnostics.ClearSource(DiagSource::ShaderCook);
+    const auto modelsBefore = ReadShaderModelMap(fs::path(dispatchOut));   // #106
     const int ret = std::system(cmd.c_str());
+    DetectShaderTypeRenames(modelsBefore, fs::path(dispatchOut),
+                            fs::path(desc.projectDir) / "assets");         // #106
 
-    // Read the per-shader error manifest written by the cook tool.
-    // Each line is the generic path of a .saglsl that failed to compile.
-    const fs::path errorManifest = fs::path(dispatchOut) / "cook_errors.txt";
+    // Read the per-shader error manifests written by the cook tool.
+    // Each line is tab-separated: source path, model/effect name, error message.
     bool manifestRead = false;
-    if (fs::exists(errorManifest)) {
-        std::ifstream mf(errorManifest);
+    auto pushManifest = [&](const fs::path& manifest, const char* kindLabel) {
+        if (!fs::exists(manifest)) return;
+        std::ifstream mf(manifest);
         std::string line;
         while (std::getline(mf, line)) {
             if (line.empty()) continue;
-            fs::path shaderPath(line);
+            const auto t1 = line.find('\t');
+            const auto t2 = (t1 != std::string::npos) ? line.find('\t', t1 + 1)
+                                                      : std::string::npos;
+            const fs::path shaderPath = (t1 != std::string::npos) ? line.substr(0, t1)
+                                                                  : fs::path(line);
+            const std::string model   = (t2 != std::string::npos)
+                                      ? line.substr(t1 + 1, t2 - t1 - 1)
+                                      : shaderPath.filename().string();
+            const std::string message = (t2 != std::string::npos)
+                                      ? line.substr(t2 + 1)
+                                      : "check GLSL syntax and reimport";
             m_diagnostics.Push({DiagLevel::Error, DiagSource::ShaderCook,
-                "Shader compile error: " + shaderPath.filename().string()
-                + " — check GLSL syntax and reimport",
-                shaderPath});
+                std::string(kindLabel) + " '" + model + "': " + message, shaderPath});
             manifestRead = true;
         }
-    }
+    };
+    pushManifest(fs::path(dispatchOut) / "cook_errors.txt",          "Shader");
+    pushManifest(fs::path(spvOut)      / "cook_errors_effects.txt",  "Effect");   // #73-B
 
     if (ret != 0) {
         SA_LOG_ERROR("EditorMode::CookProjectShaders — tool exited with {}", ret);
@@ -1422,16 +1597,39 @@ void EditorMode::HandleViewportInteraction() {
                 if (d < bestDist) { bestDist = d; hit = bh.entity; }
             }
         }
-        // Fall back to geometry raycast when no billboard was hit.
-        if (hit == entt::null) {
-            const Core::Ray ray = ScreenToWorldRay(io.MousePos.x, io.MousePos.y);
-            hit = m_app->GetRenderer().RaycastScene(ray);
+        // Fall back to GPU ID picking when no billboard was hit (Issue #102):
+        // the ID pass renders this frame, the result is consumed next frame.
+        if (hit != entt::null) {
+            if (m_hierarchyPanel) m_hierarchyPanel->SetSelection(hit);
+        } else if (io.MousePos.x >= 0.f && io.MousePos.y >= 0.f) {
+            m_app->GetRenderer().RequestIdPick(
+                static_cast<uint32_t>(io.MousePos.x),
+                static_cast<uint32_t>(io.MousePos.y));
         }
-        if (m_hierarchyPanel) {
-            if (hit != entt::null)
-                m_hierarchyPanel->SetSelection(hit);
-            else
-                m_hierarchyPanel->ClearSelection();
+    }
+
+    // ── Issue #102: consume the ID pick result (two-level click state machine:
+    // first click selects the entity, a second click on the already-selected
+    // entity drills down to the clicked material slot).
+    {
+        SceneRenderer::PickResult pr;
+        if (m_app->GetRenderer().TryConsumePickResult(pr)) {
+            if (!pr.hit) {
+                if (m_hierarchyPanel) m_hierarchyPanel->ClearSelection();
+            } else if (!m_selection.HasEntity() ||
+                       m_selection.GetPrimaryEntity() != pr.entity) {
+                if (m_hierarchyPanel) m_hierarchyPanel->SetSelection(pr.entity);
+            } else {
+                const int32_t slot = static_cast<int32_t>(pr.submeshIndex);
+                if (m_selection.GetFocusedSlotEntity() == pr.entity &&
+                    m_selection.GetFocusedSlot() == slot) {
+                    // Already at the smallest selectable unit — cycle back to
+                    // the top (entity stays selected, slot focus cleared).
+                    m_selection.ClearSlotFocus();
+                } else {
+                    m_selection.FocusSlot(pr.entity, slot);
+                }
+            }
         }
     }
 

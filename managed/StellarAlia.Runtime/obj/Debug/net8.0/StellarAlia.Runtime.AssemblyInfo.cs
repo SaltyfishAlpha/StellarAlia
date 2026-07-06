@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("StellarAlia.Runtime")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+351359cae1a0245d4d4efd55b8f0078259bb6a96")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+e341cff5194547f070932522bc2ad4f44294e6c5")]
 [assembly: System.Reflection.AssemblyProductAttribute("StellarAlia.Runtime")]
 [assembly: System.Reflection.AssemblyTitleAttribute("StellarAlia.Runtime")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

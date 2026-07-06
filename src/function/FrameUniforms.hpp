@@ -32,7 +32,9 @@ struct alignas(16) FrameUniforms {
     glm::mat4 currUnjitteredViewProj;  // 624..687
     glm::vec2 jitter;                  // 688..695  current Halton jitter in pixel space [-0.5, 0.5]
     uint32_t  frameIndex;              // 696..699  frame counter mod 256
-    float     _fpad;                   // 700..703  alignment
+    // Issue #49 Step 9: froxel volume far end (m) for forward passes sampling
+    // t_FogVolume (set=1 binding=8). 1.0 when fog is disabled (dummy volume).
+    float     volFogFar;               // 700..703
 };
 static_assert(sizeof(FrameUniforms) == 704,
     "FrameUniforms size mismatch with frame_uniforms.glsl set=0 binding=0");

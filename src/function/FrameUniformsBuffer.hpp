@@ -20,6 +20,7 @@ namespace StellarAlia {
 //   binding=5  t_LtcMat         (sampler2D 64×64 — LTC inverse-M matrix LUT)
 //   binding=6  t_LtcAmp         (sampler2D 64×64 — LTC amplitude/GGX-norm LUT)
 //   binding=7  t_ShadowMap      (sampler2D — directional shadow map, Issue #56)
+//   binding=8  t_FogVolume      (sampler3D — volumetric fog integrated volume, Issue #49)
 //
 // Usage per frame:
 //   fub.Upload(frameIndex, frameData, lightData);
@@ -64,6 +65,12 @@ public:
     [[nodiscard]] RHI::RHIDescSetHandle    GetDescriptorSet(uint32_t frameIndex) const;
     [[nodiscard]] RHI::RHIDescLayoutHandle GetLayout() const { return m_layout; }
 
+    // Issue #49 Step 9: 1×1×2 (0,0,0,1) 3D dummy for binding=8 — sampled by
+    // forward transparents when fog is off; T=1/inscatter=0 makes it a no-op.
+    // VolumetricFogFeature rebinds this on the current frame set each frame
+    // fog is disabled (the binding may hold a stale transient volume otherwise).
+    [[nodiscard]] RHI::RHITextureHandle GetFogVolumePlaceholder() const { return m_fogVolumePlaceholder; }
+
 private:
     RHI::IRHIDevice*         m_device = nullptr;
     RHI::RHIDescLayoutHandle m_layout;
@@ -72,6 +79,7 @@ private:
     RHI::RHIDescSetHandle    m_descSets[MAX_FRAMES];
     RHI::RHITextureHandle    m_iblPlaceholder;      // 1×1 white 2D, placeholder for bindings 2/5/6
     RHI::RHITextureHandle    m_iblCubePlaceholder;  // 1×1 white cubemap, placeholder for bindings 3/4
+    RHI::RHITextureHandle    m_fogVolumePlaceholder; // 1×1×2 3D (0,0,0,1), placeholder for binding 8
 };
 
 } // namespace StellarAlia

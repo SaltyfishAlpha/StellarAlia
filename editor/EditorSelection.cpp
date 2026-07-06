@@ -11,6 +11,7 @@ void EditorSelection::SelectEntity(entt::entity e, bool additive) {
     m_primary   = e;
     m_type      = EditorSelectionType::Entity;
     m_assetPath.clear();
+    ClearSlotFocus();
     Notify();
 }
 
@@ -22,6 +23,7 @@ void EditorSelection::SelectEntities(std::span<const entt::entity> entities) {
     m_primary = entities.empty() ? entt::null : entities.front();
     m_type    = m_entities.empty() ? EditorSelectionType::None : EditorSelectionType::Entity;
     m_assetPath.clear();
+    ClearSlotFocus();
     Notify();
 }
 
@@ -30,6 +32,7 @@ void EditorSelection::SelectAsset(const std::filesystem::path& path) {
     m_assetPath = path;
     m_entities.clear();
     m_primary = entt::null;
+    ClearSlotFocus();
     Notify();
 }
 
@@ -38,6 +41,7 @@ void EditorSelection::Clear() {
     m_primary = entt::null;
     m_entities.clear();
     m_assetPath.clear();
+    ClearSlotFocus();
     Notify();
 }
 

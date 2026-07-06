@@ -1,20 +1,24 @@
 // @ShaderName "NewShader"
-// @ShadingModel SimpleAlbedo
+// @ShadingModel NewShader
 // @VertShader deferred_geometry
 
 #pragma sa_section gbuffer
 
 #version 450
 #extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_nonuniform_qualifier : enable
 #include "common.glsl"
 #include "shading_models.glsl"
 #include "shading_model_ids.glsl"
+#include "bindless_textures.glsl"
 
-layout(set = 2, binding = 0) uniform MaterialParams {
+// Issue #73-A: SSBO + bindless — texture slots are `uint t_<Name>_Idx` members
+// inside the MaterialParams block (index 0 = white). This layout is what makes
+// MaterialManager pick the zero-clone override path (usesMaterialParamsSSBO).
+layout(std430, set = 2, binding = 0) readonly buffer MaterialParams {
     vec4 baseColorFactor; // @Color4("Base Color") = 1,1,1,1
+    uint t_BaseColor_Idx; // @Texture("Albedo Map")
 } u_Mat;
-
-layout(set = 2, binding = 1) uniform sampler2D t_BaseColor; // @Texture("Albedo Map")
 
 layout(location = 1) in vec3 v_Normal;
 layout(location = 3) in vec2 v_TexCoord0;
@@ -24,11 +28,11 @@ layout(location = 1) out vec4 out_GNormalRoughness;
 layout(location = 2) out vec4 out_GData;
 
 void main() {
-    vec4 color = texture(t_BaseColor, v_TexCoord0) * u_Mat.baseColorFactor;
+    vec4 color = SampleBindless(u_Mat.t_BaseColor_Idx, v_TexCoord0) * u_Mat.baseColorFactor;
     vec3 N = normalize(v_Normal);
     out_GAlbedoOcclusion = vec4(color.rgb, 1.0);
     out_GNormalRoughness  = vec4(OctEncode(N), 1.0, 0.0);
-    out_GData             = vec4(0.0, 0.0, 0.0, EncodeShadingFlags(SHADING_MODEL_SIMPLE_ALBEDO));
+    out_GData             = vec4(0.0, 0.0, 0.0, EncodeShadingFlags(SA_SHADING_MODEL_ID));
 }
 
 #pragma sa_end_section

@@ -47,6 +47,9 @@ struct EditorOverlaySettings {
     bool      drawGizmo      = true;
     GizmoMode gizmoMode      = GizmoMode::Translate;  // T / R / S to cycle
     bool      gizmoWorldSpace = true;                 // world vs local space
+
+    // ── Debug views (X-8) ────────────────────────────────────────────────────
+    bool debugIdView = false;  // fullscreen per-submesh ID coloring (Issue #102 ID pass)
 };
 
 } // namespace StellarAlia::Editor

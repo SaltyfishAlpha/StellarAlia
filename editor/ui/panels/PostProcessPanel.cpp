@@ -218,6 +218,32 @@ void PostProcessPanel::OnDraw() {
 
     ImGui::Spacing();
 
+    // ── Volumetric Fog (Issue #49) ───────────────────────────────────────────
+    if (ImGui::CollapsingHeader("Volumetric Fog")) {
+        if (ImGui::Checkbox("Enabled##volfog", &pp.volFogEnabled))
+            liveUpdate = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Froxel single scattering; enable TAA to denoise the volume.");
+        ImGui::BeginDisabled(!pp.volFogEnabled);
+        if (ImGui::SliderFloat("Density##volfog",        &pp.volFogDensity,       0.0f,  0.5f,  "%.4f"))
+            liveUpdate = true;
+        if (ImGui::ColorEdit3 ("Albedo##volfog",         &pp.volFogAlbedo.x))
+            liveUpdate = true;
+        if (ImGui::SliderFloat("Anisotropy##volfog",     &pp.volFogAnisotropy,   -0.9f,  0.9f,  "%.2f"))
+            liveUpdate = true;
+        if (ImGui::SliderFloat("Distance##volfog",       &pp.volFogDistance,      8.0f,  256.f, "%.0f m"))
+            liveUpdate = true;
+        if (ImGui::SliderFloat("Height Base##volfog",    &pp.volFogHeightBase,   -50.f,  50.f,  "%.1f m"))
+            liveUpdate = true;
+        if (ImGui::SliderFloat("Height Falloff##volfog", &pp.volFogHeightFalloff, 0.0f,  1.0f,  "%.3f"))
+            liveUpdate = true;
+        if (ImGui::SliderFloat("Ambient##volfog",        &pp.volFogAmbient,       0.0f,  2.0f,  "%.2f"))
+            liveUpdate = true;
+        ImGui::EndDisabled();
+    }
+
+    ImGui::Spacing();
+
     // ── Screen modifications (Issue #47) ─────────────────────────────────────
     if (ImGui::CollapsingHeader("Vignette")) {
         if (ImGui::Checkbox("Enabled##vig", &pp.vignetteEnabled))

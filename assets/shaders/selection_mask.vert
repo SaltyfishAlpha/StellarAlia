@@ -11,5 +11,7 @@ layout(location = 0) in vec3 a_Position;
 layout(push_constant) uniform PC { mat4 model; } pc;
 
 void main() {
-    gl_Position = u_Frame.viewProj * pc.model * vec4(a_Position, 1.0);
+    // Unjittered (Issue #107): the outline is composited after TAA, which
+    // converges to the unjittered position — a jittered mask wobbles ±0.5px.
+    gl_Position = u_Frame.currUnjitteredViewProj * pc.model * vec4(a_Position, 1.0);
 }

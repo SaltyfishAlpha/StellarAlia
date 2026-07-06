@@ -84,6 +84,16 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
         bd.name    = "t_ShadowMap";
         refl.bindings.push_back(bd);
     }
+    // Issue #49 Step 9: volumetric fog integrated volume (sampler3D — same
+    // combined-image-sampler descriptor type; appended, never renumber above).
+    {
+        RHI::ShaderBindingDesc bd;
+        bd.set     = 1; bd.binding = 8;
+        bd.type    = RHI::RHIDescriptorType::Texture2D;
+        bd.stages  = RHI::RHIShaderStage::All;
+        bd.name    = "t_FogVolume";
+        refl.bindings.push_back(bd);
+    }
 
     // Issue #72 Step 6.5: FrameUniforms is set=1 in the new layout (set=0 reserved
     // for BindlessTextureHeap so it can stay bound for the whole command buffer).
@@ -116,6 +126,21 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
         device->UploadTextureData(m_iblCubePlaceholder, black6, sizeof(black6));
     }
 
+    // Placeholder 3D volume for binding=8 (sampler3D, Issue #49 Step 9).
+    // (0,0,0,1) = zero inscatter, full transmittance → fog composite is a no-op.
+    // depth=2 because CreateTexture only makes a 3D image when depth > 1.
+    {
+        RHI::RHITextureDesc td{};
+        td.width = td.height = 1;
+        td.depth     = 2;
+        td.format    = RHI::RHIFormat::RGBA8_UNORM;
+        td.usage     = RHI::RHITextureUsage::Sampled;
+        td.debugName = "FogVolumePlaceholder";
+        m_fogVolumePlaceholder = device->CreateTexture(td);
+        const uint8_t texels[8] = {0, 0, 0, 255, 0, 0, 0, 255};
+        device->UploadTextureData(m_fogVolumePlaceholder, texels, sizeof(texels));
+    }
+
     for (uint32_t i = 0; i < MAX_FRAMES; ++i) {
         // FrameData UBO — CPU-visible (updated every frame)
         RHI::RHIBufferDesc frameDesc{};
@@ -145,6 +170,7 @@ void FrameUniformsBuffer::Init(RHI::IRHIDevice* device) {
         device->WriteDescriptorTexture(m_descSets[i], 5, m_iblPlaceholder);     // t_LtcMat (2D)
         device->WriteDescriptorTexture(m_descSets[i], 6, m_iblPlaceholder);     // t_LtcAmp (2D)
         device->WriteDescriptorTexture(m_descSets[i], 7, m_iblPlaceholder);     // t_ShadowMap (Issue #56)
+        device->WriteDescriptorTexture(m_descSets[i], 8, m_fogVolumePlaceholder); // t_FogVolume (Issue #49)
     }
 
     SA_LOG_INFO("FrameUniformsBuffer: initialized ({} frames)", MAX_FRAMES);
@@ -159,6 +185,7 @@ void FrameUniformsBuffer::Shutdown() {
     }
     m_device->DestroyTexture(m_iblPlaceholder);
     m_device->DestroyTexture(m_iblCubePlaceholder);
+    m_device->DestroyTexture(m_fogVolumePlaceholder);
     m_device = nullptr;
 }
 

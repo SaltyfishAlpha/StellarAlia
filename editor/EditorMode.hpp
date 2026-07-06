@@ -35,6 +35,8 @@
 #include <imgui.h>
 #include <filesystem>
 #include <memory>
+#include <string>
+#include <unordered_map>
 #include <vector>
 #include "EditorOverlaySettings.hpp"
 
@@ -136,6 +138,26 @@ private:
     void NewScene();
     void SaveScene();
     void CookProjectShaders();
+
+    // ── #106: @ShadingModel rename detection → .samat migration prompt ────────
+    // CookDirectory writes generated/shaders/shader_models.txt (source → model);
+    // cooks snapshot it before and diff after — same source, different model =
+    // rename that orphans .samat "type" references.
+    struct ShaderTypeRename {
+        std::string source;               // .saglsl generic path
+        std::string oldName, newName;
+        int         samatCount = 0;       // referencing .samat found at detection
+    };
+    std::vector<ShaderTypeRename> m_pendingTypeRenames;
+
+    // assetsDir passed explicitly: LoadProject cooks BEFORE UpdateProjectPaths,
+    // so GetDesc().projectDir would still point at the previous project there.
+    void DetectShaderTypeRenames(
+        const std::unordered_map<std::string, std::string>& before,
+        const std::filesystem::path& dispatchDir,
+        const std::filesystem::path& assetsDir);
+    void DrawShaderRenameModal();
+    void MigrateSamatTypes(const std::string& oldName, const std::string& newName);
 };
 
 } // namespace StellarAlia::Editor

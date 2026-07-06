@@ -70,6 +70,14 @@ void SettingsPanel::OnDraw() {
         }
     }
 
+    // ── Debug views (X-8) — independent of the Overlay master switch ─────────
+    if (m_overlaySettings) {
+        if (ImGui::CollapsingHeader("Debug Views")) {
+            ImGui::Checkbox("Submesh ID", &m_overlaySettings->debugIdView);
+            // Future X-8 modes (lod / depth / random shading) slot in here.
+        }
+    }
+
     // ── Physics debug ─────────────────────────────────────────────────────────
     if (m_physicsSettings) {
         if (ImGui::CollapsingHeader("Physics Debug")) {

@@ -6,6 +6,8 @@
 #include "function/material/MaterialType.hpp"   // ParamDef, RHI::ParamUIType
 #include "function/scene/Components.hpp"         // ParamValue
 
+namespace StellarAlia { class MaterialManager; }
+
 namespace StellarAlia::Editor {
 
 struct EditorContext;
@@ -20,6 +22,12 @@ struct EditorContext;
 // A ParamValue initialised from a ParamDef's default, with the variant
 // alternative chosen by the param's byte size (16→vec4, 12→vec3, 8→vec2, else float).
 [[nodiscard]] ParamValue DefaultParamValue(const ParamDef& def);
+
+// Look up a param/texture def by name across every registered MaterialType —
+// used to label override entries whose owning type isn't known. Issue #103:
+// promoted from MaterialOverrideDrawer so SlotOverrideEditor shares them.
+[[nodiscard]] const ParamDef*   FindParamDef  (const std::string& name, const MaterialManager* matMgr);
+[[nodiscard]] const TextureDef* FindTextureDef(const std::string& name, const MaterialManager* matMgr);
 
 // Draw one reflected parameter as the widget its schema implies, editing `value`
 // in place (dispatch on the value's active alternative — the caller seeds it to

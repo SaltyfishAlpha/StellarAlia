@@ -34,7 +34,7 @@ layout(set = 1, binding = 0) uniform FrameData {
     mat4  currUnjitteredViewProj; // Issue #85: unjittered current viewProj for VelocityPrepass
     vec2  jitter;                 // current Halton jitter in pixel space [-0.5, 0.5]
     uint  frameIndex;             // frame counter mod 256
-    float _fpad;
+    float volFogFar;              // Issue #49: froxel far end (m); 1.0 when fog off
 } u_Frame;
 
 // binding=1  Light list, up to MAX_LIGHTS entries.
@@ -83,5 +83,11 @@ layout(set = 1, binding = 6) uniform sampler2D t_LtcAmp;
 //            Forward passes sample it from here; deferred lighting keeps its
 //            own copy at set=2 binding=4. Appended — never renumber above.
 layout(set = 1, binding = 7) uniform sampler2D t_ShadowMap;
+
+// binding=8  Volumetric fog integrated volume (appended Issue #49 Step 9).
+//            rgb = in-scatter to this depth, a = transmittance. Forward
+//            transparents sample per fragment; a 1×1×2 (0,0,0,1) dummy is
+//            bound when fog is off, making the composite a no-op.
+layout(set = 1, binding = 8) uniform sampler3D t_FogVolume;
 
 #endif // SA_FRAME_UNIFORMS_GLSL

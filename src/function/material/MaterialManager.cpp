@@ -322,6 +322,9 @@ MaterialManager::LoadMaterial(const AssetID& id, Resource::ResourceManager& resM
             rs.alphaMode = AlphaMode::Opaque;
         }
         inst->m_renderState = rs;
+        // Absent keys = inherit: BuildDrawList falls through to the layer below.
+        inst->m_alphaModeAuthored   = root.contains("alphaMode");
+        inst->m_doubleSidedAuthored = root.contains("doubleSided");
     }
 
     // ── Apply scalar params (type-driven from reflection metadata) ────────────
@@ -331,6 +334,7 @@ MaterialManager::LoadMaterial(const AssetID& id, Resource::ResourceManager& resM
         if (mtype) {
             for (const auto& param : mtype->params) {
                 if (!p.contains(param.name)) continue;
+                inst->m_authoredParams.insert(param.name);
                 const auto& val = p[param.name];
 
                 // Dispatch on uiType; fall back to member size for Inferred.
@@ -369,8 +373,14 @@ MaterialManager::LoadMaterial(const AssetID& id, Resource::ResourceManager& resM
 
     if (root.contains("textures")) {
         const auto& t = root["textures"];
-        for (const auto& [name, uuidVal] : t.items())
-            inst->SetTexture(name, loadTex(uuidVal.get<std::string>()));
+        for (const auto& [name, uuidVal] : t.items()) {
+            const std::string uuidStr = uuidVal.get<std::string>();
+            inst->SetTexture(name, loadTex(uuidStr));
+            // An empty/invalid uuid is an unassigned editor placeholder, not an
+            // authored "no texture" — it inherits like an absent key.
+            if (AssetID::FromString(uuidStr).IsValid())
+                inst->m_authoredTextures.insert(name);
+        }
     }
 
     SA_LOG_INFO("MaterialManager: loaded material {}", id.ToString());
@@ -388,9 +398,13 @@ MaterialManager::CloneInstance(const MaterialInstance* src) const {
     clone->m_mgr = const_cast<MaterialManager*>(this);
     WireSSBODescriptor(*clone);
     // Copy the UBO parameter blob wholesale — same layout, same values.
-    clone->m_uboBlob     = src->m_uboBlob;
-    clone->m_renderState = src->m_renderState;
-    clone->m_paramDirty  = true;
+    clone->m_uboBlob             = src->m_uboBlob;
+    clone->m_renderState         = src->m_renderState;
+    clone->m_authoredParams      = src->m_authoredParams;
+    clone->m_authoredTextures    = src->m_authoredTextures;
+    clone->m_alphaModeAuthored   = src->m_alphaModeAuthored;
+    clone->m_doubleSidedAuthored = src->m_doubleSidedAuthored;
+    clone->m_paramDirty          = true;
     if (src->m_type->usesMaterialParamsSSBO) {
         clone->m_texAssetIndices = src->m_texAssetIndices;
     } else {

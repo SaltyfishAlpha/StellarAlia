@@ -182,61 +182,127 @@ void MaterialAssetInspector::Draw(const fs::path& path) {
     if (!m_doc) { ImGui::TextDisabled("(cannot read/parse file)"); return; }
     json& j = *m_doc;
 
-    const std::string type = j.value("type", "PBR");
-    const std::string name = j.value("name", "");
-    ImGui::Text("Shader: %s", type.c_str());
-    if (!name.empty()) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("(%s)", name.c_str());
+    bool changed = false;
+
+    // ── Shader type combo (#106) — surface types only (usesMaterialParamsSSBO
+    // = PBR + project .saglsl post-#73-A; excludes Shadow/Skybox/post-fx).
+    // Unregistered type: red warning + same combo for one-click reassignment.
+    {
+        const std::string type = j.value("type", "PBR");
+        const std::string name = j.value("name", "");
+        const bool registered =
+            m_ctx && m_ctx->matMgr && m_ctx->matMgr->GetType(type) != nullptr;
+
+        if (!registered)
+            ImGui::TextColored(ImVec4(1.f, 0.35f, 0.35f, 1.f),
+                               "shader type '%s' not registered", type.c_str());
+
+        if (ImGui::BeginCombo("Shader", type.c_str())) {
+            if (m_ctx && m_ctx->matMgr) {
+                for (const auto& [tname, tptr] : m_ctx->matMgr->GetTypes()) {
+                    if (!tptr->usesMaterialParamsSSBO) continue;
+                    const bool sel = (tname == type);
+                    if (ImGui::Selectable(tname.c_str(), sel) && !sel) {
+                        j["type"] = tname;
+                        // Keep existing values (incl. keys the new type lacks —
+                        // switching back restores them). The new type's missing
+                        // keys stay absent = inherit from the layer below; the
+                        // sections below offer per-key override buttons.
+                        if (!j["params"].is_object())   j["params"]   = json::object();
+                        if (!j["textures"].is_object()) j["textures"] = json::object();
+                        changed = true;
+                    }
+                    if (sel) ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (!name.empty()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%s)", name.c_str());
+        }
     }
     ImGui::Separator();
 
-    MaterialType* mtype = (m_ctx && m_ctx->matMgr) ? m_ctx->matMgr->GetType(type) : nullptr;
+    // Re-resolve after a possible combo switch so a reassigned type falls
+    // straight into the editable path (Save enabled this same frame).
+    MaterialType* mtype = (m_ctx && m_ctx->matMgr)
+                        ? m_ctx->matMgr->GetType(j.value("type", "PBR")) : nullptr;
     if (!mtype) {
         ImGui::TextDisabled("(shader type not registered — read-only)");
         DrawReadOnly(j);
+        if (changed) m_dirty = true;
         return;
     }
 
-    bool changed = false;
-
-    // ── Render state (Issue #56 top-level fields; missing = legacy opaque) ──
+    // ── Render state (Issue #56 top-level fields) — absent key = inherit from
+    // the layer below at draw time (or opaque/single-sided when bottom-most).
     {
-        static const char* kModes[] = {"OPAQUE", "MASK", "BLEND"};
-        const std::string am = j.value("alphaMode", "OPAQUE");
+        static const char* kModes[] = {"Inherit", "OPAQUE", "MASK", "BLEND"};
         int cur = 0;
-        for (int i = 0; i < 3; ++i)
-            if (am == kModes[i]) cur = i;
+        if (j.contains("alphaMode")) {
+            const std::string am = j.value("alphaMode", "OPAQUE");
+            cur = 1;
+            for (int i = 1; i < 4; ++i)
+                if (am == kModes[i]) cur = i;
+        }
         int sel = cur;
-        if (ImGui::Combo("Alpha Mode", &sel, kModes, 3) && sel != cur) {
-            j["alphaMode"] = kModes[sel];
+        if (ImGui::Combo("Alpha Mode", &sel, kModes, 4) && sel != cur) {
+            if (sel == 0) j.erase("alphaMode");
+            else          j["alphaMode"] = kModes[sel];
             changed = true;
         }
-        bool ds = j.value("doubleSided", false);
-        if (ImGui::Checkbox("Double Sided", &ds)) {
-            j["doubleSided"] = ds;
+
+        static const char* kSided[] = {"Inherit", "Off", "On"};
+        const int curDS = !j.contains("doubleSided") ? 0
+                        : (j.value("doubleSided", false) ? 2 : 1);
+        int selDS = curDS;
+        if (ImGui::Combo("Double Sided", &selDS, kSided, 3) && selDS != curDS) {
+            if (selDS == 0) j.erase("doubleSided");
+            else            j["doubleSided"] = (selDS == 2);
             changed = true;
         }
     }
 
-    // ── Parameters — reflection-ordered; only keys present in the asset ─────
-    if (j.contains("params") && j["params"].is_object()) {
+    // ── Parameters — reflection-ordered. Key present in the doc = authored
+    // (overrides the layer below); absent = inherit — the renderer falls
+    // through to the cooked submesh default's value, shader default last.
+    {
         ImGui::SeparatorText("Parameters");
+        if (!j["params"].is_object()) j["params"] = json::object();
         for (const auto& def : mtype->params) {
             if (def.name.empty() || def.name[0] == '_') continue;
-            auto it = j["params"].find(def.name);
-            if (it == j["params"].end()) continue;
 
             ImGui::PushID(def.name.c_str());
             const char* lbl = def.displayName.empty()
                               ? def.name.c_str() : def.displayName.c_str();
-            ImGui::TextUnformatted(lbl);
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(std::max(30.f, ImGui::GetContentRegionAvail().x));
-            ParamValue pv = JsonToParamValue(*it, DefaultParamValue(def));
-            if (DrawReflectedParam(def, pv, "##v")) {
-                *it = ParamValueToJson(pv);
-                changed = true;
+            auto it = j["params"].find(def.name);
+            if (it != j["params"].end()) {
+                if (ImGui::SmallButton("-##rmP")) {
+                    j["params"].erase(def.name);
+                    changed = true;
+                } else {
+                    ImGui::SameLine();
+                    ImGui::TextUnformatted(lbl);
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(
+                        std::max(30.f, ImGui::GetContentRegionAvail().x));
+                    ParamValue pv = JsonToParamValue(*it, DefaultParamValue(def));
+                    if (DrawReflectedParam(def, pv, "##v")) {
+                        *it = ParamValueToJson(pv);
+                        changed = true;
+                    }
+                }
+            } else {
+                if (ImGui::SmallButton("+##addP")) {
+                    j["params"][def.name] =
+                        ParamValueToJson(DefaultParamValue(def));
+                    changed = true;
+                }
+                ImGui::SameLine();
+                ImGui::TextUnformatted(lbl);
+                ImGui::SameLine();
+                ImGui::TextDisabled("(inherit)");
             }
             ImGui::PopID();
         }
@@ -245,22 +311,45 @@ void MaterialAssetInspector::Draw(const fs::path& path) {
                 ImGui::TextDisabled("  %s (not in shader reflection)", key.c_str());
     }
 
-    // ── Textures — asset pickers writing UUID strings back to the doc ───────
-    if (j.contains("textures") && j["textures"].is_object()) {
+    // ── Textures — same authored/inherit split as params. An added-but-empty
+    // picker still inherits at runtime (only a valid UUID counts as authored).
+    {
         ImGui::SeparatorText("Textures");
-        for (auto& [key, val] : j["textures"].items()) {
-            ImGui::PushID(key.c_str());
-            const TextureDef* td = mtype->FindTexture(key);
-            const char* lbl = (td && !td->displayName.empty())
-                              ? td->displayName.c_str() : key.c_str();
-            AssetID id = AssetID::FromString(val.is_string() ? val.get<std::string>()
-                                                             : std::string{});
-            if (DrawAssetIDField(lbl, id, "Texture", m_ctx->assetReg, m_ctx->iconCache)) {
-                val = id.IsValid() ? id.ToString() : std::string{};
-                changed = true;
+        if (!j["textures"].is_object()) j["textures"] = json::object();
+        for (const auto& td : mtype->textures) {
+            ImGui::PushID(td.name.c_str());
+            const char* lbl = td.displayName.empty()
+                              ? td.name.c_str() : td.displayName.c_str();
+            auto it = j["textures"].find(td.name);
+            if (it != j["textures"].end()) {
+                if (ImGui::SmallButton("-##rmT")) {
+                    j["textures"].erase(td.name);
+                    changed = true;
+                } else {
+                    ImGui::SameLine();
+                    AssetID id = AssetID::FromString(
+                        it->is_string() ? it->get<std::string>() : std::string{});
+                    if (DrawAssetIDField(lbl, id, "Texture",
+                                         m_ctx->assetReg, m_ctx->iconCache)) {
+                        *it = id.IsValid() ? id.ToString() : std::string{};
+                        changed = true;
+                    }
+                }
+            } else {
+                if (ImGui::SmallButton("+##addT")) {
+                    j["textures"][td.name] = "";
+                    changed = true;
+                }
+                ImGui::SameLine();
+                ImGui::TextUnformatted(lbl);
+                ImGui::SameLine();
+                ImGui::TextDisabled("(inherit)");
             }
             ImGui::PopID();
         }
+        for (const auto& [key, val] : j["textures"].items())
+            if (!mtype->FindTexture(key))
+                ImGui::TextDisabled("  %s (not in shader reflection)", key.c_str());
     }
 
     if (changed) m_dirty = true;

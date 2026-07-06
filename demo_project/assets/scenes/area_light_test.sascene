@@ -539,9 +539,9 @@
         "class": "",
         "fields": [
           {
-            "kind": "String",
-            "name": "targetName",
-            "value": "Player"
+            "kind": "Float",
+            "name": "smoothing",
+            "value": 8.0
           },
           {
             "kind": "Vec3",
@@ -562,9 +562,9 @@
             ]
           },
           {
-            "kind": "Float",
-            "name": "smoothing",
-            "value": 8.0
+            "kind": "String",
+            "name": "targetName",
+            "value": "Player"
           }
         ]
       },

@@ -93,10 +93,6 @@ public:
                            const ScriptFieldValue& value,
                            ScriptFieldKind kind = ScriptFieldKind::Unsupported);
 
-    // Capture current field values from the C# instance back into sc.fields.
-    // Reserved for future PIE → Edit value sync; not used internally in #74.
-    void CaptureFieldValues(uint64_t entityId, ScriptComponent& sc);
-
 private:
     // hostfxr function pointer types (platform-specific char_t handled in .cpp)
     using fn_initialize_t    = int(*)(const void*, void*, void*);
@@ -114,7 +110,6 @@ private:
     using GetClassSchemaBlobDelegate   = int (*)(void* classNameUtf8, void* outBuf, int capacity);
     using GetClassDefaultsBlobDelegate = int (*)(void* classNameUtf8, void* outBuf, int capacity);
     using ApplyFieldValuesDelegate     = int (*)(unsigned long long entityId, void* blob, int blobLen);
-    using CaptureFieldValuesDelegate   = int (*)(unsigned long long entityId, void* outBuf, int capacity);
 
     void InvokeAll(entt::registry& reg, int method, float arg);
     bool LoadBridgeFunctions(void* loadAndGetFn);
@@ -140,7 +135,6 @@ private:
     GetClassSchemaBlobDelegate   m_fnGetSchemaBlob   = nullptr;
     GetClassDefaultsBlobDelegate m_fnGetDefaultsBlob = nullptr;
     ApplyFieldValuesDelegate     m_fnApplyFields     = nullptr;
-    CaptureFieldValuesDelegate   m_fnCaptureFields   = nullptr;
 
     float                    m_totalTime = 0.f;
 

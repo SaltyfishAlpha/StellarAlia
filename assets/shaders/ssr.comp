@@ -22,7 +22,7 @@ layout(set = 2, binding = 3) uniform sampler2D t_HDR;               // lit scene
 layout(set = 2, binding = 4) uniform sampler2D t_AO;                // GTAO (1.0 = no occlusion)
 layout(set = 2, binding = 5, rgba16f) uniform writeonly image2D u_SSRRadiance; // rgb=hit radiance, a=pdf
 layout(set = 2, binding = 6) uniform sampler2D t_HiZ;              // min depth pyramid (Issue #89)
-layout(set = 2, binding = 7, rgba16f) uniform writeonly image2D u_SSRHit;      // rg=hitUV, b=conf, a=mask
+layout(set = 2, binding = 7, rgba16f) uniform writeonly image2D u_SSRHit;      // r=mean view-space hit distance (Issue #104), b=conf, a=mask
 
 layout(push_constant) uniform PC {
     int   maxSteps;
@@ -83,9 +83,10 @@ vec3 ImportanceSampleGGX(vec2 Xi, vec3 N, float roughness) {
 // view-space Z reconstructed perspective-correctly (1/z_view is what's linear across
 // the screen), which is what fixes the view-space-march depth banding of #48.
 bool HiZTrace(vec3 p0, vec3 p1, float z0v, float z1v, int maxSteps, float thickness,
-              out vec2 hitUV) {
+              out vec2 hitUV, out float hitZView) {
     vec2 texSize = vec2(textureSize(t_HiZ, 0));
     int  maxMip  = textureQueryLevels(t_HiZ) - 1;
+    hitZView = z0v;
 
     vec3 dir = p1 - p0;
     if (abs(dir.x) < 1e-7) dir.x = dir.x < 0.0 ? -1e-7 : 1e-7;
@@ -133,7 +134,7 @@ bool HiZTrace(vec3 p0, vec3 p1, float z0v, float z1v, int maxSteps, float thickn
             if (mip == 0) {
                 float tHit  = max(tCross, t);
                 float zvRay = 1.0 / mix(invZ0, invZ1, tHit);
-                if (zvSurf - zvRay < thickness) { hitUV = p0.xy + dir.xy * tHit; return true; }
+                if (zvSurf - zvRay < thickness) { hitUV = p0.xy + dir.xy * tHit; hitZView = zvRay; return true; }
                 t = tCell; mip = min(mip + 1, maxMip);   // too far behind → keep searching
             } else {
                 t = max(t, tCross);                  // move to the crossing, refine
@@ -148,9 +149,12 @@ bool HiZTrace(vec3 p0, vec3 p1, float z0v, float z1v, int maxSteps, float thickn
 }
 
 // One stochastic reflection sample: microfacet normal H (view space) → screen-space Hi-Z
-// march. Returns whether it hit + the hit UV.
-bool TraceSample(vec3 viewPos, vec3 viewN, vec3 H, int maxSteps, float thickness, out vec2 hitUV) {
-    hitUV = vec2(0.0);
+// march. Returns whether it hit + the hit UV + the view-space ray length to the hit
+// (Issue #104: feeds the temporal accumulator's virtual-image reprojection).
+bool TraceSample(vec3 viewPos, vec3 viewN, vec3 H, int maxSteps, float thickness,
+                 out vec2 hitUV, out float hitDist) {
+    hitUV   = vec2(0.0);
+    hitDist = 0.0;
     vec3 viewR = reflect(normalize(viewPos), H);
     if (viewR.z >= 0.0) return false;                 // reflects off-screen (toward camera)
 
@@ -179,7 +183,11 @@ bool TraceSample(vec3 viewPos, vec3 viewN, vec3 H, int maxSteps, float thickness
     vec3  p0  = vec3(s0, 0.0);
     vec3  p1  = vec3(s0 + d * tClip, 0.0);
     float z1v = 1.0 / mix(invZ0, invZ1, tClip);
-    return HiZTrace(p0, p1, rayStart.z, z1v, maxSteps, thickness, hitUV);
+    float hitZView;
+    if (!HiZTrace(p0, p1, rayStart.z, z1v, maxSteps, thickness, hitUV, hitZView)) return false;
+    // viewR is unit-length, so the ray parameter recovered from view Z IS the distance.
+    hitDist = max((hitZView - rayStart.z) / viewR.z, 0.0);
+    return true;
 }
 
 void main() {
@@ -220,9 +228,10 @@ void main() {
     bool mirror  = roughness < 0.05;
     int  N       = mirror ? 1 : 8;
 
-    vec3  accum = vec3(0.0);
-    float wsum  = 0.0;   // Σ edge-fade over hits
-    int   hits  = 0;
+    vec3  accum   = vec3(0.0);
+    float wsum    = 0.0;   // Σ edge-fade over hits
+    float distSum = 0.0;   // Σ edge-fade-weighted hit distance (Issue #104)
+    int   hits    = 0;
 
     for (int i = 0; i < N; ++i) {
         vec3 H;
@@ -234,13 +243,15 @@ void main() {
                                  Hash12(vec2(px) + float(u_Frame.frameIndex) + 17.0)));
             H = ImportanceSampleGGX(Xi, viewN, roughness);
         }
-        vec2 hUV;
-        if (TraceSample(viewPos, viewN, H, pc.maxSteps, pc.thickness, hUV)) {
+        vec2  hUV;
+        float hDist;
+        if (TraceSample(viewPos, viewN, H, pc.maxSteps, pc.thickness, hUV, hDist)) {
             vec2 e  = smoothstep(vec2(0.0), vec2(0.08), hUV)
                     * (1.0 - smoothstep(vec2(0.92), vec2(1.0), hUV));
             float ef = e.x * e.y;
-            accum += ef * textureLod(t_HDR, hUV, 0.0).rgb;
-            wsum  += ef;
+            accum   += ef * textureLod(t_HDR, hUV, 0.0).rgb;
+            wsum    += ef;
+            distSum += ef * hDist;
             ++hits;
         }
     }
@@ -252,5 +263,5 @@ void main() {
     float conf     = (wsum / float(N)) * roughFade * pc.strength;
     float pdf      = mirror ? -1.0 : 1.0;   // <0 tells the resolve to skip spatial blur (mirror)
     imageStore(u_SSRRadiance, px, vec4(radiance, pdf));
-    imageStore(u_SSRHit,      px, vec4(0.0, 0.0, conf, 1.0));
+    imageStore(u_SSRHit,      px, vec4(distSum / wsum, 0.0, conf, 1.0));
 }

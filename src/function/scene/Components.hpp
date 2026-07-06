@@ -81,6 +81,10 @@ struct DirectionalLightComponent {
     glm::vec3 color      = { 1.f, 1.f, 1.f };
     float     intensity  = 1.f;
     bool      castShadow = false;
+    // Issue #49: marks the "sun" — selects which directional light drives the
+    // shadow map and volumetric fog god rays. First marked wins; when none is
+    // marked the first directional light found is used (legacy behaviour).
+    bool      isSun      = false;
 };
 
 struct PointLightComponent {

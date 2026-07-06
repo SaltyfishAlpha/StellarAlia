@@ -22,6 +22,11 @@ bool DirectionalLightDrawer::TryDraw(entt::registry& reg, entt::entity entity,
         [](float* p){ return ImGui::DragFloat("Intensity", p, 0.05f, 0.f, 100.f); });
     TrackedFieldEdit(&dl->castShadow, ctx, "Toggle Cast Shadow",
         [](bool* p){ return ImGui::Checkbox("Cast Shadow", p); });
+    TrackedFieldEdit(&dl->isSun, ctx, "Toggle Sun Source",
+        [](bool* p){ return ImGui::Checkbox("Sun Source", p); });
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Drives the shadow map and volumetric fog god rays.\n"
+                          "First marked directional light wins; none marked = first found.");
     return true;
 }
 

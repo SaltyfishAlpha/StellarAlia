@@ -51,7 +51,10 @@ void main() {
     if (alpha < 0.005) discard;
 
     // ── Write correct clip depth for geometry occlusion ───────────────────────
-    vec4 clipPos = u_Frame.viewProj * vec4(pos, 1.0);
+    // Unjittered (Issue #107): the grid draws after TAA; a jittered depth makes
+    // the occlusion boundary against geometry wobble per frame. The ray itself
+    // already comes from the unjittered invViewProj.
+    vec4 clipPos = u_Frame.currUnjitteredViewProj * vec4(pos, 1.0);
     gl_FragDepth = clipPos.z / clipPos.w;
 
     o_color = vec4(gridColor, alpha);

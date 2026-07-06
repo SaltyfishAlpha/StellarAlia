@@ -14,6 +14,7 @@ VkFormat ToVkFormat(RHIFormat format) noexcept {
         case RHIFormat::RG32F:        return VK_FORMAT_R32G32_SFLOAT;
         case RHIFormat::R8_UNORM:     return VK_FORMAT_R8_UNORM;
         case RHIFormat::R32F:         return VK_FORMAT_R32_SFLOAT;
+        case RHIFormat::R32_UINT:     return VK_FORMAT_R32_UINT;
         case RHIFormat::D32F:         return VK_FORMAT_D32_SFLOAT;
         case RHIFormat::D24_S8:       return VK_FORMAT_D24_UNORM_S8_UINT;
         case RHIFormat::D16_UNORM:    return VK_FORMAT_D16_UNORM;
@@ -34,6 +35,7 @@ RHIFormat FromVkFormat(VkFormat format) noexcept {
         case VK_FORMAT_R16G16B16A16_SFLOAT:      return RHIFormat::RGBA16F;
         case VK_FORMAT_R32G32B32A32_SFLOAT:      return RHIFormat::RGBA32F;
         case VK_FORMAT_R16G16_SFLOAT:            return RHIFormat::RG16F;
+        case VK_FORMAT_R32_UINT:                 return RHIFormat::R32_UINT;
         case VK_FORMAT_D32_SFLOAT:               return RHIFormat::D32F;
         case VK_FORMAT_D24_UNORM_S8_UINT:        return RHIFormat::D24_S8;
         default:                                 return RHIFormat::Undefined;
