@@ -159,6 +159,7 @@ add_subdirectory(examples/compute_demo)         # Compute pipeline framework (Co
 add_subdirectory(examples/cook_demo)            # Asset cook pipeline / tooling (local assets)
 add_subdirectory(examples/input_demo)           # Action-mapped input system
 add_subdirectory(examples/material_demo)        # Material + shader cook & dispatch test
+add_subdirectory(examples/import_format_demo)   # Issue #108 import formats (OBJ/DDS/FBX loaders + cook round-trip)
 
 # Silenced — full-system tests → belong in demo_project:
 # add_subdirectory(examples/sandbox)              # full scene (code-built) + glTF + IBL

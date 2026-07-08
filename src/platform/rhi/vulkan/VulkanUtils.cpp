@@ -22,6 +22,9 @@ VkFormat ToVkFormat(RHIFormat format) noexcept {
         case RHIFormat::BC3_UNORM:    return VK_FORMAT_BC3_UNORM_BLOCK;
         case RHIFormat::BC5_UNORM:    return VK_FORMAT_BC5_UNORM_BLOCK;
         case RHIFormat::BC7_UNORM:    return VK_FORMAT_BC7_UNORM_BLOCK;
+        case RHIFormat::BC1_SRGB:     return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+        case RHIFormat::BC3_SRGB:     return VK_FORMAT_BC3_SRGB_BLOCK;
+        case RHIFormat::BC7_SRGB:     return VK_FORMAT_BC7_SRGB_BLOCK;
         default:                      return VK_FORMAT_UNDEFINED;
     }
 }
@@ -57,6 +60,19 @@ VkImageLayout ToVkImageLayout(RHIResourceState state) noexcept {
         case RHIResourceState::CopyDst:         return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         case RHIResourceState::Present:         return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
         default:                                return VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+}
+
+VkImageAspectFlags FormatAspectFlags(VkFormat format) noexcept {
+    switch (format) {
+        case VK_FORMAT_D32_SFLOAT:
+        case VK_FORMAT_D16_UNORM:
+            return VK_IMAGE_ASPECT_DEPTH_BIT;
+        case VK_FORMAT_D24_UNORM_S8_UINT:
+        case VK_FORMAT_D32_SFLOAT_S8_UINT:
+            return VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+        default:
+            return VK_IMAGE_ASPECT_COLOR_BIT;
     }
 }
 

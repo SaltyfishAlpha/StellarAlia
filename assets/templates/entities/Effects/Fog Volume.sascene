@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "name": "Fog Volume",
+  "entities": [
+    {
+      "id": 0,
+      "parent": -1,
+      "tag": "Fog Volume",
+      "transform": {
+        "position": [0.0, 1.0, 0.0],
+        "rotation": [1.0, 0.0, 0.0, 0.0],
+        "scale": [4.0, 2.0, 4.0]
+      },
+      "fogVolume": {
+        "density": 0.1,
+        "albedo": [0.9, 0.9, 0.9],
+        "falloff": 0.2
+      }
+    }
+  ]
+}

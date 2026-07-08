@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 #include <glm/glm.hpp>
@@ -54,6 +55,15 @@ struct MaterialData {
     bool        doubleSided = false;
     std::string alphaMode   = "OPAQUE";  // OPAQUE | MASK | BLEND
     float       alphaCutoff = 0.5f;
+
+    // Issue #108 — pass-through for non-PBR shading models (MToon, MMDToon…).
+    // A loader sets shadingModel + format-specific params/texture slots and
+    // CookMaterial writes them into the .samatc JSON verbatim. Loading is
+    // reflection-driven against the registered MaterialType and unknown keys
+    // are ignored, so nothing downstream needs to know the format.
+    std::string                               shadingModel = "PBR";
+    std::map<std::string, std::vector<float>> extraParams;    // 1=scalar, 2-4=vecN
+    std::map<std::string, TextureRef>         extraTextures;  // slot name → image
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

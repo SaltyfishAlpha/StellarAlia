@@ -31,7 +31,7 @@ void SA_Script_SetTime(float dt, float totalTime);
 // Avoids requiring StellarAliaRuntime to be a SHARED library.
 // IMPORTANT: `version` must stay first; increment when adding/removing fields.
 struct ScriptApiFunctionTable {
-    uint32_t version = 7;
+    uint32_t version = 8;
     // Entity — transform (local, parent-relative)
     void    (*Entity_GetLocalPosition)     (uint64_t, float*, float*, float*);
     void    (*Entity_SetLocalPosition)     (uint64_t, float,  float,  float);
@@ -149,6 +149,13 @@ struct ScriptApiFunctionTable {
     void    (*PostProcess_SetFilmGrainIntensity) (float v);
     float   (*PostProcess_GetFilmGrainSize)      ();
     void    (*PostProcess_SetFilmGrainSize)      (float v);
+
+    // ── v8 — Animator clip control (Issue #83 P2-5) ───────────────────────────
+    // SetClip = hard cut; CrossfadeTo = fade over `fade` seconds. Both set
+    // clipAsset from the uuid string; the actual swap/fade runs in the next
+    // AnimationSystem::Update via AnimatorComponent::pendingFadeOverride.
+    void (*Animator_SetClip)    (uint64_t, const char* /*uuid*/);
+    void (*Animator_CrossfadeTo)(uint64_t, const char* /*uuid*/, float /*fade*/);
 };
 
 ScriptApiFunctionTable SA_Script_BuildFunctionTable();
@@ -216,6 +223,8 @@ int32_t SA_Animator_IsPlaying (uint64_t id);
 void    SA_Animator_SetPlaying(uint64_t id, int32_t playing);
 float   SA_Animator_GetSpeed  (uint64_t id);
 void    SA_Animator_SetSpeed  (uint64_t id, float speed);
+void    SA_Animator_SetClip    (uint64_t id, const char* uuid);              // v8: hard cut
+void    SA_Animator_CrossfadeTo(uint64_t id, const char* uuid, float fade);  // v8: fade
 
 // Input
 float SA_Input_GetKey   (const char* devicePath);

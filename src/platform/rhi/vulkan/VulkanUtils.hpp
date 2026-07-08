@@ -9,6 +9,9 @@ VkFormat      ToVkFormat(RHIFormat format) noexcept;
 RHIFormat     FromVkFormat(VkFormat format) noexcept;
 VkImageLayout ToVkImageLayout(RHIResourceState state) noexcept;
 
+// Image aspect implied by a format (depth / depth+stencil / color).
+VkImageAspectFlags FormatAspectFlags(VkFormat format) noexcept;
+
 // Full-barrier image layout transition via synchronization2 (Vulkan 1.3 core).
 // Uses ALL_COMMANDS + MEMORY_READ|WRITE on both sides — safe for correctness,
 // optimise stage masks later when needed.

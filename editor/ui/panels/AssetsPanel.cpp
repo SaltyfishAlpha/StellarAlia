@@ -16,8 +16,10 @@
 #include "importer/InputMapImporter.hpp"
 #include "function/material/MaterialManager.hpp"
 #include "function/scene/Scene.hpp"
+#include "engine/SaProject.hpp"
 #include "resource/EntityTemplateRegistry.hpp"
 #include "resource/ResourceManager.hpp"
+#include "resource/loaders/ModelLoader.hpp"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -169,6 +171,10 @@ void AssetsPanel::SetSelectedPath(const fs::path& p) {
 
 fs::path AssetsPanel::GetCurrentDestDir() const {
     std::error_code ec;
+    // The folder open in the file pane wins (Unity semantics) — m_selectedPath
+    // may be a stale click from a different directory.
+    if (!m_selectedDir.empty() && fs::exists(m_selectedDir, ec))
+        return m_selectedDir;
     if (!m_selectedPath.empty())
         return fs::is_directory(m_selectedPath, ec) ? m_selectedPath : m_selectedPath.parent_path();
     return m_assetsRoot;
@@ -724,6 +730,37 @@ void AssetsPanel::DeletePath(const fs::path& path) {
         m_onCookShaders();
 }
 
+void AssetsPanel::SetStartupScene(const fs::path& scenePath) {
+    if (m_assetsRoot.empty()) return;
+    const fs::path projectDir = m_assetsRoot.parent_path();
+
+    // Same lookup as EditorMode: first .saproject at the project root.
+    fs::path saprojectPath;
+    std::error_code ec;
+    for (const auto& e : fs::directory_iterator(projectDir, ec))
+        if (e.path().extension() == ".saproject") { saprojectPath = e.path(); break; }
+
+    SaProject proj;
+    if (saprojectPath.empty()) {
+        saprojectPath = projectDir / (projectDir.filename().string() + ".saproject");
+        proj.name = projectDir.filename().string();
+        SA_LOG_INFO("AssetsPanel: no .saproject found — creating '{}'",
+                    saprojectPath.filename().string());
+    } else if (!LoadSaProject(saprojectPath, proj)) {
+        SA_LOG_WARN("AssetsPanel: could not read '{}'", saprojectPath.string());
+        return;
+    }
+
+    const fs::path rel = fs::relative(scenePath, projectDir, ec);
+    proj.startupScene = (ec || rel.empty() ? scenePath.filename() : rel).generic_string();
+
+    if (SaveSaProject(saprojectPath, proj))
+        SA_LOG_INFO("AssetsPanel: startup scene → '{}' (in {})",
+                    proj.startupScene, saprojectPath.filename().string());
+    else
+        SA_LOG_WARN("AssetsPanel: failed to write '{}'", saprojectPath.string());
+}
+
 void AssetsPanel::MoveAsset(const fs::path& src, const fs::path& destDir) {
     if (!fs::exists(src)) return;
     if (fs::weakly_canonical(src.parent_path()) == fs::weakly_canonical(destDir)) return;
@@ -956,14 +993,17 @@ static bool IsSidecar(const fs::path& p) {
     return p.extension() == ".sameta";
 }
 
+// Also gates thumbnail generation — EditorIconCache decodes dds via bcdec and
+// hdr via tonemapped preview (Issue #108).
 static bool IsImageExt(const std::string& ext) {
     return ext == ".png" || ext == ".jpg" || ext == ".jpeg"
-        || ext == ".bmp" || ext == ".tga";
+        || ext == ".bmp" || ext == ".tga"
+        || ext == ".dds" || ext == ".hdr";
 }
 
 // Returns the FA_ICON_* glyph for a file extension, or nullptr for unknown types.
 static const char* GlyphForExt(const std::string& ext) {
-    if (ext == ".glb" || ext == ".gltf" || ext == ".fbx") return FA_ICON_MESH;
+    if (Resource::ModelLoader::SupportsExtension(ext)) return FA_ICON_MESH;
     if (IsImageExt(ext))                                   return FA_ICON_TEXTURE;
     if (ext == ".samat" || ext == ".mat")                  return FA_ICON_MATERIAL;
     if (ext == ".sascene")                                 return FA_ICON_SCENE;
@@ -1298,13 +1338,17 @@ void AssetsPanel::DrawFilePane() {
             const bool hasMeta   = fs::exists(ctxMeta);
             const bool isSascene = (ext == ".sascene");
             const bool isSaglsl  = (ext == ".saglsl");
-            const bool isGltf    = (ext == ".glb" || ext == ".gltf");
+            // Extract Materials applies to any importable model format —
+            // derived .samatc cooking is format-agnostic behind ModelLoader.
+            const bool isModel   = Resource::ModelLoader::SupportsExtension(ext);
             if (ImGui::BeginPopupContextItem("##file_ctx")) {
                 if (hasMeta && ImGui::MenuItem("Reimport")) ReimportFile(p);
-                if (isGltf && hasMeta && ImGui::MenuItem("Extract Materials"))
+                if (isModel && hasMeta && ImGui::MenuItem("Extract Materials"))
                     ExtractMaterials(p);
                 if (isSascene && ImGui::MenuItem("Load Scene") && m_onSceneLoad)
                     m_onSceneLoad(p);
+                if (isSascene && ImGui::MenuItem("Set as Startup Scene"))
+                    SetStartupScene(p);
                 if (ext == ".cs" && ImGui::MenuItem("Recompile"))
                     m_presenter.RequestRecompileScripts();
                 if (isSaglsl && ImGui::MenuItem("Create Material from Shader")) {
@@ -1560,7 +1604,18 @@ void AssetsPanel::ReimportFile(const fs::path& srcPath) {
     } else if (meta.type == "Scene") {
         // Native format — no cook step. Fall through to registry rescan.
     } else if (meta.type == "Mesh") {
-        Import::CookMesh(entry, outDir, /*force=*/true);
+        // Evict the derived materials' cached instances afterwards — the
+        // re-cook may have re-resolved texture references (Issue #108: import
+        // fixed after companion textures appear), and a stale instance keeps
+        // rendering with the old (possibly missing) bindings until restart.
+        std::vector<AssetID> matIDs;
+        Import::CookMesh(entry, outDir, /*force=*/true, &matIDs);
+        if (m_matMgr) {
+            bool evicted = false;
+            for (const AssetID& id : matIDs)
+                evicted |= m_matMgr->EvictInstance(id);
+            if (evicted && m_scene) m_scene->MarkMaterialDirty();
+        }
     } else if (meta.type == "Texture") {
         Import::CookTexture(entry, outDir, /*force=*/true);
     } else if (meta.type == "Material") {

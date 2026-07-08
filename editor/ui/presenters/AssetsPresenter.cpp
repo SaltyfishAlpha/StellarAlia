@@ -7,6 +7,7 @@
 #include "core/asset/AssetID.hpp"
 
 #include "importer/ImportScanner.hpp"
+#include "resource/loaders/ModelLoader.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -28,49 +29,83 @@ static std::string AssetTypeFromExt(const fs::path& ext) {
     std::string e = ext.string();
     std::transform(e.begin(), e.end(), e.begin(),
                    [](unsigned char c){ return static_cast<char>(::tolower(c)); });
-    if (e == ".glb" || e == ".gltf")               return "Mesh";
+    if (Resource::ModelLoader::SupportsExtension(e)) return "Mesh";
     if (e == ".png" || e == ".jpg" || e == ".jpeg" ||
-        e == ".bmp" || e == ".tga")                 return "Texture";
+        e == ".bmp" || e == ".tga" || e == ".dds")  return "Texture";
     if (e == ".hdr")                                return "Texture";
     return {};
 }
 
-static void CopyGltfCompanions(const fs::path& gltfSrc, const fs::path& destDir) {
-    std::ifstream f(gltfSrc);
-    if (!f) return;
-
-    using json = nlohmann::json;
-    json j;
-    try { f >> j; } catch (...) { return; }
-
-    const fs::path srcDir = gltfSrc.parent_path();
-    std::error_code ec;
+// Copy the external files a model references (textures, .mtl, .bin) next to
+// the imported copy, preserving relative sub-directories (Issue #108 — e.g.
+// SunTemple.fbx + Textures/*.dds). The cook side resolves references relative
+// to the imported model, so anything missed here cooks as an unresolved
+// derived UUID.
+static void CopyModelCompanions(const fs::path& modelSrc, const fs::path& destDir) {
+    const fs::path srcDir = modelSrc.parent_path();
 
     auto copyRef = [&](const std::string& uri) {
         if (uri.empty() || uri.starts_with("data:") || uri.find("://") != std::string::npos)
             return;
-        const fs::path src = srcDir / uri;
-        const fs::path dst = destDir / fs::path(uri).filename();
-        if (fs::exists(src) && !fs::exists(dst)) {
-            fs::copy_file(src, dst, ec);
-            if (!ec)
-                SA_LOG_INFO("AssetsPresenter: copied companion '{}'",
-                            fs::path(uri).filename().string());
-            else
-                SA_LOG_WARN("AssetsPresenter: failed to copy companion '{}': {}",
-                            fs::path(uri).filename().string(), ec.message());
-        }
+        fs::path rel(uri);
+        // Absolute or dir-escaping references can't be mirrored — flatten to
+        // the basename (matches the loaders' resolve-next-to-model fallback).
+        if (rel.is_absolute())
+            rel = rel.filename();
+        for (const auto& part : rel)
+            if (part == "..") { rel = rel.filename(); break; }
+
+        std::error_code ec;
+        const fs::path src = srcDir  / rel;
+        const fs::path dst = destDir / rel;
+        if (!fs::exists(src, ec) || fs::exists(dst, ec)) return;
+
+        fs::create_directories(dst.parent_path(), ec);
+        ec.clear();
+        fs::copy_file(src, dst, ec);
+        if (!ec)
+            SA_LOG_INFO("AssetsPresenter: copied companion '{}'", rel.string());
+        else
+            SA_LOG_WARN("AssetsPresenter: failed to copy companion '{}': {}",
+                        rel.string(), ec.message());
     };
 
-    if (j.contains("buffers"))
-        for (const auto& buf : j["buffers"])
-            if (buf.contains("uri") && buf["uri"].is_string())
-                copyRef(buf["uri"].get<std::string>());
+    std::string ext = modelSrc.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c){ return static_cast<char>(::tolower(c)); });
 
-    if (j.contains("images"))
-        for (const auto& img : j["images"])
-            if (img.contains("uri") && img["uri"].is_string())
-                copyRef(img["uri"].get<std::string>());
+    // .gltf external buffers (.bin) — invisible in SceneData, read the JSON.
+    if (ext == ".gltf") {
+        std::ifstream f(modelSrc);
+        if (f) {
+            nlohmann::json j;
+            try { f >> j; } catch (...) { j = nullptr; }
+            if (j.is_object() && j.contains("buffers"))
+                for (const auto& buf : j["buffers"])
+                    if (buf.contains("uri") && buf["uri"].is_string())
+                        copyRef(buf["uri"].get<std::string>());
+        }
+    }
+
+    // .obj material libraries — SceneData only exposes the parsed result.
+    if (ext == ".obj") {
+        std::ifstream f(modelSrc);
+        std::string line;
+        while (f && std::getline(f, line)) {
+            if (line.rfind("mtllib", 0) != 0) continue;
+            std::string name = line.substr(6);
+            name.erase(0, name.find_first_not_of(" \t"));
+            while (!name.empty() && (name.back() == '\r' || name.back() == ' '))
+                name.pop_back();
+            copyRef(name);
+        }
+    }
+
+    // Every format: externally referenced images, straight from the IR.
+    if (auto scene = Resource::ModelLoader::Load(modelSrc.string()))
+        for (const auto& img : scene->images)
+            if (!img.path.empty() && img.pixels.empty() && img.pixelsHDR.empty())
+                copyRef(img.path);
 }
 
 // ── Constructor ────────────────────────────────────────────────────────────────
@@ -155,9 +190,9 @@ fs::path AssetsPresenter::GetCurrentDestDir() const {
 void AssetsPresenter::RunNFDImport() {
 #ifdef SA_HAS_NFD
     static constexpr nfdfilteritem_t kFilters[] = {
-        { "Supported Assets", "gltf,glb,png,jpg,jpeg,bmp,tga,hdr" },
-        { "3D Models",        "gltf,glb"                           },
-        { "Textures",         "png,jpg,jpeg,bmp,tga,hdr"           },
+        { "Supported Assets", "gltf,glb,vrm,obj,fbx,png,jpg,jpeg,bmp,tga,hdr,dds" },
+        { "3D Models",        "gltf,glb,vrm,obj,fbx"                              },
+        { "Textures",         "png,jpg,jpeg,bmp,tga,hdr,dds"                      },
     };
 
     if (NFD_Init() != NFD_OKAY) {
@@ -240,13 +275,8 @@ bool AssetsPresenter::RunImportFile(const fs::path& srcPath, const fs::path& des
         }
     }
 
-    {
-        std::string ext = srcPath.extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(),
-                       [](unsigned char c){ return static_cast<char>(::tolower(c)); });
-        if (ext == ".gltf")
-            CopyGltfCompanions(srcPath, effectiveDest);
-    }
+    if (type == "Mesh")
+        CopyModelCompanions(srcPath, effectiveDest);
 
     const Import::AssetEntry entry = Import::EnsureMeta(destPath, type);
     if (!entry.meta.IsValid()) {

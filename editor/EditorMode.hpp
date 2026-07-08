@@ -120,6 +120,41 @@ private:
     bool                       m_gizmoIsUsing    = false;
     TransformComponent         m_gizmoDragStart  = {};
 
+    // #83 bone editing: selected joint of the primary entity's skeleton gizmo.
+    // While a joint is selected the gizmo manipulates that bone (writes
+    // BonePoseOverrideComponent) instead of the entity transform.
+    int32_t                    m_selectedBone    = -1;
+    entt::entity               m_boneSelEntity   = entt::null;
+    std::optional<BoneTRS>     m_boneDragStart;   // override entry at drag start
+
+    // Issue #111: asset drop is two-phase — the release frame requests a Place
+    // pick, the spawn happens when its result arrives next frame. fallbackRay
+    // preserves the release-frame camera for the y=0-plane miss fallback.
+    struct PendingPlacement {
+        bool                  active = false;
+        std::filesystem::path assetPath;
+        Core::Ray             fallbackRay{};
+    };
+    PendingPlacement           m_pendingPlacement;
+
+    // X-12: drag ghost preview — a real (non-undoable) entity following the
+    // surface under the cursor while a model asset hovers the viewport. On
+    // release the ghost's transform becomes the undoable spawn; on cancel it
+    // is destroyed without a trace.
+    struct DropPreview {
+        entt::entity          ghost = entt::null;
+        std::filesystem::path assetPath;
+        float                 standOffset      = 0.f;   // -minY of the model AABB
+        bool                  hoveredThisFrame = false;
+        bool                  commitRequested  = false;
+    };
+    DropPreview                m_dropPreview;
+    void UpdateDropPreview(const glm::vec3& surfacePos, const glm::quat& rot);
+    void DestroyDropPreview();
+    // -minY of the model's merged submesh AABB (0 when unavailable), so a
+    // drop can rest the AABB bottom on the surface instead of the pivot.
+    [[nodiscard]] float ComputeStandOffset(const std::filesystem::path& assetPath) const;
+
     void BuildContext(Application& app);
     void DrawOverlays();
     void DrawBillboardIcons();
@@ -127,6 +162,8 @@ private:
     void HandleViewportInteraction();
     [[nodiscard]] Core::Ray ScreenToWorldRay(float sx, float sy) const;
     static bool RayHitHorizontalPlane(const Core::Ray& ray, float planeY, glm::vec3& outHit);
+    // Shortest-arc rotation taking world +Y onto n (unit). Issue #111.
+    static glm::quat RotationUpTo(const glm::vec3& n);
     void LoadScene(const std::filesystem::path& path);
     void LoadProject(const std::filesystem::path& saprojectPath);
     // Shared by OnAttach (initial load) and LoadProject (project switch). Touches

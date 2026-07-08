@@ -7,7 +7,7 @@ namespace StellarAlia;
 // The C++ side passes a ScriptApiFunctionTable* in ScriptBridgeEntry.Initialize().
 internal static unsafe class NativeApi
 {
-    internal const uint ExpectedTableVersion = 7;
+    internal const uint ExpectedTableVersion = 8;
 
     private static ScriptApiFunctionTable* s_table;
 
@@ -167,6 +167,17 @@ internal static unsafe class NativeApi
     internal static void  SA_Animator_SetPlaying(ulong id, int playing)  => s_table->Animator_SetPlaying(id, playing);
     internal static float SA_Animator_GetSpeed  (ulong id)              => s_table->Animator_GetSpeed(id);
     internal static void  SA_Animator_SetSpeed  (ulong id, float speed)  => s_table->Animator_SetSpeed(id, speed);
+
+    internal static void SA_Animator_SetClip(ulong id, string uuid) {
+        byte[] bytes = Encoding.UTF8.GetBytes(uuid + '\0');
+        fixed (byte* p = bytes)
+            s_table->Animator_SetClip(id, (sbyte*)p);
+    }
+    internal static void SA_Animator_CrossfadeTo(ulong id, string uuid, float fade) {
+        byte[] bytes = Encoding.UTF8.GetBytes(uuid + '\0');
+        fixed (byte* p = bytes)
+            s_table->Animator_CrossfadeTo(id, (sbyte*)p, fade);
+    }
 
     // ── Input ─────────────────────────────────────────────────────────────────
 
@@ -481,4 +492,8 @@ internal unsafe struct ScriptApiFunctionTable
     public delegate*unmanaged<float, void>                                         PostProcess_SetFilmGrainIntensity;
     public delegate*unmanaged<float>                                               PostProcess_GetFilmGrainSize;
     public delegate*unmanaged<float, void>                                         PostProcess_SetFilmGrainSize;
+
+    // ── Animator clip control (v8, Issue #83 P2-5) ───────────────────────────
+    public delegate*unmanaged<ulong, sbyte*, void>                                 Animator_SetClip;
+    public delegate*unmanaged<ulong, sbyte*, float, void>                          Animator_CrossfadeTo;
 }

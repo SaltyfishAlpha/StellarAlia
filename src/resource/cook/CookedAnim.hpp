@@ -15,17 +15,21 @@ struct CookedAnim {
     bool IsValid() const { return !clip.channels.empty(); }
 };
 
-// ─── .saanim binary layout v1 ─────────────────────────────────────────────────
+// ─── .saanim binary layout ────────────────────────────────────────────────────
 //
-//  FileHeader  (96 bytes)
+//  FileHeader  (96 bytes)   — v2 repurposes the trailing pad word as event_count
 //  ChannelHeader[channel_count]  (16 bytes each)
 //  Per-channel data (sequential after headers):
 //    times[keyframe_count]  × float (4 bytes)
 //    values[keyframe_count] × vec4  (16 bytes)
+//  v2 event block (after all channel data), event_count entries:
+//    float time; uint32 name_len; char name[]; uint32 payload_len; char payload[]
 //
 namespace SaanimFormat {
     static constexpr uint32_t Magic   = 0x4D494E41u;  // 'ANIM' LE
-    static constexpr uint32_t Version = 1u;
+    // v2 (#83 P2): appended event block + header event_count. v1 reads with
+    // zero events (event_count field was reserved-zero pad in v1).
+    static constexpr uint32_t Version = 2u;
 
 #pragma pack(push, 1)
     struct FileHeader {
@@ -35,7 +39,8 @@ namespace SaanimFormat {
         uint64_t uuid_lo;
         float    duration;
         uint32_t channel_count;
-        char     clip_name[64];
+        char     clip_name[60];   // v1 had [64]; last 4 bytes now event_count
+        uint32_t event_count;     // v2; occupies v1's clip_name tail (always 0 in v1)
     };
     static_assert(sizeof(FileHeader) == 96);
 

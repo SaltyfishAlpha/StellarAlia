@@ -64,9 +64,17 @@ void InspectorPanel::RegisterComponent(ComponentDescriptor desc) {
 
 void InspectorPanel::RegisterBuiltinComponents() {
     // ── Rendering ─────────────────────────────────────────────────────────────
-    RegisterComponent(MakeComponentDesc<StaticMeshComponent>("Rendering", "Static Mesh"));
+    // Static/Skinned mesh are mutually exclusive (#108): an entity renders
+    // through exactly one mesh path — the popup hides one while the other exists.
+    {
+        auto desc = MakeComponentDesc<StaticMeshComponent>("Rendering", "Static Mesh");
+        desc.hasComp = [](entt::registry& r, entt::entity e) {
+            return r.any_of<StaticMeshComponent, SkinnedMeshComponent>(e); };
+        RegisterComponent(std::move(desc));
+    }
     RegisterComponent(MakeComponentDesc<MeshRendererComponent>("Rendering", "Mesh Renderer", /*markMaterialDirty*/true));
     RegisterComponent(MakeComponentDesc<MaterialOverrideComponent>("Rendering", "Material Override", /*markMaterialDirty*/true));
+    RegisterComponent(MakeComponentDesc<FogVolumeComponent>("Rendering", "Fog Volume"));  // Issue #110
 
     // ── Lighting ──────────────────────────────────────────────────────────────
     RegisterComponent(MakeComponentDesc<DirectionalLightComponent>("Lighting", "Directional Light"));
@@ -79,7 +87,12 @@ void InspectorPanel::RegisterBuiltinComponents() {
 
     // ── Animation ─────────────────────────────────────────────────────────────
     RegisterComponent(MakeComponentDesc<AnimatorComponent>("Animation", "Animator"));
-    RegisterComponent(MakeComponentDesc<SkinnedMeshComponent>("Animation", "Skinned Mesh"));
+    {
+        auto desc = MakeComponentDesc<SkinnedMeshComponent>("Animation", "Skinned Mesh");
+        desc.hasComp = [](entt::registry& r, entt::entity e) {
+            return r.any_of<StaticMeshComponent, SkinnedMeshComponent>(e); };
+        RegisterComponent(std::move(desc));
+    }
 
     // ── Physics ───────────────────────────────────────────────────────────────
     RegisterComponent(MakeComponentDesc<RigidBodyComponent>("Physics (req. restart)", "Rigid Body"));
@@ -104,10 +117,10 @@ void InspectorPanel::RegisterAssetDrawers() {
     }
     m_assetDrawers[".sascene"] = std::make_unique<SceneAssetInspector>();
 
-    for (auto ext : {".gltf", ".glb", ".fbx", ".obj"})
+    for (auto ext : {".gltf", ".glb", ".vrm", ".fbx", ".obj"})
         m_assetDrawers[ext] = std::make_unique<ModelAssetInspector>();
 
-    for (auto ext : {".png", ".jpg", ".jpeg", ".hdr", ".tga", ".bmp", ".exr"})
+    for (auto ext : {".png", ".jpg", ".jpeg", ".hdr", ".tga", ".bmp", ".exr", ".dds"})
         m_assetDrawers[ext] = std::make_unique<ImageAssetInspector>();
 }
 

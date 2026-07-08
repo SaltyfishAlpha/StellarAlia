@@ -95,7 +95,8 @@ private:
 class CreateStaticMeshCommand final : public IEditorCommand {
 public:
     CreateStaticMeshCommand(std::string name, AssetID assetId,
-                            entt::entity parent, glm::vec3 spawnPos);
+                            entt::entity parent, glm::vec3 spawnPos,
+                            glm::quat spawnRot = glm::quat{1.f, 0.f, 0.f, 0.f});
 
     void Execute(EditorContext& ctx) override;
     void Undo(EditorContext& ctx) override;
@@ -106,6 +107,7 @@ private:
     AssetID      m_assetId;
     entt::entity m_parent;
     glm::vec3    m_spawnPos;
+    glm::quat    m_spawnRot;
     entt::entity m_entity = entt::null;
 };
 

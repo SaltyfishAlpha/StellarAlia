@@ -43,7 +43,9 @@ bool LoadCookedTexture(const std::string& path, CookedTexture& out) {
 
     SatexFormat::FileHeader hdr{};
     f.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
-    if (!f || hdr.magic != SatexFormat::Magic || hdr.version != SatexFormat::Version)
+    // v1 files share the v2 layout (only new format enum values were added).
+    if (!f || hdr.magic != SatexFormat::Magic ||
+        hdr.version < 1u || hdr.version > SatexFormat::Version)
         return false;
 
     out.id.hi     = hdr.uuid_hi;

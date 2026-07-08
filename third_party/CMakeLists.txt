@@ -424,3 +424,71 @@ else()
     message(STATUS "Tracy: submodule not found at third_party/tracy/ — profiling disabled")
 endif()
 # Target available: Tracy::TracyClient
+
+# ============================================================================
+# tinyobjloader — Wavefront OBJ loader (header-only, Issue #108)
+# Preferred: git submodule at third_party/tinyobjloader/
+# Used as an interface target (own CMakeLists builds extra targets we skip);
+# TINY_OBJ_LOADER_IMPLEMENTATION lives in ObjLoader.cpp.
+# ============================================================================
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tinyobjloader/tiny_obj_loader.h)
+    add_library(tinyobjloader INTERFACE)
+    target_include_directories(tinyobjloader INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/tinyobjloader)
+    message(STATUS "tinyobjloader: Using local submodule at third_party/tinyobjloader")
+else()
+    message(WARNING "tinyobjloader not found — OBJ import unavailable. "
+                    "Run: git submodule add https://github.com/tinyobjloader/tinyobjloader.git third_party/tinyobjloader")
+endif()
+# Target available: tinyobjloader
+
+# ============================================================================
+# ufbx — FBX loader (single-file C, zero deps, Issue #108)
+# Preferred: git submodule at third_party/ufbx/
+# ============================================================================
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/ufbx/ufbx.c)
+    add_library(ufbx STATIC ${CMAKE_CURRENT_SOURCE_DIR}/ufbx/ufbx.c)
+    target_include_directories(ufbx PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/ufbx)
+    message(STATUS "ufbx: Using local submodule at third_party/ufbx")
+else()
+    message(WARNING "ufbx not found — FBX import unavailable. "
+                    "Run: git submodule add https://github.com/ufbx/ufbx.git third_party/ufbx")
+endif()
+# Target available: ufbx
+
+# ============================================================================
+# MikkTSpace — industry-standard tangent space generation (Issue #108)
+# Preferred: git submodule at third_party/MikkTSpace/
+# ============================================================================
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/MikkTSpace/mikktspace.c)
+    add_library(mikktspace STATIC ${CMAKE_CURRENT_SOURCE_DIR}/MikkTSpace/mikktspace.c)
+    target_include_directories(mikktspace PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/MikkTSpace)
+    message(STATUS "MikkTSpace: Using local submodule at third_party/MikkTSpace")
+else()
+    message(WARNING "MikkTSpace not found — tangent generation unavailable. "
+                    "Run: git submodule add https://github.com/mmikk/MikkTSpace.git third_party/MikkTSpace")
+endif()
+# Target available: mikktspace
+
+# ============================================================================
+# bcdec - single-header BCn block decompression (DDS thumbnails, Issue #108)
+# ============================================================================
+if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/bcdec/bcdec.h)
+    file(DOWNLOAD
+        https://raw.githubusercontent.com/iOrange/bcdec/main/bcdec.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/bcdec/bcdec.h
+        STATUS bcdec_status
+    )
+    list(GET bcdec_status 0 bcdec_code)
+    if(bcdec_code EQUAL 0)
+        message(STATUS "bcdec: Downloaded to ${CMAKE_CURRENT_SOURCE_DIR}/bcdec/bcdec.h")
+    else()
+        file(REMOVE ${CMAKE_CURRENT_SOURCE_DIR}/bcdec/bcdec.h)
+        message(WARNING "bcdec: Download failed — DDS thumbnails unavailable.")
+    endif()
+endif()
+
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/bcdec/bcdec.h)
+    add_library(bcdec INTERFACE)
+    target_include_directories(bcdec INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/bcdec)
+endif()
+# Target available: bcdec

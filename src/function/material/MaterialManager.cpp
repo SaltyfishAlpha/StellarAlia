@@ -112,6 +112,24 @@ bool MaterialManager::RegisterTypeFromShaders(const MaterialTypeDesc&   desc,
         SA_LOG_ERROR("MaterialManager: '{}' — shader program load failed", desc.name);
         return false;
     }
+
+    // Issue #108: skinned pipeline variant — same fragment, "<vert>_skinned"
+    // vertex twin. Probed quietly (fs check, not GetGraphics) so vert stems
+    // without a twin (fullscreen passes etc.) don't log load errors. Custom
+    // .saglsl models use @VertShader deferred_geometry, whose twin lives in
+    // the engine shader dir — resolved via the fallback path.
+    if (!desc.noVertexInput) {
+        const std::string skinnedStem = desc.vertShader + "_skinned";
+        namespace fs = std::filesystem;
+        const bool haveTwin =
+            fs::exists(fs::path(ctx.shaderDir)       / (skinnedStem + ".vert.spv")) ||
+            (!ctx.engineShaderDir.empty() &&
+             fs::exists(fs::path(ctx.engineShaderDir) / (skinnedStem + ".vert.spv")));
+        if (haveTwin)
+            type->skinnedShader = ctx.programs->GetGraphics(
+                desc.name + ":skinned", skinnedStem, desc.fragShader,
+                ctx.shaderDir, ctx.engineShaderDir, isProjectType);
+    }
     const RHI::ShaderReflection& merged = type->shader->GetMergedReflection();
 
     if (auto ubo = merged.FindBinding(2, 0)) {

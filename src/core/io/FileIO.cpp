@@ -75,6 +75,24 @@ bool Rename(const fs::path& from, const fs::path& to) {
 bool Remove(const fs::path& path) {
     std::error_code ec;
     fs::remove_all(path, ec);   // file or recursive dir; no error when already absent
+    if (!ec) return true;
+
+    // Windows: read-only files (typical for assets extracted from archives)
+    // fail with access denied — strip the attribute and retry once.
+    auto makeWritable = [](const fs::path& p) {
+        std::error_code e;
+        fs::permissions(p, fs::perms::owner_write, fs::perm_options::add, e);
+    };
+    std::error_code e;
+    makeWritable(path);
+    if (fs::is_directory(path, e)) {
+        for (auto it = fs::recursive_directory_iterator(
+                 path, fs::directory_options::skip_permission_denied, e);
+             it != fs::recursive_directory_iterator(); it.increment(e))
+            makeWritable(it->path());
+    }
+    ec.clear();
+    fs::remove_all(path, ec);
     if (ec) { SA_LOG_WARN("IO::Remove '{}': {}", path.string(), ec.message()); return false; }
     return true;
 }

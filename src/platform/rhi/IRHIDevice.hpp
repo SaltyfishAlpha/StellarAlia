@@ -266,6 +266,14 @@ public:
     virtual void ReadbackTextureMips(RHITextureHandle       handle,
                                      std::span<MipReadback> mips) = 0;
 
+    // Small-window GPU → CPU readback (X-12): copies a w×h pixel region of
+    // mip 0 / layer 0 into data (row-major, tightly packed, size bytes).
+    // The caller must clamp the region to the texture bounds. Same CopySrc /
+    // ShaderRead-layout / blocking contract as ReadbackTextureMips.
+    struct RegionReadback { uint32_t x, y, w, h; void* data; uint64_t size; };
+    virtual void ReadbackTextureRegion(RHITextureHandle      handle,
+                                       const RegionReadback& region) = 0;
+
     // Returns the descriptor used to create this texture (width, height, format, etc.).
     // Returns nullptr for invalid handles.
     [[nodiscard]] virtual const RHITextureDesc* GetTextureDesc(

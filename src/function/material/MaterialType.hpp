@@ -56,6 +56,13 @@ public:
     // name. MaterialType references it; does not own its lifetime.
     ShaderProgram*        shader = nullptr;
 
+    // Issue #108: skinned pipeline variant — same fragment shader, the
+    // "<vert>_skinned" vertex twin (adds the set=3 skin-matrix interface).
+    // nullptr when the vertex shader has no skinned twin; skinned draws then
+    // fall back to the engine PBR skinned pipeline (pre-#108 behavior, which
+    // misreads non-PBR param blobs — black/white output).
+    ShaderProgram*        skinnedShader = nullptr;
+
     // UBO layout for set=1, binding=0 (MaterialParams)
     uint32_t              uboSize = 0;
     std::vector<ParamDef> params;
@@ -102,6 +109,13 @@ public:
     RHI::RHIPipelineHandle GetOrCreatePipeline(RHI::IRHIDevice*           device,
                                                 const AttachmentKey&       key,
                                                 const PipelineRenderState& state);
+
+    // Issue #108: skinned=true routes through skinnedShader; returns an invalid
+    // handle when the type has no skinned variant (caller falls back).
+    RHI::RHIPipelineHandle GetOrCreatePipeline(RHI::IRHIDevice*           device,
+                                                const AttachmentKey&       key,
+                                                const PipelineRenderState& state,
+                                                bool                       skinned);
 
     // The type's defaults packed into a PipelineRenderState.
     [[nodiscard]] PipelineRenderState DefaultRenderState() const noexcept;

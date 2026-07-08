@@ -239,6 +239,22 @@ void PostProcessPanel::OnDraw() {
             liveUpdate = true;
         if (ImGui::SliderFloat("Ambient##volfog",        &pp.volFogAmbient,       0.0f,  2.0f,  "%.2f"))
             liveUpdate = true;
+        if (ImGui::Checkbox("Temporal##volfog", &pp.volFogTemporal))
+            liveUpdate = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Fog history volume: converges the sampling jitter without scene TAA.");
+        ImGui::BeginDisabled(!pp.volFogTemporal);
+        if (ImGui::SliderFloat("Temporal Blend##volfog", &pp.volFogTemporalBlend, 0.0f,  0.98f, "%.2f"))
+            liveUpdate = true;
+        ImGui::EndDisabled();
+        if (ImGui::SliderFloat("Noise Strength##volfog", &pp.volFogNoiseStrength, 0.0f,  1.0f,  "%.2f"))
+            liveUpdate = true;
+        ImGui::BeginDisabled(pp.volFogNoiseStrength <= 0.f);
+        if (ImGui::SliderFloat("Noise Scale##volfog",    &pp.volFogNoiseScale,    0.01f, 1.0f,  "%.3f 1/m"))
+            liveUpdate = true;
+        if (ImGui::DragFloat3 ("Wind##volfog",           &pp.volFogWind.x, 0.05f, -10.f, 10.f,  "%.2f m/s"))
+            liveUpdate = true;
+        ImGui::EndDisabled();
         ImGui::EndDisabled();
     }
 

@@ -98,6 +98,16 @@ struct EntityFactory {
         glm::vec3                scale         = {1.f, 1.f, 1.f},
         std::vector<AssetID>     materialSlots = {});
 
+    // Skinned mesh entity: SkinnedMesh + Animator (no clip = bind pose) +
+    // MeshRenderer. AnimationSystem::PrepareEntity fills the GPU-side state.
+    static entt::entity CreateSkinnedMesh(
+        Scene&                   scene,
+        std::string_view         name,
+        AssetID                  meshAsset,
+        glm::vec3                position      = {0.f, 0.f, 0.f},
+        glm::quat                rotation      = glm::quat{1.f, 0.f, 0.f, 0.f},
+        glm::vec3                scale         = {1.f, 1.f, 1.f});
+
     // ── Camera ────────────────────────────────────────────────────────────────
 
     // Perspective camera.

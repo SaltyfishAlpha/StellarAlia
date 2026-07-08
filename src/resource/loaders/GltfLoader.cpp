@@ -9,12 +9,15 @@
 
 #include "resource/loaders/GltfLoader.hpp"
 #include "resource/loaders/ImageLoader.hpp"
+#include "resource/loaders/MeshUtils.hpp"
 #include "core/logs/Log.hpp"
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <algorithm>
+#include <cstring>
+#include <fstream>
 
 namespace StellarAlia::Resource {
 
@@ -216,6 +219,14 @@ Primitive ConvertPrimitive(const tinygltf::Model& model,
             }
         }
     }
+
+    // ── Fallback tangents (Issue #108) ────────────────────────────────────────
+    // Runs last: MikkTSpace re-welds vertices, so every parallel attribute
+    // (including skinVertices) must already be populated.
+    if (tanIt == prim.attributes.end() && uvIt != prim.attributes.end())
+        MeshUtils::GenerateTangents(out.vertices, out.indices,
+                                    out.skinVertices.empty() ? nullptr
+                                                             : &out.skinVertices);
 
     return out;
 }
@@ -455,8 +466,18 @@ std::optional<SceneData> GltfLoader::Load(const std::string& path) {
         },
         nullptr);
 
+    // Binary vs ASCII by content, not extension — .vrm (and any other glb
+    // container) starts with the "glTF" magic; .gltf is bare JSON.
+    bool isBinary = false;
+    {
+        std::ifstream probe(path, std::ios::binary);
+        char magic[4] = {};
+        probe.read(magic, 4);
+        isBinary = probe && std::memcmp(magic, "glTF", 4) == 0;
+    }
+
     bool ok = false;
-    if (path.size() >= 4 && path.substr(path.size() - 4) == ".glb")
+    if (isBinary)
         ok = loader.LoadBinaryFromFile(&model, &err, &warn, path);
     else
         ok = loader.LoadASCIIFromFile(&model, &err, &warn, path);
@@ -516,11 +537,97 @@ std::optional<SceneData> GltfLoader::Load(const std::string& path) {
         scene.meshes.push_back(std::move(mesh));
     }
 
-    // ── Animations ────────────────────────────────────────────────────────────
+    // ── Multi-skin merge (Issue #108) ─────────────────────────────────────────
+    // VRM (and some DCC exports) ship one skin per mesh section over the same
+    // armature. The runtime drives ONE skin-matrix buffer per entity — derived
+    // skeleton is always skin #0 — so multiple skins must collapse into one:
+    // union the joints (keyed by source node, first IBM wins), remap every
+    // primitive's joint indices, and retarget animations at the merged set.
     std::vector<std::vector<int>> skinJoints;
-    skinJoints.reserve(model.skins.size());
-    for (const auto& gs : model.skins)
-        skinJoints.push_back(gs.joints);
+    if (model.skins.size() > 1) {
+        std::vector<int>                     mergedNodes;  // merged joint → node idx
+        std::unordered_map<int, uint32_t>    mergedOf;     // node idx → merged joint
+        std::vector<glm::mat4>               mergedIbm;
+        std::vector<std::vector<uint32_t>>   remap(model.skins.size());
+
+        for (size_t s = 0; s < model.skins.size(); ++s) {
+            const auto& gs = model.skins[s];
+            const glm::mat4* ibm = gs.inverseBindMatrices >= 0
+                ? AccessorData<glm::mat4>(model, gs.inverseBindMatrices) : nullptr;
+            remap[s].resize(gs.joints.size());
+            for (size_t j = 0; j < gs.joints.size(); ++j) {
+                auto [it, inserted] = mergedOf.try_emplace(
+                    gs.joints[j], static_cast<uint32_t>(mergedNodes.size()));
+                if (inserted) {
+                    mergedNodes.push_back(gs.joints[j]);
+                    mergedIbm.push_back(ibm ? ibm[j] : glm::mat4(1.f));
+                } else if (ibm) {
+                    // #83 P1: first wins — flag bind poses that disagree.
+                    const glm::mat4& seen = mergedIbm[it->second];
+                    bool same = true;
+                    for (int c = 0; c < 4 && same; ++c)
+                        for (int r = 0; r < 4; ++r)
+                            if (std::fabs(ibm[j][c][r] - seen[c][r]) > 1e-4f) {
+                                same = false; break;
+                            }
+                    if (!same)
+                        SA_LOG_WARN("GltfLoader: joint '{}' has conflicting "
+                                    "inverse-bind matrices across skins — "
+                                    "first wins",
+                                    model.nodes[gs.joints[j]].name);
+                }
+                remap[s][j] = it->second;
+            }
+        }
+
+        std::vector<int> parentOf(model.nodes.size(), -1);
+        for (size_t n = 0; n < model.nodes.size(); ++n)
+            for (int c : model.nodes[n].children)
+                if (c >= 0 && c < static_cast<int>(model.nodes.size()))
+                    parentOf[c] = static_cast<int>(n);
+
+        SkeletonData merged;
+        merged.name = "MergedSkin";
+        merged.bones.resize(mergedNodes.size());
+        for (size_t j = 0; j < mergedNodes.size(); ++j) {
+            merged.bones[j].name              = model.nodes[mergedNodes[j]].name;
+            merged.bones[j].inverseBindMatrix = mergedIbm[j];
+            merged.bones[j].parentIndex       = -1;
+            for (int p = parentOf[mergedNodes[j]]; p >= 0; p = parentOf[p]) {
+                if (auto it = mergedOf.find(p); it != mergedOf.end()) {
+                    merged.bones[j].parentIndex = static_cast<int32_t>(it->second);
+                    break;
+                }
+            }
+        }
+        scene.skins.clear();
+        scene.skins.push_back(std::move(merged));
+
+        for (auto& mesh : scene.meshes)
+            for (auto& prim : mesh.primitives) {
+                if (prim.skinIndex < 0 ||
+                    prim.skinIndex >= static_cast<int32_t>(remap.size()))
+                    continue;
+                const auto& table = remap[prim.skinIndex];
+                for (auto& sv : prim.skinVertices)
+                    for (int k = 0; k < 4; ++k)
+                        if (sv.joints[k] < table.size())
+                            sv.joints[k] = table[sv.joints[k]];
+                prim.skinIndex = 0;
+            }
+        for (auto& sn : scene.nodes)
+            if (sn.skinIndex >= 0) sn.skinIndex = 0;
+
+        skinJoints.push_back(std::move(mergedNodes));
+        SA_LOG_INFO("GltfLoader: merged {} skins into one skeleton ({} joints)",
+                    model.skins.size(), scene.skins[0].bones.size());
+    } else {
+        skinJoints.reserve(model.skins.size());
+        for (const auto& gs : model.skins)
+            skinJoints.push_back(gs.joints);
+    }
+
+    // ── Animations ────────────────────────────────────────────────────────────
     ConvertAnimations(model, scene, skinJoints);
 
     SA_LOG_INFO("GltfLoader: loaded '{}' — {} mesh(es), {} material(s), "

@@ -20,6 +20,17 @@
 layout(set = 2, binding = 0) uniform sampler2D t_FogShadowMap;
 layout(set = 2, binding = 1, rgba16f) uniform writeonly image3D u_Media;
 
+// Local fog volumes (Issue #110) — unit-box OBBs from FogVolumeComponent.
+struct GpuFogVolume {
+    mat4 invWorld;       // world → unit-box local ([-0.5, 0.5]³ inside)
+    vec4 albedoDensity;  // rgb = albedo, w = extra σt (1/m)
+    vec4 falloffPad;     // x = edge falloff band (local-space ratio)
+};
+layout(set = 2, binding = 2, std140) uniform FogVolumes {
+    int          u_VolCount;
+    GpuFogVolume u_Vols[16];
+};
+
 layout(push_constant) uniform PC {
     float density;        // global extinction σt (1/m)
     float anisotropy;     // HG g [-0.9, 0.9]
@@ -30,10 +41,13 @@ layout(push_constant) uniform PC {
     float shadowValid;    // 0 = shadow map is a dummy — skip the tap
     int   sunIndex;       // light index of the sun (shadowed scattering); -1 = none
     vec4  albedo;         // rgb = σs/σt
-    // Step 8: 1 = jitter the per-froxel sample depth (needs TAA to converge);
-    // 0 = sample slice centres (stable banding, used when TAA is off).
+    // Step 8: 1 = jitter the per-froxel sample depth (needs the fog history
+    // volume or TAA to converge); 0 = sample slice centres (stable banding).
     float temporalJitter;
-    float _pad1, _pad2, _pad3;
+    float noiseScale;     // Issue #110: noise frequency (1/m)
+    float noiseStrength;  // 0 = off
+    float _pad1;
+    vec4  wind;           // xyz = wind velocity (m/s)
 } pc;
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
@@ -42,6 +56,21 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 float NdcToViewZ(float ndcZ) {
     vec4 c = u_Frame.invProj * vec4(0.0, 0.0, ndcZ, 1.0);
     return c.z / c.w;
+}
+
+// 3D value noise for density detail (Issue #110) — pure ALU, no texture.
+float Hash13(vec3 p) {
+    p  = fract(p * 0.1031);
+    p += dot(p, p.zyx + 31.32);
+    return fract((p.x + p.y) * p.z);
+}
+float ValueNoise(vec3 p) {
+    vec3 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(Hash13(i),                  Hash13(i + vec3(1,0,0)), f.x),
+                   mix(Hash13(i + vec3(0,1,0)),    Hash13(i + vec3(1,1,0)), f.x), f.y),
+               mix(mix(Hash13(i + vec3(0,0,1)),    Hash13(i + vec3(1,0,1)), f.x),
+                   mix(Hash13(i + vec3(0,1,1)),    Hash13(i + vec3(1,1,1)), f.x), f.y), f.z);
 }
 
 // Single-tap directional shadow test (no PCF — the froxel volume is coarse
@@ -84,6 +113,29 @@ void main() {
         dens *= exp(-pc.heightFalloff * max(worldPos.y - pc.heightBase, 0.0));
     float sigmaT = dens;
     vec3  sigmaS = pc.albedo.rgb * dens;
+
+    // Local fog volumes: extinction/scattering are linearly additive, so the
+    // albedo blends naturally by density weight. Deliberately NOT part of the
+    // analytic sun self-shadow below (global medium only — UE-style approximation).
+    for (int v = 0; v < u_VolCount; ++v) {
+        vec3 p = abs((u_Vols[v].invWorld * vec4(worldPos, 1.0)).xyz);
+        if (any(greaterThan(p, vec3(0.5)))) continue;
+        vec3  e  = clamp((vec3(0.5) - p) / max(u_Vols[v].falloffPad.x, 1e-3), 0.0, 1.0);
+        float wv = min(e.x, min(e.y, e.z)) * u_Vols[v].albedoDensity.w;
+        sigmaT += wv;
+        sigmaS += u_Vols[v].albedoDensity.rgb * wv;
+    }
+
+    // Density detail noise (Issue #110): 2-octave value noise advected by wind,
+    // modulating the summed medium (global + local volumes). Not part of the
+    // analytic self-shadow — same approximation as the local volumes.
+    if (pc.noiseStrength > 0.0) {
+        vec3  np = (worldPos + pc.wind.xyz * u_Frame.time) * pc.noiseScale;
+        float n  = ValueNoise(np) * 0.667 + ValueNoise(np * 2.03) * 0.333;
+        float m  = mix(1.0, n, pc.noiseStrength);
+        sigmaT *= m;
+        sigmaS *= m;
+    }
 
     vec3 V = normalize(u_Frame.cameraPos - worldPos);
 

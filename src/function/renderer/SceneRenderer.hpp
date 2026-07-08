@@ -165,15 +165,30 @@ public:
     // Request an ID pick at a swapchain pixel: the next RenderFrame records a
     // one-shot pass writing each DrawItem's 1-based index to an R32_UINT buffer
     // (own depth → nearest surface wins), read back after the frame completes.
-    void RequestIdPick(uint32_t px, uint32_t py);
+    // Issue #111: purpose separates selection clicks from asset-drop placement;
+    // Place additionally reads back the pick depth target and reconstructs the
+    // surface world position + geometric normal under the pixel.
+    enum class PickPurpose : uint8_t { Select, Place };
+    void RequestIdPick(uint32_t px, uint32_t py,
+                       PickPurpose purpose = PickPurpose::Select);
 
     struct PickResult {
         entt::entity entity       = entt::null;
         uint32_t     submeshIndex = 0;
         bool         hit          = false;   // false = clicked background
+        PickPurpose  purpose      = PickPurpose::Select;
+        // Issue #111, Place picks only:
+        bool         hasSurface   = false;
+        glm::vec3    worldPos     = glm::vec3(0.f);
+        glm::vec3    worldNormal  = glm::vec3(0.f, 1.f, 0.f);
     };
     // Returns true exactly once per completed pick and fills `out`.
     bool TryConsumePickResult(PickResult& out);
+
+    // X-12: exclude one entity from the ID pass (entt::null to clear). The
+    // editor's drag ghost must not occlude picks or the placement ray would
+    // hit the ghost itself and climb toward the camera every frame.
+    void SetPickExcluded(entt::entity e) { m_pickExcluded = e; }
 
     // X-8 debug view: render the ID pass every frame and composite it as
     // per-submesh hash colors over the swapchain. Zero cost when off.
@@ -285,6 +300,10 @@ private:
         glm::vec3                         worldAABBMax {-1e30f};
         bool                              skipCull  = false;
         bool                              isSkinned = false;
+        // Issue #108: pipeline was built from the material type's own skinned
+        // shader variant — GBuffer uses it directly instead of swapping in the
+        // engine PBR skinned pipeline (which misreads non-PBR param blobs).
+        bool                              hasSkinnedPipeline = false;
         RHI::RHIDescSetHandle             skinDescSet;   // set=2; valid when isSkinned=true
     };
 
@@ -501,13 +520,35 @@ private:
         float     m_heightBase    = 0.f;
         float     m_heightFalloff = 0.f;
         float     m_ambient       = 0.2f;
+        // Issue #110: temporal accumulation on the media volume (pre-Scatter).
+        bool      m_temporal      = true;
+        float     m_temporalBlend = 0.9f;   // history weight
+        // Issue #110: density detail noise.
+        float     m_noiseScale    = 0.1f;
+        float     m_noiseStrength = 0.f;
+        glm::vec3 m_wind          = {0.5f, 0.f, 0.3f};
     private:
-        ComputeProgram*       m_injectProg  = nullptr;  // owned by ProgramCache
-        ComputeProgram*       m_scatterProg = nullptr;
-        ShaderProgram*        m_applyProg   = nullptr;
+        ComputeProgram*       m_injectProg   = nullptr;  // owned by ProgramCache
+        ComputeProgram*       m_scatterProg  = nullptr;
+        ComputeProgram*       m_temporalProg = nullptr;  // Issue #110
+        ShaderProgram*        m_applyProg    = nullptr;
         RHI::RHIDescSetHandle m_injectSet;   // set=2 (shadow map + media UAV)
         RHI::RHIDescSetHandle m_scatterSet;  // set=0 (media + integrated UAV)
+        RHI::RHIDescSetHandle m_temporalSet; // set=2 (media + histRead + histWrite UAV)
         RHI::RHIDescSetHandle m_applySet;    // set=2 (hdr + depth + volume)
+
+        // Issue #110: persistent ping-pong media history (3D), reset on volume
+        // size / fogFar change or temporal toggle (reprojection would be wrong).
+        RHI::RHITextureHandle m_histTex[2];
+        uint32_t              m_histW = 0, m_histH = 0, m_histD = 0;
+        int                   m_histIdx      = 0;
+        bool                  m_histValid    = false;
+        float                 m_prevDistance = 0.f;
+
+        // Issue #110: local fog volume list — double-buffered cpuVisible UBO
+        // (frame-in-flight indexed, same safety model as FrameUniformsBuffer).
+        RHI::RHIBufferHandle  m_volUBO[2];
+        bool                  m_volWarned = false;  // one-shot >16 truncation warning
     };
 
     // GTAO ambient occlusion: 3-pass (main + H blur + V blur).
@@ -629,10 +670,20 @@ private:
     private:
         MaterialType*         m_type        = nullptr;
         MaterialType*         m_xrayType    = nullptr;   // depth-test-disabled variant
+        MaterialType*         m_boneType      = nullptr;   // #83 X-2: solid octahedral bones (instanced)
+        MaterialType*         m_jointType     = nullptr;   // #83 X-2: solid icosphere joints (instanced)
+        MaterialType*         m_compositeType = nullptr;   // #83 X-2: alpha-composite skeleton over scene
         RHI::RHIBufferHandle  m_ssbo;                    // depth-tested lines SSBO
         RHI::RHIBufferHandle  m_xraySsbo;                // always-on-top lines SSBO
+        RHI::RHIBufferHandle  m_boneSsbo;                // per-bone instance SSBO
+        RHI::RHIBufferHandle  m_jointSsbo;               // per-joint instance SSBO
+        RHI::RHIBufferHandle  m_jointMeshSsbo;           // static unit icosphere verts
+        uint32_t              m_jointMeshVerts = 0;      // vertex count of the icosphere
         RHI::RHIDescSetHandle m_descSet;
         RHI::RHIDescSetHandle m_xrayDescSet;
+        RHI::RHIDescSetHandle m_boneDescSet;
+        RHI::RHIDescSetHandle m_jointDescSet;
+        RHI::RHIDescSetHandle m_compositeDescSet;
     };
 
     // Renders the selected entity's geometry into a 1-channel R8 mask texture for
@@ -994,13 +1045,19 @@ private:
         bool     pending  = false;  // request queued, pass not yet recorded
         bool     rendered = false;  // pass recorded this frame → readback after present
         uint32_t px = 0, py = 0;
+        PickPurpose purpose = PickPurpose::Select;   // Issue #111
+        // Inverse of the jittered VP the ID pass rasterised with — captured at
+        // pass-build time so Place unprojection matches the depth exactly.
+        glm::mat4   invViewProj = glm::mat4(1.f);
         std::vector<std::pair<entt::entity, uint32_t>> snapshot;
         PickResult result{};
         bool     hasResult = false;
     };
     void ResolveIdPick();
     IdPickState           m_idPick;
+    entt::entity          m_pickExcluded = entt::null;   // X-12
     RHI::RHITextureHandle m_idBuffer;
+    RHI::RHITextureHandle m_idDepth;           // Issue #111: persistent, CPU-readable
     uint32_t              m_idBufferW = 0;
     uint32_t              m_idBufferH = 0;
     bool                  m_debugIdView = false;   // X-8 debug view

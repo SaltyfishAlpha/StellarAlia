@@ -72,7 +72,9 @@ public:
     // Clear the selection entirely.
     void ClearSelection();
     // Trigger an asset drop spawn at a specific world position (from viewport drop).
-    void TriggerAssetDrop(const std::filesystem::path& assetPath, const glm::vec3& spawnPos);
+    // spawnRot: surface-normal alignment when enabled (Issue #111).
+    void TriggerAssetDrop(const std::filesystem::path& assetPath, const glm::vec3& spawnPos,
+                          const glm::quat& spawnRot = {1.f, 0.f, 0.f, 0.f});
 
 private:
     void DrawNode(entt::entity entity, entt::registry& reg);

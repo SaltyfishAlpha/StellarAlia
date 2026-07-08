@@ -25,10 +25,45 @@ void DebugDraw::EmitOverlay(glm::vec3 p, uint32_t c) {
     m_overlayVerts.push_back({p.x, p.y, p.z, c});
 }
 
-void DebugDraw::Clear() { m_verts.clear(); m_overlayVerts.clear(); }
+void DebugDraw::Clear() {
+    m_verts.clear();
+    m_overlayVerts.clear();
+    m_boneInstances.clear();
+    m_jointInstances.clear();
+}
 
 std::span<const DebugDraw::Vertex> DebugDraw::GetVertices()        const { return m_verts; }
 std::span<const DebugDraw::Vertex> DebugDraw::GetOverlayVertices() const { return m_overlayVerts; }
+std::span<const DebugDraw::BoneInstance> DebugDraw::GetBoneInstances()  const { return m_boneInstances; }
+std::span<const DebugDraw::BoneInstance> DebugDraw::GetJointInstances() const { return m_jointInstances; }
+
+void DebugDraw::DrawJointSolid(glm::vec3 center, float radius, glm::vec4 color) {
+    if (m_jointInstances.size() >= kMaxBoneInstances) return;
+    glm::mat4 m(radius);          // uniform scale on the diagonal
+    m[3] = glm::vec4(center, 1.f);
+    m_jointInstances.push_back({m, color});
+}
+
+void DebugDraw::DrawBoneSolid(glm::vec3 head, glm::vec3 tail,
+                              float width, glm::vec4 color) {
+    if (m_boneInstances.size() >= kMaxBoneInstances) return;
+    glm::vec3 axis = tail - head;
+    const float len = glm::length(axis);
+    if (len < 1e-5f) return;
+    axis /= len;
+    // Orthonormal basis with Z = bone axis; matches debug_bone.vert's unit octahedron.
+    const glm::vec3 right = std::abs(axis.y) < 0.9f
+        ? glm::normalize(glm::cross(glm::vec3(0.f, 1.f, 0.f), axis))
+        : glm::normalize(glm::cross(glm::vec3(1.f, 0.f, 0.f), axis));
+    const glm::vec3 up = glm::cross(axis, right);
+    // model = translate(head) * rotate(basis) * scale(width, width, len)
+    glm::mat4 m(1.f);
+    m[0] = glm::vec4(right * width, 0.f);
+    m[1] = glm::vec4(up    * width, 0.f);
+    m[2] = glm::vec4(axis  * len,   0.f);
+    m[3] = glm::vec4(head,          1.f);
+    m_boneInstances.push_back({m, color});
+}
 
 void DebugDraw::DrawLineOverlay(glm::vec3 from, glm::vec3 to, glm::vec4 color) {
     const uint32_t c = PackColor(color);
@@ -52,6 +87,30 @@ void DebugDraw::DrawSphereOverlay(glm::vec3 center, float radius,
             EmitOverlay(center + p0, c);
             EmitOverlay(center + p1, c);
         }
+    }
+}
+
+void DebugDraw::DrawBoneOverlay(glm::vec3 head, glm::vec3 tail,
+                                glm::vec4 color, float width) {
+    const uint32_t c = PackColor(color);
+    glm::vec3 axis = tail - head;
+    const float len = glm::length(axis);
+    if (len < 1e-5f) return;
+    axis /= len;
+    const glm::vec3 right = std::abs(axis.y) < 0.9f
+        ? glm::normalize(glm::cross(axis, glm::vec3(0.f, 1.f, 0.f)))
+        : glm::normalize(glm::cross(axis, glm::vec3(1.f, 0.f, 0.f)));
+    const glm::vec3 fwd = glm::cross(axis, right);
+    // Collar (widest ring) sits ~14% down the bone, matching Blender/Maya octahedra.
+    const glm::vec3 collar = head + axis * (len * 0.14f);
+    const glm::vec3 ring[4] = {
+        collar + right * width, collar + fwd * width,
+        collar - right * width, collar - fwd * width,
+    };
+    for (int i = 0; i < 4; ++i) {
+        EmitOverlay(head,    c); EmitOverlay(ring[i],         c);  // head → collar
+        EmitOverlay(ring[i], c); EmitOverlay(tail,            c);  // collar → tail
+        EmitOverlay(ring[i], c); EmitOverlay(ring[(i + 1) % 4], c);  // collar square
     }
 }
 

@@ -33,7 +33,8 @@ struct EditorOverlaySettings {
     bool drawSelectionCollider = true;  // draw collider wireframe on selected entity
 
     // ── Skeleton gizmo ───────────────────────────────────────────────────────
-    bool drawSkeletonGizmo = true;  // joints (spheres) + bones (lines) on selected skinned mesh
+    bool  drawSkeletonGizmo = true;   // solid octahedral bones + joint spheres on selected skinned mesh
+    float skeletonOpacity   = 0.75f;  // bone/joint alpha [0.1, 1] (X-2 x-ray look)
 
     // ── Entity icons (lights, cameras) ───────────────────────────────────────
     bool  drawEntityIcons   = true;   // billboard icons for non-visible entities
@@ -47,6 +48,9 @@ struct EditorOverlaySettings {
     bool      drawGizmo      = true;
     GizmoMode gizmoMode      = GizmoMode::Translate;  // T / R / S to cycle
     bool      gizmoWorldSpace = true;                 // world vs local space
+
+    // ── Asset drop (Issue #111) ──────────────────────────────────────────────
+    bool dropAlignSurfaceNormal = false;  // rotate dropped asset's up axis to surface normal
 
     // ── Debug views (X-8) ────────────────────────────────────────────────────
     bool debugIdView = false;  // fullscreen per-submesh ID coloring (Issue #102 ID pass)

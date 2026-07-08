@@ -14,6 +14,7 @@
 #include <glm/ext/matrix_clip_space.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -356,6 +357,7 @@ void SceneRenderer::Shutdown() {
     if (m_dilateH.IsValid())       m_device->DestroyTexture(m_dilateH);
     if (m_ssaoTex.IsValid())       m_device->DestroyTexture(m_ssaoTex);
     if (m_idBuffer.IsValid())      m_device->DestroyTexture(m_idBuffer);
+    if (m_idDepth.IsValid())       m_device->DestroyTexture(m_idDepth);
 
     if (m_iblBake.IsInitialized())
         m_iblBake.Shutdown(m_device);
@@ -625,7 +627,7 @@ void SceneRenderer::ApplyWorldSettings(WorldSettings& ws, bool updateIBL)
         m_ssrFeature->m_strength     = pp.ssrStrength;
     }
 
-    // Volumetric fog — runtime parameters (Issue #49).
+    // Volumetric fog — runtime parameters (Issue #49 / #110).
     if (m_volFogFeature) {
         m_volFogFeature->m_enabled       = pp.volFogEnabled;
         m_volFogFeature->m_density       = pp.volFogDensity;
@@ -635,6 +637,11 @@ void SceneRenderer::ApplyWorldSettings(WorldSettings& ws, bool updateIBL)
         m_volFogFeature->m_heightBase    = pp.volFogHeightBase;
         m_volFogFeature->m_heightFalloff = pp.volFogHeightFalloff;
         m_volFogFeature->m_ambient       = pp.volFogAmbient;
+        m_volFogFeature->m_temporal      = pp.volFogTemporal;
+        m_volFogFeature->m_temporalBlend = glm::clamp(pp.volFogTemporalBlend, 0.f, 0.98f);
+        m_volFogFeature->m_noiseScale    = pp.volFogNoiseScale;
+        m_volFogFeature->m_noiseStrength = pp.volFogNoiseStrength;
+        m_volFogFeature->m_wind          = pp.volFogWind;
     }
 
     // IBL — solid-color mode encodes backgroundColor as constant ambient (SH L0);
@@ -899,6 +906,9 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
             const WorldTransformComponent& wt)
     {
         if (!meshComp.meshAsset.IsValid()) return;
+        // Issue #108: when both mesh components coexist the skinned path owns
+        // the entity — drawing both stacks a bind-pose copy on the animation.
+        if (reg.any_of<SkinnedMeshComponent>(e)) return;
 
         const Resource::GPUMesh* gpuMesh = m_resMgr->LoadMesh(meshComp.meshAsset);
         if (!gpuMesh) {
@@ -1218,9 +1228,12 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
                 if (slotOvr->doubleSided >= 0)
                     item.doubleSided = slotOvr->doubleSided != 0;
             }
-            // pipeline is the material's standard pipeline — used for sorting and as
-            // a fallback; GBufferFeature overrides with the skinned variant at draw
-            // time. State matches the static path (stencil write, MASK EQUAL).
+            // Issue #108: prefer the material type's OWN skinned pipeline
+            // (skinned vertex twin + the type's fragment shader) so custom
+            // shading models keep their lighting and param layout on skinned
+            // meshes. Types without a twin fall back to the material's static
+            // pipeline here and GBufferFeature swaps in the engine PBR skinned
+            // pipeline at draw time (pre-#108 behavior, PBR-layout only).
             {
                 PipelineRenderState st = item.material->GetType()->DefaultRenderState();
                 st.stencilWriteEnable = true;
@@ -1230,7 +1243,12 @@ void SceneRenderer::BuildDrawList(Scene& scene) {
                     st.depthCompareOp = RHI::RHICompareOp::Equal;
                     st.depthWrite     = false;
                 }
-                item.pipeline = item.material->GetType()->GetOrCreatePipeline(m_device, gbKey, st);
+                item.pipeline = item.material->GetType()->GetOrCreatePipeline(
+                    m_device, gbKey, st, /*skinned=*/true);
+                item.hasSkinnedPipeline = item.pipeline.IsValid();
+                if (!item.hasSkinnedPipeline)
+                    item.pipeline =
+                        item.material->GetType()->GetOrCreatePipeline(m_device, gbKey, st);
             }
             item.pushConstantSize = static_cast<uint32_t>(sizeof(glm::mat4));
 
@@ -2307,8 +2325,11 @@ void SceneRenderer::GBufferFeature::AddPasses(SceneRenderer& renderer,
 
                 const int skinnedVariant =
                     (item.alphaMode == AlphaMode::Mask ? 2 : 0) + (item.doubleSided ? 1 : 0);
+                // Issue #108: a type-built skinned pipeline (item.pipeline) wins;
+                // the engine PBR skinned pipeline is only the no-twin fallback.
                 const RHI::RHIPipelineHandle effectivePipeline =
-                    (item.isSkinned && skinnedPipes[skinnedVariant].IsValid())
+                    (item.isSkinned && !item.hasSkinnedPipeline &&
+                     skinnedPipes[skinnedVariant].IsValid())
                         ? skinnedPipes[skinnedVariant] : item.pipeline;
                 if (!effectivePipeline.IsValid()) continue;
 
@@ -3167,33 +3188,47 @@ void SceneRenderer::SSRFeature::AddPasses(SceneRenderer& /*renderer*/,
 
 void SceneRenderer::VolumetricFogFeature::OnInit(const FeatureInitContext& ctx)
 {
-    m_injectProg  = ctx.programs->GetCompute("volumetric_inject");   // set=1 frame + set=2
-    m_scatterProg = ctx.programs->GetCompute("volumetric_scatter", /*useFrameLayout=*/false);
+    m_injectProg   = ctx.programs->GetCompute("volumetric_inject");   // set=1 frame + set=2
+    m_scatterProg  = ctx.programs->GetCompute("volumetric_scatter", /*useFrameLayout=*/false);
+    m_temporalProg = ctx.programs->GetCompute("volumetric_temporal");  // Issue #110
     m_applyProg   = ctx.programs->GetGraphics("volfog:apply",
                         "fullscreen_tri", "volumetric_apply",
                         ctx.shaderDir, ctx.engineShaderDir);
-    if (!m_injectProg || !m_scatterProg || !m_applyProg) {
+    if (!m_injectProg || !m_scatterProg || !m_temporalProg || !m_applyProg) {
         SA_LOG_WARN("VolumetricFogFeature: shader load failed — volumetric fog disabled");
         m_injectProg = nullptr;
         return;
     }
-    m_injectSet  = ctx.device->AllocateDescriptorSet(m_injectProg->GetLayout(2));
-    m_scatterSet = ctx.device->AllocateDescriptorSet(m_scatterProg->GetLayout(0));
-    m_applySet   = ctx.device->AllocateDescriptorSet(m_applyProg->GetMaterialLayout());
+    m_injectSet   = ctx.device->AllocateDescriptorSet(m_injectProg->GetLayout(2));
+    m_scatterSet  = ctx.device->AllocateDescriptorSet(m_scatterProg->GetLayout(0));
+    m_temporalSet = ctx.device->AllocateDescriptorSet(m_temporalProg->GetLayout(2));
+    m_applySet    = ctx.device->AllocateDescriptorSet(m_applyProg->GetMaterialLayout());
+
+    // Issue #110: local fog volume UBOs — must match volumetric_inject.comp FogVolumes.
+    RHI::RHIBufferDesc bd{};
+    bd.size       = 16 + 16 * 96;  // int count + pad, 16 × GpuFogVolume (std140)
+    bd.usage      = RHI::RHIBufferUsage::Uniform;
+    bd.cpuVisible = true;
+    bd.debugName  = "VolFog_Volumes";
+    for (auto& b : m_volUBO) b = ctx.device->CreateBuffer(bd);
 }
 
-void SceneRenderer::VolumetricFogFeature::OnShutdown(RHI::IRHIDevice* /*device*/)
+void SceneRenderer::VolumetricFogFeature::OnShutdown(RHI::IRHIDevice* device)
 {
-    m_injectProg  = nullptr;  // owned by ProgramCache
-    m_scatterProg = nullptr;
-    m_applyProg   = nullptr;
-    m_injectSet = m_scatterSet = m_applySet = {};
+    for (auto& t : m_histTex) { if (t.IsValid()) device->DestroyTexture(t); t = {}; }
+    for (auto& b : m_volUBO)  { if (b.IsValid()) device->DestroyBuffer(b);  b = {}; }
+    m_histValid    = false;
+    m_injectProg   = nullptr;  // owned by ProgramCache
+    m_scatterProg  = nullptr;
+    m_temporalProg = nullptr;
+    m_applyProg    = nullptr;
+    m_injectSet = m_scatterSet = m_temporalSet = m_applySet = {};
 }
 
 void SceneRenderer::VolumetricFogFeature::AddPasses(SceneRenderer& renderer,
                                                     const FrameContext& ctx,
                                                     const RendererHandles& handles,
-                                                    const entt::registry& /*reg*/,
+                                                    const entt::registry& reg,
                                                     uint32_t w, uint32_t h)
 {
     SA_PROFILE_SCOPE_N("VolumetricFog::AddPasses");
@@ -3238,27 +3273,67 @@ void SceneRenderer::VolumetricFogFeature::AddPasses(SceneRenderer& renderer,
     const RGTextureHandle rgDepth  = handles.depth;
     const RHI::RHIDescSetHandle frameSet = ctx.frameSet;
 
+    // ── Local fog volumes → double-buffered UBO (Issue #110) ──────────────────
+    // Must mirror volumetric_inject.comp FogVolumes (std140).
+    struct GpuFogVolume {
+        glm::mat4 invWorld;
+        glm::vec4 albedoDensity;  // rgb = albedo, w = density
+        glm::vec4 falloffPad;
+    };
+    struct FogVolumeUniforms {
+        int32_t count; float _pad[3];
+        GpuFogVolume vols[16];
+    };
+    static_assert(sizeof(FogVolumeUniforms) == 16 + 16 * 96,
+        "FogVolumeUniforms must match volumetric_inject.comp std140 layout");
+
+    FogVolumeUniforms fvu{};
+    reg.view<const FogVolumeComponent, const WorldTransformComponent>().each(
+        [&](const FogVolumeComponent& fv, const WorldTransformComponent& wt) {
+            if (fvu.count >= 16) {
+                if (!m_volWarned) {
+                    SA_LOG_WARN("VolumetricFog: more than 16 fog volumes — extras ignored");
+                    m_volWarned = true;
+                }
+                return;
+            }
+            auto& v = fvu.vols[fvu.count++];
+            v.invWorld      = glm::inverse(wt.matrix);
+            v.albedoDensity = glm::vec4(fv.albedo, fv.density);
+            v.falloffPad    = glm::vec4(fv.falloff, 0.f, 0.f, 0.f);
+        });
+
+    const uint32_t fi = ctx.device->GetCurrentFrameIndex();
+    ctx.device->UploadBufferData(m_volUBO[fi], &fvu, sizeof(fvu), 0);
+    const RGBufferHandle rgVols = ctx.rg->ImportBuffer("VolFog_Volumes", m_volUBO[fi],
+                                                       RHI::RHIBufferState::StorageRead);
+
     // ── Inject: media + in-scattered light per froxel ─────────────────────────
     ctx.BindTexture     (m_injectSet, 0, rgShadow);
     ctx.BindStorageImage(m_injectSet, 1, rgMedia);
+    ctx.BindBuffer      (m_injectSet, 2, rgVols);
 
     struct InjectPC {
         float   density, anisotropy, fogFar, heightBase;
         float   heightFalloff, ambient, shadowValid;
         int32_t sunIndex;
         float   albedo[4];
-        float   temporalJitter, _pad1, _pad2, _pad3;
+        float   temporalJitter, noiseScale, noiseStrength, _pad1;
+        float   wind[4];
     };
-    // Jitter only under TAA (Step 8): without temporal accumulation the noise
-    // flickers — stable banding is the better failure mode.
-    const bool taaOn = renderer.m_taaFeature && renderer.m_taaFeature->m_enabled;
+    // Jitter needs SOME temporal accumulation to converge — the fog history
+    // volume (Issue #110) or scene TAA. Neither → stable banding is the better
+    // failure mode than flicker.
+    const bool taaOn      = renderer.m_taaFeature && renderer.m_taaFeature->m_enabled;
+    const bool temporalOn = m_temporal && m_temporalProg && m_temporalSet.IsValid();
     const InjectPC injectPC{
         m_density, m_anisotropy, m_distance, m_heightBase,
         m_heightFalloff, m_ambient,
         renderer.m_config.shadowEnabled ? 1.f : 0.f,
         renderer.m_sunLightIndex,
         { m_albedo.x, m_albedo.y, m_albedo.z, 0.f },
-        taaOn ? 1.f : 0.f, 0.f, 0.f, 0.f };
+        (temporalOn || taaOn) ? 1.f : 0.f, m_noiseScale, m_noiseStrength, 0.f,
+        { m_wind.x, m_wind.y, m_wind.z, 0.f } };
 
     const RHI::RHIPipelineHandle injectPipe = m_injectProg->GetPipeline(ctx.device);
     const RHI::RHIDescSetHandle  injectSet  = m_injectSet;
@@ -3274,8 +3349,78 @@ void SceneRenderer::VolumetricFogFeature::AddPasses(SceneRenderer& renderer,
             cmd.Dispatch((vw + 7u) / 8u, (vh + 7u) / 8u, vd);
         });
 
+    // ── Temporal accumulation on the media volume (Issue #110) ────────────────
+    // Reprojects last frame's blended volume through prevViewProj and blends it
+    // with the inject output; Scatter then reads the blended history-write.
+    // Media values are point quantities and reproject; the integrated volume's
+    // path integrals do not — hence pre-Scatter placement.
+    RGTextureHandle rgScatterSrc = rgMedia;
+    if (temporalOn) {
+        if (m_histW != vw || m_histH != vh || m_histD != vd) {
+            for (auto& t : m_histTex) { if (t.IsValid()) ctx.device->DestroyTexture(t); }
+            RHI::RHITextureDesc hd{};
+            hd.width  = vw;
+            hd.height = vh;
+            hd.depth  = vd;
+            hd.format = RHI::RHIFormat::RGBA16F;
+            hd.usage  = RHI::RHITextureUsage::UnorderedAccess | RHI::RHITextureUsage::Sampled;
+            for (int i = 0; i < 2; ++i) {
+                hd.debugName = i == 0 ? "VolFog_History0" : "VolFog_History1";
+                m_histTex[i] = ctx.device->CreateTexture(hd);
+            }
+            m_histW = vw; m_histH = vh; m_histD = vd;
+            m_histValid = false;
+            m_histIdx   = 0;
+        }
+        // fogFar change breaks the prev slice mapping — cannot reproject.
+        if (m_prevDistance != m_distance) m_histValid = false;
+
+        const int readIdx  = m_histIdx;
+        const int writeIdx = 1 - m_histIdx;
+        const RGTextureHandle rgHistR = ctx.rg->ImportTexture("VolFog_HistR",
+            m_histTex[readIdx],
+            RHI::RHIResourceState::ShaderRead, RHI::RHIResourceState::ShaderRead);
+        const RGTextureHandle rgHistW = ctx.rg->ImportTexture("VolFog_HistW",
+            m_histTex[writeIdx],
+            RHI::RHIResourceState::Undefined, RHI::RHIResourceState::ShaderRead);
+
+        ctx.BindTexture     (m_temporalSet, 0, rgMedia);
+        ctx.BindTexture     (m_temporalSet, 1, rgHistR);
+        ctx.BindStorageImage(m_temporalSet, 2, rgHistW);
+
+        struct TemporalPC { float fogFar, prevFogFar, blend, historyValid; };
+        const TemporalPC temporalPC{
+            m_distance,
+            m_histValid ? m_prevDistance : m_distance,
+            m_temporalBlend,
+            m_histValid ? 1.f : 0.f };
+
+        const RHI::RHIPipelineHandle temporalPipe = m_temporalProg->GetPipeline(ctx.device);
+        const RHI::RHIDescSetHandle  temporalSet  = m_temporalSet;
+
+        ctx.rg->AddPass("VolFog_Temporal",
+            [rgMedia, rgHistR, rgHistW](RGPassBuilder& b) {
+                b.Read(rgMedia); b.Read(rgHistR); b.WriteUAV(rgHistW);
+            },
+            [temporalPipe, frameSet, temporalSet, temporalPC, vw, vh, vd]
+            (RHI::IRHICommandList& cmd, const RGResources&) {
+                cmd.SetComputePipeline(temporalPipe);
+                cmd.SetDescriptorSet(1, frameSet);
+                cmd.SetDescriptorSet(2, temporalSet);
+                cmd.SetPushConstants(&temporalPC, sizeof(temporalPC), RHI::RHIShaderStage::Compute);
+                cmd.Dispatch((vw + 7u) / 8u, (vh + 7u) / 8u, vd);
+            });
+
+        m_histIdx    = writeIdx;
+        m_histValid  = true;
+        rgScatterSrc = rgHistW;
+    } else {
+        m_histValid = false;  // toggle-off: stale history must not be reprojected later
+    }
+    m_prevDistance = m_distance;
+
     // ── Scatter: front-to-back transmittance integration per column ───────────
-    ctx.BindTexture     (m_scatterSet, 0, rgMedia);
+    ctx.BindTexture     (m_scatterSet, 0, rgScatterSrc);
     ctx.BindStorageImage(m_scatterSet, 1, rgIntegrated);
 
     struct ScatterPC { float fogFar; };
@@ -3285,7 +3430,7 @@ void SceneRenderer::VolumetricFogFeature::AddPasses(SceneRenderer& renderer,
     const RHI::RHIDescSetHandle  scatterSet  = m_scatterSet;
 
     ctx.rg->AddPass("VolFog_Scatter",
-        [rgMedia, rgIntegrated](RGPassBuilder& b) { b.Read(rgMedia); b.WriteUAV(rgIntegrated); },
+        [rgScatterSrc, rgIntegrated](RGPassBuilder& b) { b.Read(rgScatterSrc); b.WriteUAV(rgIntegrated); },
         [scatterPipe, scatterSet, scatterPC, vw, vh]
         (RHI::IRHICommandList& cmd, const RGResources&) {
             cmd.SetComputePipeline(scatterPipe);
@@ -4810,6 +4955,43 @@ void SceneRenderer::BloomFeature::AddPasses(SceneRenderer& renderer,
 
 // ── DebugOverlayFeature ───────────────────────────────────────────────────────
 
+// Build a unit icosphere as a flat triangle list (Issue #83 X-2 joint markers).
+// subdiv 2 → 320 tris = 960 verts, silhouette reads as a smooth ball. Each vertex
+// is on the unit sphere, so its position doubles as its normal in the shader.
+static std::vector<glm::vec4> BuildIcosphere(int subdiv)
+{
+    const float t = (1.f + std::sqrt(5.f)) * 0.5f;
+    std::vector<glm::vec3> v = {
+        {-1,t,0},{1,t,0},{-1,-t,0},{1,-t,0}, {0,-1,t},{0,1,t},{0,-1,-t},{0,1,-t},
+        {t,0,-1},{t,0,1},{-t,0,-1},{-t,0,1}
+    };
+    for (auto& p : v) p = glm::normalize(p);
+    std::vector<glm::ivec3> f = {
+        {0,11,5},{0,5,1},{0,1,7},{0,7,10},{0,10,11}, {1,5,9},{5,11,4},{11,10,2},{10,7,6},{7,1,8},
+        {3,9,4},{3,4,2},{3,2,6},{3,6,8},{3,8,9}, {4,9,5},{2,4,11},{6,2,10},{8,6,7},{9,8,1}
+    };
+    for (int s = 0; s < subdiv; ++s) {
+        std::vector<glm::ivec3> nf;
+        nf.reserve(f.size() * 4);
+        for (const auto& tri : f) {
+            const int ia = static_cast<int>(v.size()); v.push_back(glm::normalize((v[tri.x] + v[tri.y]) * 0.5f));
+            const int ib = static_cast<int>(v.size()); v.push_back(glm::normalize((v[tri.y] + v[tri.z]) * 0.5f));
+            const int ic = static_cast<int>(v.size()); v.push_back(glm::normalize((v[tri.z] + v[tri.x]) * 0.5f));
+            nf.push_back({tri.x, ia, ic}); nf.push_back({ia, tri.y, ib});
+            nf.push_back({ic, ib, tri.z}); nf.push_back({ia, ib, ic});
+        }
+        f = std::move(nf);
+    }
+    std::vector<glm::vec4> out;
+    out.reserve(f.size() * 3);
+    for (const auto& tri : f) {
+        out.emplace_back(v[tri.x], 0.f);
+        out.emplace_back(v[tri.y], 0.f);
+        out.emplace_back(v[tri.z], 0.f);
+    }
+    return out;
+}
+
 void SceneRenderer::DebugOverlayFeature::OnInit(const FeatureInitContext& ctx)
 {
     if (!ctx.matMgr->RegisterTypeFromShaders(
@@ -4824,8 +5006,33 @@ void SceneRenderer::DebugOverlayFeature::OnInit(const FeatureInitContext& ctx)
          RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque,
          RHI::RHITopology::LineList, false, false, true}, ctx);
 
-    m_type     = ctx.matMgr->GetType("DebugLine");
-    m_xrayType = ctx.matMgr->GetType("DebugLineXray");
+    // #83 X-2: solid octahedral bones — instanced TriangleList, cull OFF (a private
+    // cleared depth buffer resolves self-occlusion). Rendered OPAQUE into an
+    // offscreen target; the whole skeleton is then alpha-composited over the scene
+    // ONCE (DebugSkeletonComposite) so internal faces never double-blend.
+    ctx.matMgr->RegisterTypeFromShaders(
+        {"DebugBone", "debug_bone", "debug_bone",
+         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque,
+         RHI::RHITopology::TriangleList, true, true, true}, ctx);
+    // Joint markers — icosphere, reuses debug_bone.frag; same offscreen pass.
+    ctx.matMgr->RegisterTypeFromShaders(
+        {"DebugJoint", "debug_sphere", "debug_bone",
+         RHI::RHICullMode::None, RHI::RHIBlendMode::Opaque,
+         RHI::RHITopology::TriangleList, true, true, true}, ctx);
+    // Composite: fullscreen alpha-blend of the opaque skeleton target over swapchain.
+    // Uses a dedicated frag whose sampler is in the material set (set 2) — the
+    // stock fullscreen_blit.frag samples set 0 and would give an empty material
+    // layout (BindTexture would then write a zero-binding set → crash).
+    ctx.matMgr->RegisterTypeFromShaders(
+        {"DebugSkeletonComposite", "fullscreen_tri", "debug_skeleton_composite",
+         RHI::RHICullMode::None, RHI::RHIBlendMode::AlphaBlend,
+         RHI::RHITopology::TriangleList, false, false, true}, ctx);
+
+    m_type          = ctx.matMgr->GetType("DebugLine");
+    m_xrayType      = ctx.matMgr->GetType("DebugLineXray");
+    m_boneType      = ctx.matMgr->GetType("DebugBone");
+    m_jointType     = ctx.matMgr->GetType("DebugJoint");
+    m_compositeType = ctx.matMgr->GetType("DebugSkeletonComposite");
     if (!m_type) return;
 
     RHI::RHIBufferDesc bd{};
@@ -4844,18 +5051,69 @@ void SceneRenderer::DebugOverlayFeature::OnInit(const FeatureInitContext& ctx)
         m_xrayDescSet = ctx.device->AllocateDescriptorSet(m_xrayType->shader->GetMaterialLayout());
         ctx.device->WriteDescriptorBuffer(m_xrayDescSet, 0, m_xraySsbo, 0, bd.size);
     }
+
+    if (m_boneType) {
+        RHI::RHIBufferDesc id{};
+        id.size       = DebugDraw::kMaxBoneInstances * sizeof(DebugDraw::BoneInstance);
+        id.usage      = RHI::RHIBufferUsage::Storage;
+        id.cpuVisible = true;
+        id.debugName  = "DebugBoneSSBO";
+        m_boneSsbo    = ctx.device->CreateBuffer(id);
+        m_boneDescSet = ctx.device->AllocateDescriptorSet(m_boneType->shader->GetMaterialLayout());
+        ctx.device->WriteDescriptorBuffer(m_boneDescSet, 0, m_boneSsbo, 0, id.size);
+    }
+
+    if (m_jointType) {
+        RHI::RHIBufferDesc id{};
+        id.size        = DebugDraw::kMaxBoneInstances * sizeof(DebugDraw::BoneInstance);
+        id.usage       = RHI::RHIBufferUsage::Storage;
+        id.cpuVisible  = true;
+        id.debugName   = "DebugJointSSBO";
+        m_jointSsbo    = ctx.device->CreateBuffer(id);
+
+        // Static icosphere mesh (uploaded once) — bound at material binding 1.
+        const std::vector<glm::vec4> sphere = BuildIcosphere(2);
+        m_jointMeshVerts = static_cast<uint32_t>(sphere.size());
+        RHI::RHIBufferDesc md{};
+        md.size        = sphere.size() * sizeof(glm::vec4);
+        md.usage       = RHI::RHIBufferUsage::Storage;
+        md.cpuVisible  = true;
+        md.debugName   = "DebugJointMeshSSBO";
+        m_jointMeshSsbo = ctx.device->CreateBuffer(md);
+        ctx.device->UploadBufferData(m_jointMeshSsbo, sphere.data(), md.size);
+
+        m_jointDescSet = ctx.device->AllocateDescriptorSet(m_jointType->shader->GetMaterialLayout());
+        ctx.device->WriteDescriptorBuffer(m_jointDescSet, 0, m_jointSsbo,     0, id.size);
+        ctx.device->WriteDescriptorBuffer(m_jointDescSet, 1, m_jointMeshSsbo, 0, md.size);
+    }
+
+    if (m_compositeType)
+        m_compositeDescSet = ctx.device->AllocateDescriptorSet(
+            m_compositeType->shader->GetMaterialLayout());
 }
 
 void SceneRenderer::DebugOverlayFeature::OnShutdown(RHI::IRHIDevice* device)
 {
-    if (m_ssbo.IsValid())     device->DestroyBuffer(m_ssbo);
-    if (m_xraySsbo.IsValid()) device->DestroyBuffer(m_xraySsbo);
-    m_ssbo        = {};
-    m_xraySsbo    = {};
-    m_descSet     = {};
-    m_xrayDescSet = {};
-    m_type        = nullptr;
-    m_xrayType    = nullptr;
+    if (m_ssbo.IsValid())      device->DestroyBuffer(m_ssbo);
+    if (m_xraySsbo.IsValid())  device->DestroyBuffer(m_xraySsbo);
+    if (m_boneSsbo.IsValid())     device->DestroyBuffer(m_boneSsbo);
+    if (m_jointSsbo.IsValid())    device->DestroyBuffer(m_jointSsbo);
+    if (m_jointMeshSsbo.IsValid()) device->DestroyBuffer(m_jointMeshSsbo);
+    m_ssbo         = {};
+    m_xraySsbo     = {};
+    m_boneSsbo     = {};
+    m_jointSsbo    = {};
+    m_jointMeshSsbo = {};
+    m_descSet          = {};
+    m_xrayDescSet      = {};
+    m_boneDescSet      = {};
+    m_jointDescSet     = {};
+    m_compositeDescSet = {};
+    m_type          = nullptr;
+    m_xrayType      = nullptr;
+    m_boneType      = nullptr;
+    m_jointType     = nullptr;
+    m_compositeType = nullptr;
 }
 
 void SceneRenderer::DebugOverlayFeature::AddPasses(
@@ -4927,6 +5185,139 @@ void SceneRenderer::DebugOverlayFeature::AddPasses(
                     cmd.Draw(vertCount, 1, 0, 0);
                     cmd.EndRenderPass();
                 });
+        }
+    }
+
+    // ── Solid skeleton (#83 X-2): octahedral bones + icosphere joints ─────────
+    // Rendered OPAQUE into an offscreen RGBA target with a private cleared depth
+    // (bones/joints self-occlude correctly), then alpha-composited over the scene
+    // ONCE — so internal/overlapping faces never double-blend, yet the whole
+    // skeleton still reads through the character mesh (DCC x-ray). The per-instance
+    // color alpha carries the opacity and lands in the target's alpha channel,
+    // which the composite uses as the blend factor.
+    const auto     boneInsts  = dd->GetBoneInstances();
+    const auto     jointInsts = dd->GetJointInstances();
+    const uint32_t boneCount  = static_cast<uint32_t>(boneInsts.size());
+    const uint32_t jointCount = static_cast<uint32_t>(jointInsts.size());
+    if ((boneCount > 0 || jointCount > 0) &&
+        m_boneType && m_boneSsbo.IsValid() && m_boneDescSet.IsValid() &&
+        m_jointType && m_jointSsbo.IsValid() && m_jointDescSet.IsValid() &&
+        m_compositeType && m_compositeDescSet.IsValid())
+    {
+        if (boneCount > 0)
+            ctx.device->UploadBufferData(m_boneSsbo, boneInsts.data(),
+                                         boneCount * sizeof(DebugDraw::BoneInstance));
+        if (jointCount > 0)
+            ctx.device->UploadBufferData(m_jointSsbo, jointInsts.data(),
+                                         jointCount * sizeof(DebugDraw::BoneInstance));
+
+        constexpr RHI::RHIFormat kSkelColorFormat = RHI::RHIFormat::RGBA16F;
+        AttachmentKey skelKey{};
+        skelKey.colorCount      = 1;
+        skelKey.colorFormats[0] = kSkelColorFormat;
+        skelKey.depthFormat     = kSceneDepthFormat;
+
+        const RHI::RHIPipelineHandle bonePipeline  = m_boneType->GetOrCreatePipeline(ctx.device, skelKey);
+        const RHI::RHIPipelineHandle jointPipeline = m_jointType->GetOrCreatePipeline(ctx.device, skelKey);
+        if (bonePipeline.IsValid() && jointPipeline.IsValid()) {
+            RHI::RHITextureDesc cd{};
+            cd.width     = w;
+            cd.height    = h;
+            cd.format    = kSkelColorFormat;
+            cd.usage     = RHI::RHITextureUsage::RenderTarget | RHI::RHITextureUsage::Sampled;
+            cd.debugName = "DebugSkeletonColor";
+            const RGTextureHandle rgSkelColor = ctx.rg->CreateTexture("DebugSkeletonColor", cd);
+
+            RHI::RHITextureDesc dd_{};
+            dd_.width     = w;
+            dd_.height    = h;
+            dd_.format    = kSceneDepthFormat;
+            dd_.usage     = RHI::RHITextureUsage::DepthStencil;
+            dd_.debugName = "DebugSkeletonDepth";
+            const RGTextureHandle rgSkelDepth = ctx.rg->CreateTexture("DebugSkeletonDepth", dd_);
+
+            const RHI::RHIDescSetHandle frameSet      = ctx.frameSet;
+            const RHI::RHIDescSetHandle boneDescSet   = m_boneDescSet;
+            const RHI::RHIDescSetHandle jointDescSet  = m_jointDescSet;
+            const uint32_t              jointMeshVerts = m_jointMeshVerts;
+
+            // Pass 1: opaque skeleton → offscreen (transparent-cleared) color.
+            ctx.rg->AddPass("DebugSkeleton",
+                [rgSkelColor, rgSkelDepth](RGPassBuilder& b) {
+                    b.Write(rgSkelColor); b.WriteDepth(rgSkelDepth);
+                },
+                [bonePipeline, jointPipeline, frameSet, boneDescSet, jointDescSet, jointMeshVerts,
+                 viewProj, boneCount, jointCount, rgSkelColor, rgSkelDepth, w, h]
+                (RHI::IRHICommandList& cmd, const RGResources& res)
+                {
+                    RHI::RHIRenderPassDesc rpDesc{};
+                    rpDesc.colorAttachmentCount            = 1;
+                    rpDesc.colorAttachments[0].texture     = res.Get(rgSkelColor);
+                    rpDesc.colorAttachments[0].clearOnLoad = true;   // transparent (0,0,0,0)
+                    rpDesc.colorAttachments[0].clearColor[3] = 0.f;  // alpha 0 = uncovered (default is 1!)
+                    rpDesc.hasDepth                        = true;
+                    rpDesc.depthAttachment.texture         = res.Get(rgSkelDepth);
+                    rpDesc.depthAttachment.clearOnLoad     = true;
+                    rpDesc.depthAttachment.clearDepth      = 1.f;
+                    rpDesc.width  = w;
+                    rpDesc.height = h;
+                    cmd.BeginRenderPass(rpDesc);
+                    cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
+                    cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
+                    if (boneCount > 0) {
+                        cmd.SetPipeline(bonePipeline);
+                        cmd.SetDescriptorSet(1, frameSet);
+                        cmd.SetDescriptorSet(2, boneDescSet);
+                        cmd.SetPushConstants(&viewProj, sizeof(glm::mat4), RHI::RHIShaderStage::Vertex);
+                        cmd.Draw(24, boneCount, 0, 0);   // 8-tri octahedron × boneCount
+                    }
+                    if (jointCount > 0 && jointMeshVerts > 0) {
+                        cmd.SetPipeline(jointPipeline);
+                        cmd.SetDescriptorSet(1, frameSet);
+                        cmd.SetDescriptorSet(2, jointDescSet);
+                        cmd.SetPushConstants(&viewProj, sizeof(glm::mat4), RHI::RHIShaderStage::Vertex);
+                        cmd.Draw(jointMeshVerts, jointCount, 0, 0);  // icosphere × jointCount
+                    }
+                    cmd.EndRenderPass();
+                });
+
+            // Pass 2: alpha-composite the opaque skeleton over the swapchain once.
+            ctx.BindTexture(m_compositeDescSet, 0, rgSkelColor);
+            AttachmentKey compKey{};
+            compKey.colorCount      = 1;
+            compKey.colorFormats[0] = ctx.device->GetSwapchainFormat();
+            compKey.depthFormat     = RHI::RHIFormat::Undefined;
+            const RHI::RHIPipelineHandle compPipeline =
+                m_compositeType->GetOrCreatePipeline(ctx.device, compKey);
+            if (compPipeline.IsValid()) {
+                const RHI::RHIDescSetHandle frameSet2 = ctx.frameSet;
+                const RHI::RHIDescSetHandle compDesc  = m_compositeDescSet;
+                ctx.rg->AddPass("DebugSkeletonComposite",
+                    [rgSkelColor, rgSwap](RGPassBuilder& b) {
+                        b.Read(rgSkelColor);
+                        // Read+Write on rgSwap orders this after Tonemap (see DebugOverlay).
+                        b.Read(rgSwap); b.Write(rgSwap);
+                    },
+                    [compPipeline, frameSet2, compDesc, rgSwap, w, h]
+                    (RHI::IRHICommandList& cmd, const RGResources& res)
+                    {
+                        RHI::RHIRenderPassDesc rpDesc{};
+                        rpDesc.colorAttachmentCount            = 1;
+                        rpDesc.colorAttachments[0].texture     = res.Get(rgSwap);
+                        rpDesc.colorAttachments[0].clearOnLoad = false;
+                        rpDesc.hasDepth = false;
+                        rpDesc.width    = w;
+                        rpDesc.height   = h;
+                        cmd.BeginRenderPass(rpDesc);
+                        cmd.SetViewport(RHI::RHIViewport{0.f, 0.f, float(w), float(h)});
+                        cmd.SetScissor(RHI::RHIScissor{0, 0, w, h});
+                        cmd.SetPipeline(compPipeline);
+                        cmd.SetDescriptorSet(1, frameSet2);
+                        cmd.SetDescriptorSet(2, compDesc);
+                        cmd.Draw(3, 1, 0, 0);   // fullscreen triangle
+                        cmd.EndRenderPass();
+                    });
+            }
         }
     }
 
@@ -5151,11 +5542,13 @@ void SceneRenderer::IdPickFeature::AddPasses(
     pick.pending = false;
     if ((!doPick && !debugView) || !m_type || w == 0 || h == 0) return;
 
-    // Lazily (re)create the pick buffer — VRAM is only paid on first pick.
+    // Lazily (re)create the pick buffers — VRAM is only paid on first pick.
     if (!renderer.m_idBuffer.IsValid() ||
         renderer.m_idBufferW != w || renderer.m_idBufferH != h) {
         if (renderer.m_idBuffer.IsValid())
             ctx.device->DestroyTexture(renderer.m_idBuffer);
+        if (renderer.m_idDepth.IsValid())
+            ctx.device->DestroyTexture(renderer.m_idDepth);
         RHI::RHITextureDesc d{};
         d.width     = w;
         d.height    = h;
@@ -5165,6 +5558,18 @@ void SceneRenderer::IdPickFeature::AddPasses(
                     | RHI::RHITextureUsage::CopySrc;
         d.debugName = "IdPickBuffer";
         renderer.m_idBuffer  = ctx.device->CreateTexture(d);
+        // Issue #111: depth is persistent + CPU-readable so Place picks can
+        // reconstruct the surface position/normal. Sampled is required for the
+        // ShaderRead final layout ReadbackTextureMips assumes.
+        RHI::RHITextureDesc dd{};
+        dd.width     = w;
+        dd.height    = h;
+        dd.format    = RHI::RHIFormat::D32F;
+        dd.usage     = RHI::RHITextureUsage::DepthStencil
+                     | RHI::RHITextureUsage::Sampled
+                     | RHI::RHITextureUsage::CopySrc;
+        dd.debugName = "IdPickDepth";
+        renderer.m_idDepth   = ctx.device->CreateTexture(dd);
         renderer.m_idBufferW = w;
         renderer.m_idBufferH = h;
     }
@@ -5182,6 +5587,7 @@ void SceneRenderer::IdPickFeature::AddPasses(
     if (doPick) pick.snapshot.clear();
     uint32_t nextId = 0;
     for (const auto& di : renderer.m_drawItems) {
+        if (di.entity == renderer.m_pickExcluded) continue;   // X-12: drag ghost
         const auto* wt = reg.try_get<WorldTransformComponent>(di.entity);
         if (!wt) continue;
         ++nextId;
@@ -5194,8 +5600,11 @@ void SceneRenderer::IdPickFeature::AddPasses(
     }
     if (doPick && dcs.empty()) {
         // Nothing pickable — report a background miss without rendering.
-        pick.result    = {};
-        pick.hasResult = true;
+        // Issue #111: purpose must survive the reset or a Place miss would be
+        // routed as a Select result and the pending drop would hang.
+        pick.result         = {};
+        pick.result.purpose = pick.purpose;
+        pick.hasResult      = true;
         if (!debugView) return;
     }
 
@@ -5206,8 +5615,9 @@ void SceneRenderer::IdPickFeature::AddPasses(
 
     const RHI::RHIPipelineHandle pipeline = m_type->GetOrCreatePipeline(ctx.device, key);
     if (!pipeline.IsValid()) {
-        pick.result    = {};
-        pick.hasResult = true;
+        pick.result         = {};
+        pick.result.purpose = pick.purpose;
+        pick.hasResult      = true;
         return;
     }
     RHI::RHIPipelineHandle skinnedPipeline{};
@@ -5219,14 +5629,14 @@ void SceneRenderer::IdPickFeature::AddPasses(
     const RGTextureHandle rgId = ctx.rg->ImportTexture("IdPickBuffer",
         renderer.m_idBuffer,
         RHI::RHIResourceState::Undefined, RHI::RHIResourceState::ShaderRead);
+    const RGTextureHandle rgDepth = ctx.rg->ImportTexture("IdPickDepth",
+        renderer.m_idDepth,
+        RHI::RHIResourceState::Undefined, RHI::RHIResourceState::ShaderRead);
 
-    RHI::RHITextureDesc dd{};
-    dd.width     = w;
-    dd.height    = h;
-    dd.format    = RHI::RHIFormat::D32F;
-    dd.usage     = RHI::RHITextureUsage::DepthStencil;
-    dd.debugName = "IdPickDepth";
-    const RGTextureHandle rgDepth = ctx.rg->CreateTexture("IdPickDepth", dd);
+    // Issue #111: snapshot the inverse of the exact (jittered) VP this pass
+    // rasterises with — Place unprojection must match the depth buffer.
+    if (doPick)
+        pick.invViewProj = glm::inverse(renderer.m_currentViewProj);
 
     const RHI::RHIDescSetHandle frameSet = ctx.frameSet;
 
@@ -5332,10 +5742,11 @@ void SceneRenderer::IdPickFeature::AddPasses(
 
 // ── ID pick API (Issue #102) ─────────────────────────────────────────────────
 
-void SceneRenderer::RequestIdPick(uint32_t px, uint32_t py) {
+void SceneRenderer::RequestIdPick(uint32_t px, uint32_t py, PickPurpose purpose) {
     m_idPick.pending   = true;
     m_idPick.px        = px;
     m_idPick.py        = py;
+    m_idPick.purpose   = purpose;
     m_idPick.hasResult = false;
 }
 
@@ -5347,20 +5758,109 @@ bool SceneRenderer::TryConsumePickResult(PickResult& out) {
 }
 
 void SceneRenderer::ResolveIdPick() {
-    m_idPick.result    = {};
-    m_idPick.hasResult = true;
+    m_idPick.result         = {};
+    m_idPick.result.purpose = m_idPick.purpose;
+    m_idPick.hasResult      = true;
     if (!m_idBuffer.IsValid() || m_idBufferW == 0 || m_idBufferH == 0) return;
 
-    std::vector<uint32_t> pixels(size_t(m_idBufferW) * m_idBufferH);
-    RHI::IRHIDevice::MipReadback mr{pixels.data(), pixels.size() * sizeof(uint32_t)};
-    m_device->ReadbackTextureMips(m_idBuffer, {&mr, 1});
+    const uint32_t w = m_idBufferW, h = m_idBufferH;
+    const uint32_t x = std::min(m_idPick.px, w - 1);
+    const uint32_t y = std::min(m_idPick.py, h - 1);
 
-    const uint32_t x  = std::min(m_idPick.px, m_idBufferW - 1);
-    const uint32_t y  = std::min(m_idPick.py, m_idBufferH - 1);
-    const uint32_t id = pixels[size_t(y) * m_idBufferW + x];
+    // X-12: 3×3 window region readback (clamped at texture edges) instead of
+    // full-image — hover picks run every frame during a drag.
+    const uint32_t rx = (x >= 1) ? x - 1 : 0;
+    const uint32_t ry = (y >= 1) ? y - 1 : 0;
+    const uint32_t rw = std::min(3u, w - rx);
+    const uint32_t rh = std::min(3u, h - ry);
+
+    std::array<uint32_t, 9> pixels{};
+    RHI::IRHIDevice::RegionReadback rr{
+        rx, ry, rw, rh, pixels.data(), size_t(rw) * rh * sizeof(uint32_t)};
+    m_device->ReadbackTextureRegion(m_idBuffer, rr);
+
+    // Window-local sampling: (sx, sy) in swapchain pixels.
+    auto idAt = [&](uint32_t sx, uint32_t sy) {
+        return pixels[size_t(sy - ry) * rw + (sx - rx)];
+    };
+
+    const uint32_t id = idAt(x, y);
     if (id != 0 && id <= m_idPick.snapshot.size()) {
-        const auto& [e, si]  = m_idPick.snapshot[id - 1];
-        m_idPick.result      = {e, si, true};
+        const auto& [e, si]          = m_idPick.snapshot[id - 1];
+        m_idPick.result.entity       = e;
+        m_idPick.result.submeshIndex = si;
+        m_idPick.result.hit          = true;
+    }
+
+    // Issue #111: Place picks additionally reconstruct the surface point and
+    // geometric normal from the pick depth target.
+    if (m_idPick.purpose == PickPurpose::Place && m_idPick.result.hit &&
+        m_idDepth.IsValid()) {
+        std::array<float, 9> depth{};
+        RHI::IRHIDevice::RegionReadback dr{
+            rx, ry, rw, rh, depth.data(), size_t(rw) * rh * sizeof(float)};
+        m_device->ReadbackTextureRegion(m_idDepth, dr);
+
+        auto depthAt = [&](uint32_t sx, uint32_t sy) {
+            return depth[size_t(sy - ry) * rw + (sx - rx)];
+        };
+
+        const float dc = depthAt(x, y);
+        if (dc < 1.f) {
+            const glm::mat4& inv = m_idPick.invViewProj;
+            auto unproject = [&](uint32_t ux, uint32_t uy, float d) {
+                // Same NDC convention as EditorMode::ScreenToWorldRay: proj
+                // already has the Vulkan Y-flip, so screen-y maps directly.
+                const float ndcX = ((float(ux) + 0.5f) / float(w)) * 2.f - 1.f;
+                const float ndcY = ((float(uy) + 0.5f) / float(h)) * 2.f - 1.f;
+                const glm::vec4 p = inv * glm::vec4(ndcX, ndcY, d, 1.f);
+                return glm::vec3(p) / p.w;
+            };
+            const glm::vec3 pc = unproject(x, y, dc);
+            m_idPick.result.hasSurface = true;
+            m_idPick.result.worldPos   = pc;
+
+            // Min-delta side differencing (deferred normal-reconstruction
+            // trick). Any unreliable neighbour — off-screen, background, or a
+            // different draw item — leaves the +Y default so the editor's
+            // normal alignment degrades to upright placement.
+            auto neighbour = [&](int sx, int sy, float& outD) {
+                if (sx < int(rx) || sy < int(ry) ||
+                    sx >= int(rx + rw) || sy >= int(ry + rh)) return false;
+                if (idAt(uint32_t(sx), uint32_t(sy)) != id) return false;
+                outD = depthAt(uint32_t(sx), uint32_t(sy));
+                return outD < 1.f;
+            };
+            float dL = 0.f, dR = 0.f, dU = 0.f, dD = 0.f;
+            const bool hasL = neighbour(int(x) - 1, int(y), dL);
+            const bool hasR = neighbour(int(x) + 1, int(y), dR);
+            const bool hasU = neighbour(int(x), int(y) - 1, dU);
+            const bool hasD = neighbour(int(x), int(y) + 1, dD);
+
+            glm::vec3 ddx(0.f), ddy(0.f);
+            bool okX = false, okY = false;
+            if (hasL && (!hasR || std::abs(dL - dc) <= std::abs(dR - dc))) {
+                ddx = pc - unproject(x - 1, y, dL); okX = true;
+            } else if (hasR) {
+                ddx = unproject(x + 1, y, dR) - pc; okX = true;
+            }
+            if (hasU && (!hasD || std::abs(dU - dc) <= std::abs(dD - dc))) {
+                ddy = pc - unproject(x, y - 1, dU); okY = true;
+            } else if (hasD) {
+                ddy = unproject(x, y + 1, dD) - pc; okY = true;
+            }
+            if (okX && okY) {
+                glm::vec3 n = glm::cross(ddy, ddx);
+                const float len2 = glm::dot(n, n);
+                if (len2 > 1e-12f) {
+                    n /= std::sqrt(len2);
+                    // Winding from the cross product is arbitrary — orient
+                    // toward the camera (pixel-ray near point sits at d=0).
+                    if (glm::dot(n, pc - unproject(x, y, 0.f)) > 0.f) n = -n;
+                    m_idPick.result.worldNormal = n;
+                }
+            }
+        }
     }
     m_idPick.snapshot.clear();
 }

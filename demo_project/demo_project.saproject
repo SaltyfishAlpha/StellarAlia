@@ -1,5 +1,5 @@
 {
   "name": "DemoProject",
   "version": 1,
-  "startupScene": "assets/scenes/area_light_test.sascene"
+  "startupScene": "assets/scenes/sausage_crossfade_test.sascene"
 }

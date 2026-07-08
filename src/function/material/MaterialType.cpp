@@ -92,6 +92,17 @@ RHI::RHIPipelineHandle MaterialType::GetOrCreatePipeline(RHI::IRHIDevice*       
     return shader->GetOrCreatePipeline(device, key, state);
 }
 
+RHI::RHIPipelineHandle MaterialType::GetOrCreatePipeline(RHI::IRHIDevice*           device,
+                                                           const AttachmentKey&       key,
+                                                           const PipelineRenderState& state,
+                                                           bool                       skinned) {
+    if (skinned) {
+        if (!skinnedShader) return {};
+        return skinnedShader->GetOrCreatePipeline(device, key, state);
+    }
+    return shader->GetOrCreatePipeline(device, key, state);
+}
+
 PipelineRenderState MaterialType::DefaultRenderState() const noexcept {
     PipelineRenderState s{};
     s.cullMode      = defaultCullMode;

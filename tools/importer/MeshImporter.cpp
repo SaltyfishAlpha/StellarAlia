@@ -6,7 +6,7 @@
 #include "resource/cook/CookedSkeleton.hpp"
 #include "resource/cook/CookedAnim.hpp"
 #include "resource/cook/CookedTexture.hpp"
-#include "resource/loaders/GltfLoader.hpp"
+#include "resource/loaders/ModelLoader.hpp"
 #include "resource/types/MeshData.hpp"
 
 #include <nlohmann/json.hpp>
@@ -57,6 +57,39 @@ static std::string MaterialDisplayName(const SceneData& scene, int32_t matIndex)
         !scene.materials[matIndex].name.empty())
         return scene.materials[matIndex].name;
     return "Material_" + std::to_string(matIndex);
+}
+
+// #83 P2: parse user-authored `event=<time>|<name>|<payload>` lines from a
+// .sanim sidecar (payload optional; multiple lines allowed). Returned sorted
+// by time so runtime scanning is monotonic.
+static std::vector<Resource::AnimEvent> ParseSidecarEvents(const fs::path& sanimPath) {
+    std::vector<Resource::AnimEvent> events;
+    std::ifstream f(sanimPath);
+    std::string line;
+    while (std::getline(f, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+            line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        const auto eq = line.find('=');
+        if (eq == std::string::npos || line.substr(0, eq) != "event") continue;
+
+        const std::string v = line.substr(eq + 1);
+        const auto p1 = v.find('|');
+        if (p1 == std::string::npos) continue;   // needs at least time|name
+        Resource::AnimEvent ev;
+        try { ev.time = std::stof(v.substr(0, p1)); } catch (...) { continue; }
+        const auto p2 = v.find('|', p1 + 1);
+        if (p2 == std::string::npos) {
+            ev.name = v.substr(p1 + 1);
+        } else {
+            ev.name    = v.substr(p1 + 1, p2 - p1 - 1);
+            ev.payload = v.substr(p2 + 1);
+        }
+        events.push_back(std::move(ev));
+    }
+    std::sort(events.begin(), events.end(),
+              [](const auto& a, const auto& b) { return a.time < b.time; });
+    return events;
 }
 
 static std::string SanitizeName(std::string s) {
@@ -250,7 +283,8 @@ static void CookPerNodeMeshes(const AssetEntry&           entry,
 
 // ─── CookMesh ─────────────────────────────────────────────────────────────────
 
-bool CookMesh(const AssetEntry& entry, const fs::path& cookCacheDir, bool force) {
+bool CookMesh(const AssetEntry& entry, const fs::path& cookCacheDir, bool force,
+              std::vector<AssetID>* outMaterialIDs) {
     fs::create_directories(cookCacheDir);
 
     const fs::path outPath    = cookCacheDir / (entry.meta.uuid.ToString() + ".samesh");
@@ -261,10 +295,10 @@ bool CookMesh(const AssetEntry& entry, const fs::path& cookCacheDir, bool force)
         return true;
     }
 
-    auto sceneOpt = GltfLoader::Load(entry.sourcePath.string());
+    auto sceneOpt = ModelLoader::Load(entry.sourcePath.string());
     if (!sceneOpt) {
         std::cerr << "[Cook] FAIL  " << entry.sourcePath.filename()
-                  << " — could not load glTF\n";
+                  << " — could not load model\n";
         return false;
     }
     const SceneData& scene = *sceneOpt;
@@ -380,6 +414,7 @@ bool CookMesh(const AssetEntry& entry, const fs::path& cookCacheDir, bool force)
             std::cout << "[Cook] REMAP material #" << mi << " → " << val << '\n';
         }
     }
+    if (outMaterialIDs) *outMaterialIDs = matIDs;
 
     // ── Cook skeletons → .saskelc ─────────────────────────────────────────────
     for (int32_t si = 0; si < static_cast<int32_t>(scene.skins.size()); ++si) {
@@ -408,6 +443,18 @@ bool CookMesh(const AssetEntry& entry, const fs::path& cookCacheDir, bool force)
         CookedAnim cooked;
         cooked.id   = animId;
         cooked.clip = clip;
+
+        // #83 P2: preserve user-authored events — recooking the mesh must not
+        // wipe them. Rebuild the sidecar path the same way GenerateAnimSidecars
+        // does and re-read its event lines.
+        {
+            const std::string clipName = clip.name.empty()
+                ? ("Anim" + std::to_string(ai)) : clip.name;
+            const fs::path sidecar = entry.sourcePath.parent_path() /
+                (entry.sourcePath.stem().string() + "_" + SanitizeName(clipName) + ".sanim");
+            if (fs::exists(sidecar))
+                cooked.clip.events = ParseSidecarEvents(sidecar);
+        }
 
         if (SaveCookedAnim(cooked, animOut.string()))
             std::cout << "[Cook] ANIM  #" << ai
@@ -574,7 +621,7 @@ bool CookAnimSidecar(const AssetEntry& sanimEntry,
         return true;
     }
 
-    auto sceneOpt = GltfLoader::Load(sourceMeshPath.string());
+    auto sceneOpt = ModelLoader::Load(sourceMeshPath.string());
     if (!sceneOpt) {
         std::cerr << "[Cook] FAIL  " << sanimEntry.sourcePath.filename()
                   << " — could not load source mesh " << sourceMeshPath.filename() << '\n';
@@ -594,6 +641,7 @@ bool CookAnimSidecar(const AssetEntry& sanimEntry,
     CookedAnim cooked;
     cooked.id   = sanimEntry.meta.uuid;
     cooked.clip = scene.animations[clipIndex];
+    cooked.clip.events = ParseSidecarEvents(sanimEntry.sourcePath);   // #83 P2
 
     if (!SaveCookedAnim(cooked, outPath.string())) {
         std::cerr << "[Cook] FAIL  " << sanimEntry.sourcePath.filename()
@@ -642,7 +690,7 @@ bool CookSkeletonSidecar(const AssetEntry& sakelEntry,
         return true;
     }
 
-    auto sceneOpt = GltfLoader::Load(sourceMeshPath.string());
+    auto sceneOpt = ModelLoader::Load(sourceMeshPath.string());
     if (!sceneOpt) {
         std::cerr << "[Cook] FAIL  " << sakelEntry.sourcePath.filename()
                   << " — could not load source mesh " << sourceMeshPath.filename() << '\n';

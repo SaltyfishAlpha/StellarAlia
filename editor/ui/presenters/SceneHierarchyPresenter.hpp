@@ -6,6 +6,7 @@
 #include <entt/entt.hpp>
 #include <filesystem>
 #include <glm/vec3.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <vector>
 
 namespace StellarAlia::Editor {
@@ -33,6 +34,7 @@ public:
         std::filesystem::path assetPath;
         entt::entity          parent   = entt::null;
         glm::vec3             spawnPos = {};
+        glm::quat             spawnRot = {1.f, 0.f, 0.f, 0.f};  // Issue #111
         bool                  valid    = false;
     };
 

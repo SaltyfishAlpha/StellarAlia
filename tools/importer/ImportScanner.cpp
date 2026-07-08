@@ -5,6 +5,8 @@
 #include "importer/MaterialImporter.hpp"
 #include "importer/InputMapImporter.hpp"
 
+#include "resource/loaders/ModelLoader.hpp"
+
 #include <algorithm>
 #include <iostream>
 
@@ -15,10 +17,10 @@ std::string AssetTypeFromExtension(const fs::path& ext) {
     std::transform(e.begin(), e.end(), e.begin(), ::tolower);
 
     if (e == ".png"  || e == ".jpg" || e == ".jpeg" ||
-        e == ".bmp"  || e == ".tga" || e == ".hdr")
+        e == ".bmp"  || e == ".tga" || e == ".hdr" || e == ".dds")
         return "Texture";
 
-    if (e == ".gltf" || e == ".glb")
+    if (Resource::ModelLoader::SupportsExtension(e))
         return "Mesh";
 
     if (e == ".samat")

@@ -196,6 +196,11 @@ nlohmann::json SceneSerializer::SerializeToJson(const Scene& scene) {
             ppj["volFogHeightBase"]    = pp.volFogHeightBase;
             ppj["volFogHeightFalloff"] = pp.volFogHeightFalloff;
             ppj["volFogAmbient"]       = pp.volFogAmbient;
+            ppj["volFogTemporal"]      = pp.volFogTemporal;
+            ppj["volFogTemporalBlend"] = pp.volFogTemporalBlend;
+            ppj["volFogNoiseScale"]    = pp.volFogNoiseScale;
+            ppj["volFogNoiseStrength"] = pp.volFogNoiseStrength;
+            ppj["volFogWind"]          = Vec3ToJson(pp.volFogWind);
 
             // Screen Effects (Issue #88) — ordered per-scene stack.
             json fxArr = json::array();
@@ -264,8 +269,11 @@ nlohmann::json SceneSerializer::SerializeToJson(const Scene& scene) {
             ej["staticMesh"] = { {"mesh", AssetToStr(m->meshAsset)} };
 
         // Skinned mesh
-        if (const auto* m = reg.try_get<SkinnedMeshComponent>(e))
+        if (const auto* m = reg.try_get<SkinnedMeshComponent>(e)) {
             ej["skinnedMesh"] = { {"mesh", AssetToStr(m->meshAsset)} };
+            if (m->skeletonAsset.IsValid())
+                ej["skinnedMesh"]["skeleton"] = AssetToStr(m->skeletonAsset);
+        }
 
         // Mesh renderer (shared config for static + skinned)
         if (const auto* mr = reg.try_get<MeshRendererComponent>(e)) {
@@ -281,10 +289,26 @@ nlohmann::json SceneSerializer::SerializeToJson(const Scene& scene) {
         // Animator
         if (const auto* a = reg.try_get<AnimatorComponent>(e)) {
             ej["animator"] = {
-                {"clip",    AssetToStr(a->clipAsset)},
-                {"speed",   a->speed},
-                {"looping", a->looping}
+                {"clip",            AssetToStr(a->clipAsset)},
+                {"speed",           a->speed},
+                {"looping",         a->looping},
+                {"fadeDuration",    a->fadeDuration},
+                {"applyRootMotion", a->applyRootMotion}
             };
+        }
+
+        // Bone pose overrides (#83 bone editing)
+        if (const auto* bp = reg.try_get<BonePoseOverrideComponent>(e);
+            bp && !bp->bones.empty()) {
+            json arr = json::array();
+            for (const auto& [bi, trs] : bp->bones)
+                arr.push_back({
+                    {"bone",     bi},
+                    {"position", Vec3ToJson(trs.position)},
+                    {"rotation", QuatToJson(trs.rotation)},
+                    {"scale",    Vec3ToJson(trs.scale)}
+                });
+            ej["bonePose"] = std::move(arr);
         }
 
         // Rigid body
@@ -372,6 +396,13 @@ nlohmann::json SceneSerializer::SerializeToJson(const Scene& scene) {
                 {"intensity",  l->intensity},
                 {"castShadow", l->castShadow},
                 {"isSun",      l->isSun}
+            };
+        }
+        if (const auto* f = reg.try_get<FogVolumeComponent>(e)) {
+            ej["fogVolume"] = {
+                {"density", f->density},
+                {"albedo",  Vec3ToJson(f->albedo)},
+                {"falloff", f->falloff}
             };
         }
         if (const auto* l = reg.try_get<PointLightComponent>(e)) {
@@ -571,6 +602,11 @@ bool SceneSerializer::DeserializeFromJson(Scene& scene, const nlohmann::json& ro
             pp.volFogHeightBase    = ppj.value("volFogHeightBase",    pp.volFogHeightBase);
             pp.volFogHeightFalloff = ppj.value("volFogHeightFalloff", pp.volFogHeightFalloff);
             pp.volFogAmbient       = ppj.value("volFogAmbient",       pp.volFogAmbient);
+            pp.volFogTemporal      = ppj.value("volFogTemporal",      pp.volFogTemporal);
+            pp.volFogTemporalBlend = ppj.value("volFogTemporalBlend", pp.volFogTemporalBlend);
+            pp.volFogNoiseScale    = ppj.value("volFogNoiseScale",    pp.volFogNoiseScale);
+            pp.volFogNoiseStrength = ppj.value("volFogNoiseStrength", pp.volFogNoiseStrength);
+            if (ppj.contains("volFogWind")) pp.volFogWind = JsonToVec3(ppj["volFogWind"]);
 
             // Screen Effects (Issue #88) — ordered per-scene stack.
             pp.screenEffects.clear();
@@ -675,6 +711,8 @@ bool SceneSerializer::DeserializeFromJson(Scene& scene, const nlohmann::json& ro
             auto& smc = reg.emplace<SkinnedMeshComponent>(e);
             if (mj.contains("mesh"))
                 smc.meshAsset = StrToAsset(mj["mesh"].get<std::string>());
+            if (mj.contains("skeleton"))
+                smc.skeletonAsset = StrToAsset(mj["skeleton"].get<std::string>());
             // Backward compat: old scenes stored materials inside skinnedMesh.
             if (mj.contains("materials")) {
                 MeshRendererComponent mr;
@@ -705,9 +743,27 @@ bool SceneSerializer::DeserializeFromJson(Scene& scene, const nlohmann::json& ro
             AnimatorComponent a;
             if (aj.contains("clip"))
                 a.clipAsset = StrToAsset(aj["clip"].get<std::string>());
-            a.speed   = aj.value("speed",   a.speed);
-            a.looping = aj.value("looping", a.looping);
+            a.speed           = aj.value("speed",           a.speed);
+            a.looping         = aj.value("looping",         a.looping);
+            a.fadeDuration    = aj.value("fadeDuration",    a.fadeDuration);
+            a.applyRootMotion = aj.value("applyRootMotion", a.applyRootMotion);
             reg.emplace<AnimatorComponent>(e, a);
+        }
+
+        // Bone pose overrides (#83 bone editing)
+        if (ej.contains("bonePose") && ej["bonePose"].is_array()) {
+            BonePoseOverrideComponent bp;
+            for (const auto& bj : ej["bonePose"]) {
+                const int32_t bi = bj.value("bone", -1);
+                if (bi < 0) continue;
+                BoneTRS trs;
+                if (bj.contains("position")) trs.position = JsonToVec3(bj["position"]);
+                if (bj.contains("rotation")) trs.rotation = JsonToQuat(bj["rotation"]);
+                if (bj.contains("scale"))    trs.scale    = JsonToVec3(bj["scale"]);
+                bp.bones[bi] = trs;
+            }
+            if (!bp.bones.empty())
+                reg.emplace<BonePoseOverrideComponent>(e, std::move(bp));
         }
 
         // Rigid body
@@ -814,6 +870,14 @@ bool SceneSerializer::DeserializeFromJson(Scene& scene, const nlohmann::json& ro
             l.castShadow = lj.value("castShadow", l.castShadow);
             l.isSun      = lj.value("isSun",      l.isSun);
             reg.emplace<DirectionalLightComponent>(e, l);
+        }
+        if (ej.contains("fogVolume")) {
+            const auto& fj = ej["fogVolume"];
+            FogVolumeComponent f;
+            f.density = fj.value("density", f.density);
+            if (fj.contains("albedo")) f.albedo = JsonToVec3Color(fj["albedo"]);
+            f.falloff = fj.value("falloff", f.falloff);
+            reg.emplace<FogVolumeComponent>(e, f);
         }
         if (ej.contains("pointLight")) {
             const auto& lj = ej["pointLight"];

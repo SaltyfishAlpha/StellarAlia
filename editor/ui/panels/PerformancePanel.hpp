@@ -16,6 +16,7 @@ public:
 private:
     const RenderGraph* m_renderGraph = nullptr;
     RHI::IRHIDevice*   m_device      = nullptr;
+    Application*       m_app         = nullptr;   // #83 P1: AnimationSystem stats
 };
 
 } // namespace StellarAlia::Editor

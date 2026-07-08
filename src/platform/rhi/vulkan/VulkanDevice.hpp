@@ -80,6 +80,8 @@ public:
                            std::span<const MipUpload> mips) override;
     void ReadbackTextureMips(RHITextureHandle       handle,
                              std::span<MipReadback> mips) override;
+    void ReadbackTextureRegion(RHITextureHandle      handle,
+                               const RegionReadback& region) override;
     [[nodiscard]] const RHITextureDesc* GetTextureDesc(
         RHITextureHandle handle) const override;
     [[nodiscard]] RHIMemoryStats   GetMemoryStats()  const override;

@@ -8,13 +8,24 @@
 namespace StellarAlia::Resource {
 
 // GPU pixel format stored in the cooked file.
-// Compression formats (BC7, ASTC) are placeholders for future cook passes.
+// BCn payloads are produced by the DDS pass-through cook (Issue #108) —
+// blocks are stored exactly as authored, never re-encoded.
 enum class CookedTextureFormat : uint32_t {
     RGBA8       = 0,   // 8-bit per channel, LDR
     RGBA32F     = 1,   // 32-bit float per channel, HDR
-    BC7         = 2,   // Block compressed LDR (future)
+    BC7         = 2,   // 4×4 blocks, 16 B/block
     ASTC_6x6    = 3,   // Mobile ASTC (future)
+    BC1         = 4,   // 4×4 blocks,  8 B/block
+    BC3         = 5,   // 4×4 blocks, 16 B/block
+    BC5         = 6,   // 4×4 blocks, 16 B/block (2-channel data, never sRGB)
 };
+
+// True when the payload is 4×4 block-compressed (mip byte sizes follow
+// max(1,(w+3)/4) * max(1,(h+3)/4) * blockBytes instead of w*h*bpp).
+inline bool IsBlockCompressed(CookedTextureFormat f) {
+    return f == CookedTextureFormat::BC1 || f == CookedTextureFormat::BC3 ||
+           f == CookedTextureFormat::BC5 || f == CookedTextureFormat::BC7;
+}
 
 // Per-mip descriptor inside the data blob.
 struct CookedTextureMip {
@@ -59,7 +70,9 @@ struct CookedTexture {
 //
 namespace SatexFormat {
     static constexpr uint32_t Magic   = 0x58455453u; // 'STEX' LE
-    static constexpr uint32_t Version = 1u;
+    // v2 (Issue #108): BCn format enum values added. Layout unchanged —
+    // readers accept v1 files as-is.
+    static constexpr uint32_t Version = 2u;
 
 #pragma pack(push, 1)
     struct FileHeader {

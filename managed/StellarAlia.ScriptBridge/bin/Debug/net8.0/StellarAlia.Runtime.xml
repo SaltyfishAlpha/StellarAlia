@@ -22,6 +22,12 @@
         <member name="M:StellarAlia.AnimatorProxy.Stop">
             <summary>Pauses playback (sets <see cref="P:StellarAlia.AnimatorProxy.IsPlaying"/> to false).</summary>
         </member>
+        <member name="M:StellarAlia.AnimatorProxy.SetClip(System.String)">
+            <summary>Hard-cuts to a new clip with no blend. <paramref name="uuid"/> is the .saanim asset UUID.</summary>
+        </member>
+        <member name="M:StellarAlia.AnimatorProxy.CrossfadeTo(System.String,System.Single)">
+            <summary>Crossfades to a new clip over <paramref name="fade"/> seconds (0 = hard cut).</summary>
+        </member>
         <member name="T:StellarAlia.AssetRef">
             <summary>
             Reference to a cooked asset by stable UUID — wire-compatible with native

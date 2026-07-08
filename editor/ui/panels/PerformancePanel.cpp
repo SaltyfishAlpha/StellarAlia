@@ -10,6 +10,7 @@ namespace StellarAlia::Editor {
 PerformancePanel::PerformancePanel(EditorContext& ctx)
     : m_renderGraph(&ctx.app->GetRenderer().GetRenderGraph())
     , m_device(&ctx.app->GetVulkanDevice())
+    , m_app(ctx.app)
 {
     isOpen = true;
 }
@@ -72,6 +73,17 @@ void PerformancePanel::OnDraw() {
             ImGui::TextDisabled("Process:  (unavailable)");
     }
 
+    // ── Animation (#83 P1: palette upload + Static Pose Skip) ────────────────
+    if (m_app && ImGui::CollapsingHeader("Animation", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const auto& st = m_app->GetAnimationSystem().GetUploadStats();
+        ImGui::Text("Skinned evaluated: %u", st.evaluated);
+        ImGui::Text("Palettes uploaded: %u  (%.1f KB)",
+                    st.uploaded, static_cast<double>(st.bytes) / 1024.0);
+        ImGui::Text("Static-pose skips: %u", st.skipped);
+        if (st.evaluated == 0)
+            ImGui::TextDisabled("(idle — animation only runs in Play, or on pose edits)");
+    }
+
     // ── Render Stats ──────────────────────────────────────────────────────────
     if (m_renderGraph) {
         if (ImGui::CollapsingHeader("Render Stats", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -95,6 +107,35 @@ void PerformancePanel::OnDraw() {
                             physMB, savedMB, savedPct);
             } else {
                 ImGui::Text("Physical:  %.2f MB", physMB);
+            }
+
+            // Per-texture detail table — belongs with the texture summary
+            // above, not after the buffer block.
+            if (!s.entries.empty() && ImGui::TreeNode("Texture Details")) {
+                ImGui::Columns(5, "rg_detail_cols", true);
+                ImGui::TextUnformatted("Name");   ImGui::NextColumn();
+                ImGui::TextUnformatted("Size");   ImGui::NextColumn();
+                ImGui::TextUnformatted("Format"); ImGui::NextColumn();
+                ImGui::TextUnformatted("MB");     ImGui::NextColumn();
+                ImGui::TextUnformatted("Slot");   ImGui::NextColumn();
+                ImGui::Separator();
+                for (const auto& e : s.entries) {
+                    ImGui::Text("%s", e.name.c_str());  ImGui::NextColumn();
+                    if (e.mipLevels > 1)
+                        ImGui::Text("%ux%u (%u mips)", e.width, e.height, e.mipLevels);
+                    else
+                        ImGui::Text("%ux%u", e.width, e.height);
+                    ImGui::NextColumn();
+                    ImGui::Text("%s", e.formatStr ? e.formatStr : "?");
+                    ImGui::NextColumn();
+                    ImGui::Text("%.2f", static_cast<double>(e.bytes) * kMB);
+                    ImGui::NextColumn();
+                    if (e.slotIndex >= 0) ImGui::Text("%d", e.slotIndex);
+                    else                  ImGui::TextUnformatted("-");
+                    ImGui::NextColumn();
+                }
+                ImGui::Columns(1);
+                ImGui::TreePop();
             }
 
             // ── Buffer stats ─────────────────────────────────────────────────────
@@ -134,33 +175,6 @@ void PerformancePanel::OnDraw() {
                 }
             }
 
-            // Per-texture detail table
-            if (!s.entries.empty() && ImGui::TreeNode("Details")) {
-                ImGui::Columns(5, "rg_detail_cols", true);
-                ImGui::TextUnformatted("Name");   ImGui::NextColumn();
-                ImGui::TextUnformatted("Size");   ImGui::NextColumn();
-                ImGui::TextUnformatted("Format"); ImGui::NextColumn();
-                ImGui::TextUnformatted("MB");     ImGui::NextColumn();
-                ImGui::TextUnformatted("Slot");   ImGui::NextColumn();
-                ImGui::Separator();
-                for (const auto& e : s.entries) {
-                    ImGui::Text("%s", e.name.c_str());  ImGui::NextColumn();
-                    if (e.mipLevels > 1)
-                        ImGui::Text("%ux%u (%u mips)", e.width, e.height, e.mipLevels);
-                    else
-                        ImGui::Text("%ux%u", e.width, e.height);
-                    ImGui::NextColumn();
-                    ImGui::Text("%s", e.formatStr ? e.formatStr : "?");
-                    ImGui::NextColumn();
-                    ImGui::Text("%.2f", static_cast<double>(e.bytes) * kMB);
-                    ImGui::NextColumn();
-                    if (e.slotIndex >= 0) ImGui::Text("%d", e.slotIndex);
-                    else                  ImGui::TextUnformatted("-");
-                    ImGui::NextColumn();
-                }
-                ImGui::Columns(1);
-                ImGui::TreePop();
-            }
         }
     }
 }

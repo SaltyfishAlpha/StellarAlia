@@ -20,4 +20,10 @@ public sealed class AnimatorProxy
     public void Play()  => IsPlaying = true;
     /// <summary>Pauses playback (sets <see cref="IsPlaying"/> to false).</summary>
     public void Stop()  => IsPlaying = false;
+
+    /// <summary>Hard-cuts to a new clip with no blend. <paramref name="uuid"/> is the .saanim asset UUID.</summary>
+    public void SetClip(string uuid) => NativeApi.SA_Animator_SetClip(_id, uuid);
+
+    /// <summary>Crossfades to a new clip over <paramref name="fade"/> seconds (0 = hard cut).</summary>
+    public void CrossfadeTo(string uuid, float fade) => NativeApi.SA_Animator_CrossfadeTo(_id, uuid, fade);
 }

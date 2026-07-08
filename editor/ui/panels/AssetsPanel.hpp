@@ -106,6 +106,10 @@ private:
     // Delete a file (+ .sameta) or an entire directory tree; rescans registry.
     void DeletePath(const std::filesystem::path& path);
 
+    // Write the scene into the project's .saproject "startupScene" field
+    // (creates the .saproject when missing — e.g. after manual deletion).
+    void SetStartupScene(const std::filesystem::path& scenePath);
+
     // Move src file or directory into destDir; updates .sameta and selection.
     void MoveAsset(const std::filesystem::path& src,
                    const std::filesystem::path& destDir);

@@ -74,6 +74,21 @@ entt::entity EntityFactory::CreateStaticMesh(
     return e;
 }
 
+entt::entity EntityFactory::CreateSkinnedMesh(
+    Scene& scene, std::string_view name,
+    AssetID meshAsset,
+    glm::vec3 position, glm::quat rotation, glm::vec3 scale)
+{
+    auto e   = MakeBase(scene, name, position, rotation, scale);
+    auto& reg = scene.Registry();
+    auto& smc = reg.emplace<SkinnedMeshComponent>(e);
+    smc.meshAsset = meshAsset;
+    reg.emplace<AnimatorComponent>(e);          // no clip → bind pose
+    reg.emplace<MeshRendererComponent>(e);
+    scene.MarkSkinnedMeshDirty();
+    return e;
+}
+
 // ── Area light ────────────────────────────────────────────────────────────────
 
 // Built-in plane mesh: 1×1 unit quad in the local XZ plane, Y-up normal.

@@ -316,8 +316,11 @@ UUID, never by path — rename/move keep the UUID so references never break.
 
 | ext | type | import-time cook | cooked product |
 |---|---|---|---|
-| `.png/.jpg/.hdr/.tga/.bmp` | Texture | CookTexture | `<uuid>.satex` |
-| `.gltf/.glb` | Mesh | CookMesh | `<uuid>.samesh` (+ derived Skeleton/Anim/Material UUIDs) |
+| `.png/.jpg/.hdr/.tga/.bmp` | Texture | CookTexture (stb decode → RGBA8/32F) | `<uuid>.satex` |
+| `.dds` | Texture | CookTexture (BCn pass-through, Issue #108) | `<uuid>.satex` v2 |
+| `.gltf/.glb/.vrm` | Mesh | CookMesh (via GltfLoader) | `<uuid>.samesh` (+ derived Skeleton/Anim/Material UUIDs) |
+| `.obj` | Mesh | CookMesh (via ObjLoader, Issue #108) | `<uuid>.samesh` |
+| `.fbx` | Mesh | CookMesh (via FbxLoader/ufbx, Issue #108) | `<uuid>.samesh` |
 | `.samat` | Material | CookStandaloneMaterial | cooked material (by UUID) |
 | `.sascene` | Scene | — (native JSON) | — |
 | `.cs` | Script | — (Roslyn compiles at runtime) | — |
@@ -408,12 +411,19 @@ default-fills `class_name = stem` for `ScriptComponent.className` fallback.
 CookedTexture {
     AssetID  id
     uint32   width, height, mipLevels
-    CookedTextureFormat  format   (RGBA8 | RGBA16F | RGBA32F)
+    CookedTextureFormat  format   (RGBA8 | RGBA16F | RGBA32F | BC1 | BC3 | BC5 | BC7)
     bool     srgb, isHDR
     vector<MipSlice { offset, size }>
     vector<uint8_t>  data
 }
 ```
+
+**Version 2 (Issue #108):** BCn enum values added; layout unchanged (v1 files still read).
+`.dds` sources take a pass-through path in `CookTexture` (`DdsLoader` parses the DDS/DX10
+header, block data + authored mip chain go into `.satex` uncompressed-unchanged, no
+stb decode) — legacy FourCC (DXT1→BC1, DXT5→BC3) and DX10 header both handled. `ResourceManager`
+maps BC1/BC3/BC7 to sRGB or UNORM by `cooked.srgb`; BC5 is data-only (always linear).
+GPU upload sizes mips by block count (`⌈w/4⌉·⌈h/4⌉·blockBytes`), extent stays in texels.
 
 ### Cooked Mesh — `.samesh`
 
@@ -439,6 +449,36 @@ CookedMesh {
 // (readers accept v5 with empty names — no forced reimport, and the version
 // mismatch makes NeedsRecook upgrade the file on the next scan anyway)
 ```
+
+### Model Loader Dispatch (Issue #108)
+
+`CookMesh` no longer calls `GltfLoader::Load` directly — it goes through
+`ModelLoader::Load(path)` (`src/resource/loaders/`), which dispatches by extension to a
+format loader that all produce the same format-agnostic `SceneData` IR
+(`MeshData.hpp`: meshes/materials/images/nodes/skins/animations). Because the IR is shared,
+material extraction (#101), skeleton/anim sidecars, and slot linkage (#102/#103) work for
+every format for free; `.samesh` is unchanged.
+
+| loader | formats | notes |
+|---|---|---|
+| `GltfLoader` | `.gltf` `.glb` `.vrm` | `.vrm` = glb container → geometry/skin/anim; MToon materials fall back to PBR |
+| `ObjLoader` (tinyobjloader) | `.obj` | shapes split by material; MTL → approximate PBR; no skin/anim |
+| `FbxLoader` (ufbx) | `.fbx` | axis/unit normalisation + geometry-transform bake in load opts; skin deformers → `SkinVertex`, animation stacks → multi-clip |
+
+`ModelLoader::SupportsExtension` is the single source of truth shared by `ImportScanner` and
+the AssetsPanel import dialog. `MeshUtils` fills gaps common to OBJ/FBX: **normals** recomputed
+by area-weighted face accumulation (hand-written); **tangents** via vendored **MikkTSpace**
+(the industry-standard basis — mesh expanded to unindexed corners → generate → hash-weld back),
+only for primitives lacking a tangent stream (glTF's own TANGENT is untouched). Vendored libs
+(`third_party/CMakeLists.txt`, submodule-first + build-time warning when absent): tinyobjloader,
+ufbx, MikkTSpace. **Material passthrough:** `MaterialData` carries `shadingModel` (default
+`"PBR"`) + `extraParams`/`extraTextures` bags; `CookMaterial` writes them as the `.samatc`
+`type` + arbitrary key/value JSON, and `MaterialManager` silently ignores unknown keys — so a
+loader emitting `type="MToon"` + custom params is consumed with zero cook/runtime changes
+(given the model is registered, see #109).
+
+**Not done (Issue #108 scope):** MMD PMX/VMD (Phase 5, deferred); `.blend` direct parsing
+(won't-do — no stable spec; workaround = Blender headless CLI → glTF).
 
 ### Imported-Material Workflow — Extract & Remap (Issue #101)
 
@@ -538,10 +578,11 @@ storage. `Scene` wraps an `entt::registry` and exposes `View<C...>()`.
 | `AnimatorComponent` | `clipAsset` (→ .saanim), `time`, `speed`, `looping`, `playing` |
 | `CameraComponent` | `fovY`, `nearPlane`, `farPlane`, `priority` (highest wins) |
 | `ActiveCameraTag` | _(legacy)_ marks the active camera; superseded by `CameraComponent::priority` |
-| `DirectionalLightComponent` | color, intensity, castShadow; direction from entity rotation (−Z) |
+| `DirectionalLightComponent` | color, intensity, castShadow, isSun (Issue #49: first marked light drives shadow map + volumetric fog god rays; none marked → first found); direction from entity rotation (−Z) |
 | `PointLightComponent` | color, intensity, range; position from entity world transform |
 | `SpotLightComponent` | color, intensity, range, innerAngle, outerAngle |
 | `AreaLightComponent` | color, intensity, size (W×H), twoSided, emissiveScale; LTC-evaluated PBR |
+| `FogVolumeComponent` | density, albedo, falloff (Issue #110); local volumetric fog OBB — shape = entity transform × unit box, consumed by VolFog_Inject via a per-frame UBO |
 | `RigidBodyComponent` | Physics body: `Type` (Static/Kinematic/Dynamic), mass, friction, restitution, `bodyId` |
 | `ColliderComponent` | Collision shape: `Shape` (Box/Sphere/Capsule), extents, offset, rotation |
 | `ScriptComponent` | C# script binding: `scriptId : AssetID` (resolves to the `.cs` source via `AssetRegistry::FindByID`), `className` (derived from filename stem if empty), `fields : unordered_map<string, ScriptFieldValue>` (per-entity Inspector-edited values) |
@@ -712,6 +753,23 @@ struct PostProcessSettings {
     int   ssrMaxSteps     = 64;     // [16..128] linear march sample count
     float ssrThickness    = 0.1f;   // view-space depth tolerance for hit test
     float ssrStrength     = 1.0f;   // [0..1] reflection blend weight
+
+    // Volumetric Fog (Issue #49) — froxel single scattering after SSR / before
+    // ForwardTransparent+TAA. See "Volumetric Fog" section.
+    bool      volFogEnabled       = false;
+    float     volFogDensity       = 0.02f;  // global extinction σt (1/m)
+    glm::vec3 volFogAlbedo        = {0.9f, 0.9f, 0.9f};  // scatter albedo σs/σt
+    float     volFogAnisotropy    = 0.6f;   // HG phase g [-0.9, 0.9]
+    float     volFogDistance      = 64.f;   // froxel volume far end (m)
+    float     volFogHeightBase    = 0.f;    // height fog reference y (m)
+    float     volFogHeightFalloff = 0.f;    // 0 = uniform; >0 exponential falloff (1/m)
+    float     volFogAmbient       = 0.2f;   // SH-L0 ambient scatter factor
+    // Issue #110
+    bool      volFogTemporal      = true;   // fog history volume (jitter converges w/o TAA)
+    float     volFogTemporalBlend = 0.9f;   // history weight [0..0.98]
+    float     volFogNoiseScale    = 0.1f;   // density noise frequency (1/m)
+    float     volFogNoiseStrength = 0.f;    // 0 = off
+    glm::vec3 volFogWind          = {0.5f, 0.f, 0.3f};  // noise advection (m/s)
 
     // Screen Effects (Issue #88) — ordered per-scene stack of custom .saeffect
     // post-process passes. Only listed instances run (Unity Volume / UE Blendable
@@ -1366,7 +1424,10 @@ MEMORY_READ|WRITE` masks for correctness.
 - `imageType = VK_IMAGE_TYPE_3D`; `arrayLayers` forced to 1 (Vulkan requirement)
 - Main view: `VK_IMAGE_VIEW_TYPE_3D` (for `sampler3D` and `image3D`)
 
-Current users: `TonemapFeature::m_cgLutTex` (32×32×32 RGBA16F, color grading LUT).
+Current users: `TonemapFeature::m_cgLutTex` (32×32×32 RGBA16F, color grading LUT);
+`VolumetricFogFeature` froxel volumes ((w/8)×(h/8)×64 RGBA16F RG transients, Issue #49)
+and `FrameUniformsBuffer::m_fogVolumePlaceholder` (1×1×2 dummy).
+`UploadTextureData` copies the full `desc.depth` extent (fixed in Issue #49 — was `{w,h,1}`).
 
 ### Cubemap Textures
 
@@ -1802,6 +1863,7 @@ Compile()
   Phase 0: Kahn's topological sort on read/write dependency edges (textures + buffers)
   Phase A: lifetime analysis — firstWritePass / lastReadPass per transient texture/buffer
   Phase B: greedy interval slot coloring — textures → RGPhysicalSlot; buffers → RGPhysicalBufferSlot
+           slot compat = format + width + height + depth (Issue #49: 3D volumes must not alias 2D slots) + mipLevels + usage superset
            clearOnCreate buffers get FillBuffer(0) + BufferBarrier(CopyDst→StorageWrite) injected
 
 Execute(device, cmd)
@@ -1891,13 +1953,15 @@ collapsing header (imported + transient counts/MB, physical vs logical savings, 
 ### Frame Uniforms (set=1) Bindings
 
 ```
-binding=0  FrameData UBO    — camera matrices, time, resolution, SH9 irradiance, TAA jitter / prevViewProj / currUnjitteredViewProj (704 bytes)
+binding=0  FrameData UBO    — camera matrices, time, resolution, SH9 irradiance, TAA jitter / prevViewProj / currUnjitteredViewProj, volFogFar (704 bytes)
 binding=1  LightData UBO    — up to 8 lights (directional / point / spot / area)
 binding=2  sampler2D        — BRDF LUT
 binding=3  samplerCube      — prefiltered specular env (5 mips)
 binding=4  samplerCube      — skybox cubemap
 binding=5  sampler2D        — LTC inverse-M matrix LUT (64×64 RGBA32F) — area lights
 binding=6  sampler2D        — LTC amplitude/GGX-norm LUT (64×64 RGBA32F) — area lights
+binding=7  sampler2D        — directional shadow map (Issue #56, forward passes)
+binding=8  sampler3D        — volumetric fog integrated volume (Issue #49; 1×1×2 (0,0,0,1) dummy when fog off — transparents sample unconditionally, dummy makes it a no-op)
 ```
 
 ### LightData Layout
@@ -1994,9 +2058,10 @@ Normal encoding uses **Octahedral Normal Encoding** (OctEncode/OctDecode).
 | `SSAOFeature` | always registered; disabled → fills ssaoTex with 1.0 | half-res R8 AO → blurred into `ssaoTex` | `ssao.frag` + `ssao_blur.frag` |
 | `DeferredLightingFeature` | always | HDR (transient RGBA16F). Issue #56: depth+stencil bound as a **read-only attachment** (stencil test ==1) while the depth plane is simultaneously sampled — `RGPassBuilder::ReadDepthStencil` + `RHIDepthAttachment::readOnly` + descriptor written with DEPTH_STENCIL_READ_ONLY layout. PBR math lives in shared `pbr_shading.glsl`; local shadow sampler renamed `t_GShadowMap` | `deferred_lighting.frag` |
 | `SSRFeature` (Issue #48 / #89) | always registered; skips if `pp.ssrEnabled==false` | 5 compute passes: HiZ_Copy + HiZ_SPD (min pyramid) → SSR_Trace (8-spp GGX, screen-space Hi-Z DDA) → SSR_Resolve (bilateral) → SSR_Temporal (velocity-reprojected adaptive accumulation + variance clip) → composite replaces IBL env-probe specular into `SSR_Composite`; sets `handles.hdr`. See [Screen Space Reflections](#screen-space-reflections-issue-48-phase-1--89-phase-2) | `ssr.comp`, `hiz_copy/hiz_spd.comp`, `ssr_resolve/ssr_temporal.comp` |
-| `ForwardTransparentFeature` (Issue #56 → #105) | runs after SSR / before SelectionMask+TAA; skips when no visible BLEND item | ① blends BLEND items back-to-front (per-frame clip.w sort) in place onto `handles.hdr` (a plain transient at that point — the pre-TAA move is what removed #56's copy-then-blend), AlphaBlend, depth read-only/no-write, PBR-only shading (shadow map via set=1 binding=7); ② when TAA is enabled, redraws the same items into an R8 `ReactiveMask` (coverage union `a + dst·(1−a)` via `(1,1,1,a)` output under AlphaBlend) exposed as `m_reactiveMask` for TAA. BLEND casts no shadow, writes no velocity, not in GBuffer | `deferred_geometry(.vert\|_skinned.vert)` + `forward_transparent.frag` / `transparent_reactive.frag` |
+| `VolumetricFogFeature` (Issues #49/#110) | always registered; skips if `pp.volFogEnabled==false` (binds the fog-volume dummy to frame set binding 8 and returns) | 4 passes: VolFog_Inject (compute, per-froxel media incl. `FogVolumeComponent` OBBs + wind-advected noise, in-scattered light incl. sun shadow tap + analytic medium self-shadow, IGN depth jitter under temporal∥TAA) → VolFog_Temporal (#110, prevViewProj-reprojected exponential blend on the media volume, persistent 3D ping-pong) → VolFog_Scatter (compute, front-to-back transmittance integration per column) → VolFog_Apply (fullscreen `hdr·T + inscatter` into `VolFog_Output`); sets `handles.hdr`; publishes `m_integratedHandle` + frame set binding 8 for transparents. See [Volumetric Fog](#volumetric-fog-issues-49--110) | `volumetric_inject.comp`, `volumetric_temporal.comp`, `volumetric_scatter.comp`, `fullscreen_tri` + `volumetric_apply.frag`, `volumetric_common.glsl` |
+| `ForwardTransparentFeature` (Issue #56 → #105) | runs after SSR+VolumetricFog / before SelectionMask+TAA; skips when no visible BLEND item | ① blends BLEND items back-to-front (per-frame clip.w sort) in place onto `handles.hdr` (a plain transient at that point — the pre-TAA move is what removed #56's copy-then-blend), AlphaBlend, depth read-only/no-write, PBR-only shading (shadow map via set=1 binding=7); fragments fog themselves from the froxel volume at set=1 binding=8 (`color·T + inscatter` at fragment depth, Issue #49 Step 9 — declares `b.Read` on `m_integratedHandle` when valid); ② when TAA is enabled, redraws the same items into an R8 `ReactiveMask` (coverage union `a + dst·(1−a)` via `(1,1,1,a)` output under AlphaBlend) exposed as `m_reactiveMask` for TAA. BLEND casts no shadow, writes no velocity, not in GBuffer | `deferred_geometry(.vert\|_skinned.vert)` + `forward_transparent.frag` / `transparent_reactive.frag` |
 | `SelectionMaskFeature` | always | R8 silhouette mask; rasterised with the **unjittered** VP (Issue #107 — the outline composites after TAA) | `selection_mask.vert/.frag` (+ `selection_mask_skinned.vert` for skinned) |
-| `TAAFeature` | always registered; disabled → passes `handles.hdr` through | TAA_Resolve into ping-pong history (`handles.taaResolved`); reads `ReactiveMask` at binding 4 to raise the blend floor on transparent coverage (`blendReactive` 0.65, 0 when absent). TAA_Copy (Issue #105) then copies history → transient `PostTAA_HDR` and redirects `handles.hdr` — downstream RMW (BloomComposite UAV add) must never touch the history in place | `taa_resolve.frag`; `fullscreen_tri` + `forward_copy.frag` |
+| `TAAFeature` | always registered; disabled → passes `handles.hdr` through and sets `handles.taaResolved = handles.hdr` (Issue #49 Step 7: the redirected hdr, so BloomThreshold sees SSR/fog/transparents — the frame-start default `m_rgHdr` predates those redirects) | TAA_Resolve into ping-pong history (`handles.taaResolved`); reads `ReactiveMask` at binding 4 to raise the blend floor on transparent coverage (`blendReactive` 0.65, 0 when absent). TAA_Copy (Issue #105) then copies history → transient `PostTAA_HDR` and redirects `handles.hdr` — downstream RMW (BloomComposite UAV add) must never touch the history in place | `taa_resolve.frag`; `fullscreen_tri` + `forward_copy.frag` |
 | `AutoExposureFeature` | always registered; skips if `pp.autoExposureEnabled==false` | 256-bin log-lum histogram → weighted percentile EV → exponential-smoothing exposure; 1-frame CPU readback via staging; reads `handles.hdr` (post-TAA copy since Issue #105) | `postfx_histogram.comp`, `postfx_exposure_adapt.comp` |
 | `BloomFeature` | always registered; skips if `pp.bloomEnabled==false` | threshold reads `taaResolved`; composite writes back to `handles.hdr` | `bloom_*.frag` |
 | `DoFFeature` | always registered; skips if `pp.dofEnabled==false` | CoC from depth → separable near/far Gaussian blur (H+V × 2) → smoothstep composite; sets `handles.hdr` to DoF output | `dof_coc.frag`, `dof_blur.frag`, `dof_composite.frag` |
@@ -2009,7 +2074,7 @@ Normal encoding uses **Octahedral Normal Encoding** (OctEncode/OctDecode).
 | `DebugOverlayFeature` | always | debug lines on swapchain; push constant = `m_currentUnjitteredViewProj` (Issue #107; `m_currentViewProj` stays jittered for culling + transparent sort) | `debug_line.vert/.frag` |
 | user `RenderFeature`s | `AddFeature(...)` | custom | custom |
 
-`BloomFeature`, `TAAFeature`, `DoFFeature`, `MotionBlurFeature`, and `SSRFeature` are always in the feature list; their `AddPasses` early-returns when disabled.
+`BloomFeature`, `TAAFeature`, `DoFFeature`, `MotionBlurFeature`, `SSRFeature`, and `VolumetricFogFeature` are always in the feature list; their `AddPasses` early-returns when disabled.
 `TonemapFeature` ↔ `LutTonemapFeature` hot-swapped at runtime by `ApplyWorldSettings` (WaitIdle + slot replace).
 
 ```cpp
@@ -2237,6 +2302,76 @@ a transient `clearOnCreate` SSBO; SSR_Radiance/Hit/Reflection are transient RGBA
 2× persistent RGBA16F. `VelocityPrepassFeature`'s gate now includes `ssrEnabled` (SSR reprojection
 consumes `handles.velocity`). Disabled → `AddPasses` early-returns, zero cost.
 
+### Volumetric Fog (Issues #49 + #110)
+
+Froxel single scattering: the view frustum is voxelised into a 3D texture
+(`(w/8)×(h/8)×64` RGBA16F, squared depth distribution `viewZ(k)=fogFar·(k/N)²` — front-loads
+slice resolution without referencing the camera near plane). Medium model: global density with
+optional exponential height falloff, uniform albedo, Henyey-Greenstein phase. Three passes,
+placed **after SSR / before the AfterLighting anchor + ForwardTransparent** (fog is part of
+lighting; transparents composite on top and self-fog), pre-TAA (TAA denoises the volume jitter):
+
+1. **VolFog_Inject** (compute 8×8×1, full volume): per-froxel world position (near/far ray
+   endpoints lerped — affine in view depth), density → σs/σt, then in-scattered light:
+   directional lights × HG phase (only the **sun** takes a single shadow-map tap — see below —
+   and every directional light is attenuated by the **analytic medium self-shadow**
+   `exp(-σt(y)·min(1/k, fogFar)/ω.y)`, the closed-form light-path transmittance for exponential
+   height density; the `min` clamps the uniform limit to the volume scale and keeps it continuous
+   in k), point/spot lights with the same falloff as `pbr_shading.glsl`, plus an SH-L0 ambient
+   term. Local fog volumes (#110) add on top: `FogVolumeComponent` OBBs are gathered per frame
+   into a double-buffered cpuVisible UBO (16 max, `GetCurrentFrameIndex()`-indexed, imported via
+   `ImportBuffer` + `BindBuffer` at inject set=2 binding=2); per froxel, inside-unit-box test in
+   volume-local space + per-axis edge falloff, σt/σs accumulate linearly so albedo blends by
+   density weight. A 2-octave value noise (pure ALU) advected by `volFogWind` optionally
+   modulates the summed density (`volFogNoiseStrength=0` = off). Neither local volumes nor
+   noise participate in the analytic self-shadow (global medium only — UE-style approximation).
+   Sample depth is IGN-jittered (golden-ratio frame advance) when the fog temporal volume
+   **or** TAA is enabled (`temporalJitter` push constant); neither → stable banding rather
+   than flicker. Output: `rgb = σs·L_scat, a = σt`.
+2. **VolFog_Temporal** (#110, compute 8×8×1, full volume): reprojects last frame's blended
+   media volume through `prevViewProj` (per-froxel world pos → prev uv/viewZ → inverse slice
+   mapping with the PC-passed `prevFogFar`) and exponentially blends
+   (`volFogTemporalBlend`=0.9 history weight) — media values are point quantities and
+   reproject; path integrals do not, hence pre-Scatter placement. Persistent ping-pong
+   `m_histTex[2]` (3D RGBA16F), invalidated on resize / volume-dim change / fogFar change /
+   toggle; out-of-frustum or first frame falls back to the current sample. This makes the
+   inject jitter converge **without scene TAA**.
+3. **VolFog_Scatter** (compute 8×8×1, XY only — Z is a serial prefix product): front-to-back,
+   Frostbite energy-conserving per-slice integral `S·(1−e^{−σt·dz})/σt`; reads the temporal
+   output (or raw media when temporal is off); each slice stores accumulated
+   `rgb = inscatter, a = transmittance` up to the slice END.
+4. **VolFog_Apply** (fullscreen fragment): depth → viewZ → inverse slice mapping (half-voxel
+   shift compensates the slice-END convention; half-texel clamps guard the repeat sampler),
+   hardware trilinear upsamples XY and interpolates Z; `out = hdr·T + inscatter` into
+   `VolFog_Output`; `RenderFrame` redirects `handles.hdr` (same pattern as SSR/DoF).
+
+**Sun selection (`DirectionalLightComponent::isSun`).** `GatherLights` returns the sun index
+(first `isSun=true` directional, else first directional — legacy behaviour when none marked);
+it drives **both** `lightSpaceMatrix` (shadow map rendering) and the fog's shadowed-scattering
+light — they must be the same light or the god-ray shadow tap tests against the wrong depth map.
+Stored per frame in `m_sunLightIndex`, passed to inject as a push constant.
+
+**Transparent integration (Step 9).** The integrated volume is published on frame set
+binding 8 (`t_FogVolume`, appended like #56's `t_ShadowMap`); `forward_transparent.frag`
+samples it at the fragment's own depth and applies `color·T + inscatter` before blending.
+When fog is off the feature rebinds a persistent 1×1×2 `(0,0,0,1)` dummy
+(`FrameUniformsBuffer::m_fogVolumePlaceholder`) — unconditional sampling becomes a no-op, and
+the rebind prevents a stale transient volume from lingering in the binding. `volFogFar` rides
+in `FrameUniforms` (the former `_fpad` slot).
+
+**Editor integration (#110).** `FogVolumeComponent` (density / albedo / falloff; shape = the
+entity's transform × unit box) has a drawer, an Add Component entry, a `fogVolume` serializer
+block, an always-on viewport OBB wireframe in `EditorMode::DrawOverlays` (dim; selected =
+yellow — no billboard icon exists, so the wireframe is its only viewport presence) and a
+spawn template `templates/entities/Effects/Fog Volume.sascene`.
+
+**Known limits (fog-side audit vs modern engines).** Per-light volumetric shadows for
+point/spot are blocked on engine point-light shadow maps. Local volumes are box-only and the
+noise is a single global (PP-level) setting — per-volume noise / 3D density mask textures
+(HDRP parity) are recorded as X-13. An extinction shadow volume (Frostbite) would be needed
+for local volumes / noise to self-shadow; the analytic self-shadow covers the global medium
+only.
+
 ### CPU Frustum Culling & BVH
 
 **File:** `src/core/spatial/BVHTree.hpp`
@@ -2267,12 +2402,14 @@ Skinned meshes set `DrawItem::skipCull = true` and bypass BVH; they are always i
 
 Tracy plot: `SA_PROFILE_PLOT("VisibleDrawItems", ...)` tracks cull ratio per frame.
 
-### Editor ID Picking (Issue #102)
+### Editor ID Picking (Issue #102, extended by #111 / X-12)
 
 Viewport mouse selection is GPU based (UE HitProxy style), replacing the former AABB `RaycastScene`:
 
-- `SceneRenderer::RequestIdPick(px, py)` queues a pick; the next frame's `IdPickFeature` records a one-shot pass drawing **all** `m_drawItems` into a lazily-created persistent `R32_UINT` buffer (`RenderTarget|Sampled|CopySrc`, own transient D32 depth → nearest surface wins, transparents included). Push constant = `{mat4 model; uint id}` (packed 68 B); `id` = 1-based index into a snapshot `vector<{entity, submeshIndex}>` captured at pass-build time, so the result survives draw-list rebuilds. Shaders: `id_pass.vert/.frag` + `id_pass_skinned.vert`.
-- The buffer is imported with `finalState = ShaderRead` (the layout `ReadbackTextureMips` assumes); after `EndFrame/Present`, `ResolveIdPick()` does a blocking full readback (queue-ordered after the frame) and maps the clicked pixel through the snapshot.
+- `SceneRenderer::RequestIdPick(px, py, purpose = Select)` queues a pick; the next frame's `IdPickFeature` records a one-shot pass drawing **all** `m_drawItems` into a lazily-created persistent `R32_UINT` buffer (`RenderTarget|Sampled|CopySrc`, own persistent `D32F` depth `m_idDepth` (`DepthStencil|Sampled|CopySrc`, Issue #111) → nearest surface wins, transparents included). Push constant = `{mat4 model; uint id}` (packed 68 B); `id` = 1-based index into a snapshot `vector<{entity, submeshIndex}>` captured at pass-build time, so the result survives draw-list rebuilds. Shaders: `id_pass.vert/.frag` + `id_pass_skinned.vert`.
+- Both textures are imported with `finalState = ShaderRead` (the layout the readback APIs assume); after `EndFrame/Present`, `ResolveIdPick()` does a blocking readback (queue-ordered after the frame) and maps the picked pixel through the snapshot. X-12: the readback is a **3×3 window** via `IRHIDevice::ReadbackTextureRegion` (mip0/layer0, caller-clamped; Vulkan impl mirrors `ReadbackTextureMips` with `imageOffset/extent`) instead of the former full-image copy — hover picks run every frame during a drag, and the 3×3 neighbourhood is exactly what normal reconstruction needs.
+- **Pick exclusion (X-12):** `SetPickExcluded(entity)` (entt::null clears) skips one entity in the ID pass — the drag ghost must not occlude placement picks or the ray would hit the ghost itself and climb toward the camera every frame.
+- **Placement picks (Issue #111):** `PickPurpose { Select, Place }` separates selection clicks from asset-drop placement. For `Place`, `ResolveIdPick()` additionally reads back the depth target, unprojects the hit pixel with the inverse of the **jittered** VP snapshotted at pass-build time (`IdPickState::invViewProj` — must match what `id_pass.vert` rasterised with, not the unjittered editor-overlay VP), and reconstructs a geometric world normal via min-delta side differencing of the depth neighbourhood; any unreliable neighbour (off-screen / background / different draw item) leaves the `+Y` default so alignment degrades to upright. `PickResult` gains `purpose / hasSurface / worldPos / worldNormal`. `VulkanDevice::ReadbackTextureMips` derives the barrier aspect from the format via `FormatAspectFlags()` (VulkanUtils) and copies the DEPTH aspect for depth formats, instead of hardcoding COLOR.
 - `EditorMode` consumes `TryConsumePickResult` next frame with a **cycling click state machine**: first click selects the entity; a second click on the already-selected entity focuses the clicked material slot (`EditorSelection::FocusSlot`) — the viewport keeps that submesh highlighted and the Inspector slot row scrolls into view with a flash; a third click on the same submesh cycles back to the entity level (selection kept, focus cleared). Any selection change also clears the focus. Billboard icons keep their separate 2D screen-distance test and take priority.
 - **Slot highlight (forward direction):** hovering a slot row in `MeshRendererDrawer` (the single slot UI since Issue #103) reports `EditorSelection::SetHoveredSlot` (frame-scoped); `EditorMode` mirrors hover-else-focus into `SceneRenderer::SetHighlightSlot(entity, slot)`, which narrows `SelectionMaskFeature` to that single submesh — the outline pass is untouched.
 - `RHIFormat::R32_UINT` was added for the pick buffer (clear only to 0: float/uint bit-identical, so the float clear path needs no uint branch).
@@ -2454,7 +2591,7 @@ mode.OnRenderUI(cmd)                       // ImGui draw calls (editor panels, g
 
 Phase 1: Collect
    FillCameraUniforms(scene, w, h)   // WorldTransformComponent → view/proj
-   GatherLights(scene)               // all light component types
+   GatherLights(scene)               // all light component types; outputs sun index (isSun, Issue #49) → lightSpaceMatrix + fog
 
 Phase 2: GPU
    device->BeginFrame()           ← fence wait; AutoExposureFeature::ReadbackExposure() called here
@@ -2473,7 +2610,8 @@ Phase 2: GPU
    SSAOFeature::AddPasses()           ← GTAO 3-pass; disabled → fill 1.0
    DeferredLightingFeature::AddPasses() ← reads ssaoTex binding=5
    SSRFeature::AddPasses()            ← sets handles.hdr = SSR_Composite when enabled
-   ForwardTransparentFeature::AddPasses() ← blends BLEND items into handles.hdr in place; R8 ReactiveMask (Issue #105)
+   VolumetricFogFeature::AddPasses()  ← Inject/Temporal/Scatter/Apply; sets handles.hdr = VolFog_Output; frame set binding 8 = froxel volume (dummy when off) (Issues #49/#110)
+   ForwardTransparentFeature::AddPasses() ← blends BLEND items into handles.hdr in place; fragments self-fog via binding 8; R8 ReactiveMask (Issue #105)
    SelectionMaskFeature::AddPasses()
    TAAFeature::AddPasses()            ← jittered resolve; sets handles.taaResolved + handles.hdr = PostTAA_HDR copy (Issue #105)
    AutoExposureFeature::AddPasses()   ← histogram(hdr) + adapt; 1-frame readback feeds tonemap exposure
@@ -2879,12 +3017,16 @@ clicking on a scaled entity in the viewport always uses the updated AABB.
 `EditorMode::HandleViewportInteraction()` is called from `OnRenderUI` after `DrawImGuizmo`. It:
 1. Creates a transparent full-screen `##viewport_interact` ImGui window (`NoBringToFrontOnFocus | NoFocusOnAppearing | NoDocking`) as a drop target and picking receiver
 2. Calls `ImGuizmo::SetAlternativeWindow(currentWindow)` so ImGuizmo's `IsHoveringWindow()` check accepts this window as valid — without this, the full-screen overlay makes `g.HoveredWindow` non-null and non-gizmo, causing `mbMouseOver=false` and disabling all gizmo handle hit-tests
-3. `BeginDragDropTargetCustom(win->Rect(), win->ID)` — accepts `"SAASSET"` `.glb/.gltf` drops (vanilla `BeginDragDropTarget` is no-op here since the overlay window submits no item); reads the typed `AssetDragPayload`, computes world spawn position via `RayHitHorizontalPlane(ray, 0)` (or 10-unit fallback), calls `SceneHierarchyPanel::TriggerAssetDrop(path, spawnPos)`
-4. Left-click picking: guarded by `!m_gizmoIsUsing && !ImGuizmo::IsOver() && IsWindowHovered()`; billboard icons get a 2D screen-distance test first, otherwise `SceneRenderer::RequestIdPick(px, py)` queues a GPU ID pick (Issue #102). The result is consumed next frame via `TryConsumePickResult` and drives the two-level state machine: select entity → drill into material slot (see *Editor ID Picking*); `SceneHierarchyPanel::SetSelection(e)` / `ClearSelection()` write into `EditorSelection`
+3. **Pick-result consume block** — runs FIRST (X-12 ordering constraint: `RequestIdPick` clears any unconsumed result, so the per-hover-frame request would wipe the result resolved at the end of the previous frame and the ghost would never spawn). `TryConsumePickResult` routes by `purpose`: **Place** with `m_pendingPlacement.active` completes an Issue #111 two-phase drop — surface hit → spawn at `worldPos` (plus `RotationUpTo(worldNormal)` when `dropAlignSurfaceNormal` is on; shortest-arc up→normal with antiparallel guard), miss → fallback `RayHitHorizontalPlane(fallbackRay, 0)` or 10 units in front, plus the stand offset — then `TriggerAssetDrop(path, spawnPos, spawnRot)`. **Place** during a hover (X-12) spawns/moves the drag ghost instead. **Select** drives the two-level state machine: select entity → drill into material slot (see *Editor ID Picking*); `SceneHierarchyPanel::SetSelection(e)` / `ClearSelection()` write into `EditorSelection`
+4. `BeginDragDropTargetCustom(win->Rect(), win->ID)` — accepts `"SAASSET"` `.glb/.gltf` drops (vanilla `BeginDragDropTarget` is no-op here since the overlay window submits no item) with `AcceptBeforeDelivery | AcceptNoDrawDefaultRect` (X-12): every hover frame requests a `Place` pick at the cursor; the release frame (`IsDelivery()`) sets `commitRequested` when a ghost exists, else falls back to the Issue #111 `m_pendingPlacement {path, fallbackRay}` two-phase path (instant drop / asset not imported).
+5. Left-click picking: guarded by `!m_gizmoIsUsing && !ImGuizmo::IsOver() && IsWindowHovered()`; billboard icons get a 2D screen-distance test first, otherwise `SceneRenderer::RequestIdPick(px, py)` queues a GPU ID pick (Issue #102), consumed by block 3 next frame
+6. **Ghost commit/cancel (X-12)** — `commitRequested`: read the ghost's `TransformComponent` (block 3 already applied the last hover pick), `DestroyDropPreview()`, then the undoable `TriggerAssetDrop(path, pos, rot)`; ghost alive but payload gone → cancelled, destroy silently
+
+**Drag ghost preview (X-12):** `DropPreview {ghost, assetPath, standOffset, hoveredThisFrame, commitRequested}`. The ghost is a real scene entity (`EntityFactory::CreateStaticMesh` directly — NOT through the command stack, so undo only ever sees the final spawn), spawned on the first consumed hover pick, moved each frame with `MarkDirty` + `MarkMaterialDirty` (ghost jumps can span the scene — the culling BVH must follow), and excluded from the ID pass via `SetPickExcluded`. `standOffset = -minY` of the model's merged submesh AABB (8 corners × `GPUSubMesh::localTransform`, `ComputeStandOffset`), applied along the placement up axis in all three paths (ghost, commit-via-ghost, pendingPlacement fallback) so the AABB bottom rests on the surface. Cleanup: payload leaves the viewport, `LoadProject` (scene already cleared — the helper skips the stale handle), and `OnPlayStateChanged(≠Editing)`. The ghost intentionally shows up in the hierarchy panel (UE shows transient preview actors too); hiding it isn't worth the plumbing.
 
 `ScreenToWorldRay(sx, sy)` unprojects NDC via `inverse(proj * view)` at depth 0 and 1; `cam.proj` already has the Vulkan Y-flip so `ndcY = (sy/sh)*2−1` is used directly.
 
-`SceneHierarchyPanel` public interface: `SetSelection(entity)`, `ClearSelection()`, `TriggerAssetDrop(assetPath, spawnPos)`. `AssetDropOp` has a `spawnPos` field applied to the spawned entity's `TransformComponent::position`.
+`SceneHierarchyPanel` public interface: `SetSelection(entity)`, `ClearSelection()`, `TriggerAssetDrop(assetPath, spawnPos, spawnRot = identity)`. `AssetDropOp` carries `spawnPos` / `spawnRot` (Issue #111), forwarded through `CreateStaticMeshCommand` (undoable, also has a `spawnRot` default-identity parameter) into `EntityFactory::CreateStaticMesh/CreateSkinnedMesh`.
 
 ### EditorOverlaySettings
 
@@ -2904,6 +3046,7 @@ struct EditorOverlaySettings {
     bool drawGizmo;
     GizmoMode gizmoMode;       // Translate / Rotate / Scale
     bool gizmoWorldSpace;      // World vs Local (Scale always Local)
+    bool dropAlignSurfaceNormal; // Issue #111: rotate dropped asset's up axis to surface normal (default false)
     bool debugIdView;          // X-8: fullscreen submesh-ID coloring (Issue #102)
 };
 ```

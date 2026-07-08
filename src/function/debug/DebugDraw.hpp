@@ -26,7 +26,16 @@ public:
     };
     static_assert(sizeof(Vertex) == 16);
 
-    static constexpr uint32_t kMaxVertices = 1u << 17;  // 131 072 = 65 536 lines max
+    // Per-bone instance for the solid octahedral gizmo (Issue #83 X-2).
+    // Layout matches debug_bone.vert's std430 SSBO struct exactly (80 bytes).
+    struct BoneInstance {
+        glm::mat4 model;   // unit octahedron (head=origin, tail=+Z) → world
+        glm::vec4 color;   // straight rgba
+    };
+    static_assert(sizeof(BoneInstance) == 80);
+
+    static constexpr uint32_t kMaxVertices      = 1u << 17;  // 131 072 = 65 536 lines max
+    static constexpr uint32_t kMaxBoneInstances = 4096;
 
     // ── Primitive draw calls ──────────────────────────────────────────────────
     void DrawLine   (glm::vec3 from, glm::vec3 to, glm::vec4 color);
@@ -53,19 +62,36 @@ public:
     void DrawLineOverlay  (glm::vec3 from, glm::vec3 to, glm::vec4 color);
     void DrawSphereOverlay(glm::vec3 center, float radius,
                            glm::vec4 color, int segments = 16);
+    // Octahedral bone shape (head→tail) — the classic DCC skeleton gizmo look.
+    // The widest "collar" sits a short way down the bone; width is the collar
+    // half-extent. Drawn without depth test (always on top).
+    void DrawBoneOverlay  (glm::vec3 head, glm::vec3 tail, glm::vec4 color,
+                           float width);
+    // Solid shaded octahedral bone (head→tail), rendered as an instanced mesh
+    // with a private depth buffer (x-ray vs scene, self-occluding). width = collar
+    // half-extent. Accumulates one instance; see GetBoneInstances().
+    void DrawBoneSolid    (glm::vec3 head, glm::vec3 tail, float width,
+                           glm::vec4 color);
+    // Solid shaded joint marker (icosphere), same instanced pass as DrawBoneSolid.
+    // Accumulates one instance; see GetJointInstances().
+    void DrawJointSolid   (glm::vec3 center, float radius, glm::vec4 color);
 
     // ── Frame management ──────────────────────────────────────────────────────
     void Clear();
-    [[nodiscard]] std::span<const Vertex> GetVertices()        const;
-    [[nodiscard]] std::span<const Vertex> GetOverlayVertices() const;
+    [[nodiscard]] std::span<const Vertex>       GetVertices()        const;
+    [[nodiscard]] std::span<const Vertex>       GetOverlayVertices() const;
+    [[nodiscard]] std::span<const BoneInstance> GetBoneInstances()   const;
+    [[nodiscard]] std::span<const BoneInstance> GetJointInstances()  const;
 
 private:
     static uint32_t PackColor(glm::vec4 c) noexcept;
     void Emit       (glm::vec3 p, uint32_t c);
     void EmitOverlay(glm::vec3 p, uint32_t c);
 
-    std::vector<Vertex> m_verts;
-    std::vector<Vertex> m_overlayVerts;
+    std::vector<Vertex>       m_verts;
+    std::vector<Vertex>       m_overlayVerts;
+    std::vector<BoneInstance> m_boneInstances;
+    std::vector<BoneInstance> m_jointInstances;
 };
 
 } // namespace StellarAlia

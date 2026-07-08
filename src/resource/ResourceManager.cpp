@@ -144,6 +144,18 @@ RHI::RHITextureHandle ResourceManager::LoadTexture(const AssetID& id) {
                                                    ? RHI::RHIFormat::RGBA8_SRGB
                                                    : RHI::RHIFormat::RGBA8_UNORM; break;
         case CookedTextureFormat::RGBA32F: rhiFmt = RHI::RHIFormat::RGBA32F;      break;
+        // Issue #108 — DDS pass-through payloads. BC5 is 2-channel data
+        // (normal/roughness), no sRGB variant exists.
+        case CookedTextureFormat::BC1:     rhiFmt = cooked.srgb
+                                                   ? RHI::RHIFormat::BC1_SRGB
+                                                   : RHI::RHIFormat::BC1_UNORM;   break;
+        case CookedTextureFormat::BC3:     rhiFmt = cooked.srgb
+                                                   ? RHI::RHIFormat::BC3_SRGB
+                                                   : RHI::RHIFormat::BC3_UNORM;   break;
+        case CookedTextureFormat::BC5:     rhiFmt = RHI::RHIFormat::BC5_UNORM;    break;
+        case CookedTextureFormat::BC7:     rhiFmt = cooked.srgb
+                                                   ? RHI::RHIFormat::BC7_SRGB
+                                                   : RHI::RHIFormat::BC7_UNORM;   break;
         default:
             SA_LOG_WARN("ResourceManager::LoadTexture — unsupported format ({}), falling back to RGBA8",
                         static_cast<uint32_t>(cooked.format));

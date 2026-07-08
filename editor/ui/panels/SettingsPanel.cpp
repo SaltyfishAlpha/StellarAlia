@@ -47,10 +47,16 @@ void SettingsPanel::OnDraw() {
             ImGui::Separator();
             ImGui::Checkbox("Selection Collider", &m_overlaySettings->drawSelectionCollider);
             ImGui::Checkbox("Skeleton Gizmo",     &m_overlaySettings->drawSkeletonGizmo);
+            ImGui::BeginDisabled(!m_overlaySettings->drawSkeletonGizmo);
+            ImGui::SliderFloat("Skeleton Opacity", &m_overlaySettings->skeletonOpacity,
+                               0.1f, 1.f, "%.2f");
+            ImGui::EndDisabled();
             ImGui::Checkbox("Selection Outline",   &m_overlaySettings->drawSelectionAABB);
             ImGui::BeginDisabled(!m_overlaySettings->drawSelectionAABB);
             ImGui::SliderFloat("Outline Width", &m_overlaySettings->outlineWidth, 1.f, 8.f, "%.0f px");
             ImGui::EndDisabled();
+            ImGui::Checkbox("Drop: Align to Surface Normal",
+                            &m_overlaySettings->dropAlignSurfaceNormal);
             ImGui::Checkbox("Gizmo",          &m_overlaySettings->drawGizmo);
             ImGui::BeginDisabled(!m_overlaySettings->drawGizmo);
             {

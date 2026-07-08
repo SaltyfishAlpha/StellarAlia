@@ -152,7 +152,8 @@ public:
 
         if constexpr (std::is_same_v<T, SkinnedMeshComponent>) {
             SkinnedMeshComponent clean{};
-            clean.meshAsset = m_snapshot->meshAsset;
+            clean.meshAsset     = m_snapshot->meshAsset;
+            clean.skeletonAsset = m_snapshot->skeletonAsset;   // #83 P1
             reg.emplace_or_replace<T>(m_entity, clean);
         } else {
             reg.emplace_or_replace<T>(m_entity, *m_snapshot);

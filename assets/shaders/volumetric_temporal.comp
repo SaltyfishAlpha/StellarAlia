@@ -1,0 +1,70 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+
+// Volumetric Fog — Temporal (Issue #110, between Inject and Scatter).
+//
+// Blends the current inject output with last frame's blended volume,
+// reprojected per froxel through prevViewProj. Runs on the MEDIA volume, not
+// the integrated one — media values are point quantities that reproject;
+// path integrals do not. Scatter reads the blended history-write volume.
+//
+// Out-of-frustum / first-frame froxels fall back to the current sample; the
+// IGN inject jitter then converges over ~1/(1-blend) frames.
+#include "frame_uniforms.glsl"
+#include "volumetric_common.glsl"
+
+layout(set = 2, binding = 0) uniform sampler3D t_Media;     // current inject output
+layout(set = 2, binding = 1) uniform sampler3D t_HistRead;  // previous blended volume
+layout(set = 2, binding = 2, rgba16f) uniform writeonly image3D u_HistWrite;
+
+layout(push_constant) uniform PC {
+    float fogFar;        // current volume far end
+    float prevFogFar;    // previous frame's — differs → CPU already invalidated
+    float blend;         // history weight [0..1)
+    float historyValid;  // 0 = first frame / invalidated
+} pc;
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+float NdcToViewZ(float ndcZ) {
+    vec4 c = u_Frame.invProj * vec4(0.0, 0.0, ndcZ, 1.0);
+    return c.z / c.w;
+}
+
+void main() {
+    ivec3 size = imageSize(u_HistWrite);
+    ivec3 gid  = ivec3(gl_GlobalInvocationID);
+    if (any(greaterThanEqual(gid, size))) return;
+
+    vec4 result = texelFetch(t_Media, gid, 0);
+
+    if (pc.blend * pc.historyValid > 0.0) {
+        // Froxel-centre world position — same reconstruction as inject (no
+        // jitter here: history must be sampled at the stable centre).
+        vec2  uv = (vec2(gid.xy) + 0.5) / vec2(size.xy);
+        vec3  W0 = ReconstructWorldPos(uv, 0.0, u_Frame.invViewProj);
+        vec3  W1 = ReconstructWorldPos(uv, 1.0, u_Frame.invViewProj);
+        float d0 = -NdcToViewZ(0.0);
+        float d1 = -NdcToViewZ(1.0);
+        float d  = VolFogSliceToDepth(float(gid.z) + 0.5, float(size.z), pc.fogFar);
+        vec3  worldPos = mix(W0, W1, clamp((d - d0) / max(d1 - d0, 1e-4), 0.0, 1.0));
+
+        vec4 prevClip = u_Frame.prevViewProj * vec4(worldPos, 1.0);
+        if (prevClip.w > 1e-4) {
+            vec2  prevUV    = (prevClip.xy / prevClip.w) * 0.5 + 0.5;
+            float prevViewD = prevClip.w;  // clip.w = view depth for perspective proj
+            if (all(greaterThanEqual(prevUV, vec2(0.0))) &&
+                all(lessThanEqual(prevUV, vec2(1.0))) &&
+                prevViewD > 0.0 && prevViewD < pc.prevFogFar) {
+                // Media voxel k centre ↔ depth(k+0.5) → w = slice/N directly
+                // (no half shift, unlike the integrated volume's slice-END convention).
+                float prevSlice = VolFogDepthToSlice(prevViewD, float(size.z), pc.prevFogFar);
+                vec3  sz = vec3(size);
+                vec3  hc = clamp(vec3(prevUV, prevSlice / sz.z), 0.5 / sz, 1.0 - 0.5 / sz);
+                result = mix(result, texture(t_HistRead, hc), pc.blend);
+            }
+        }
+    }
+
+    imageStore(u_HistWrite, gid, result);
+}

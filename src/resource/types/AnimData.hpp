@@ -27,10 +27,20 @@ struct AnimChannel {
     std::vector<glm::vec4> values;  // Translation/Scale → xyz0; Rotation → xyzw (glTF order)
 };
 
+// ── Animation event (#83 P2) ────────────────────────────────────────────────
+// A timestamped notify fired to C# scripts (OnAnimEvent) during Playing. Not a
+// keyframe — pure playback annotation, authored in the .sanim sidecar.
+struct AnimEvent {
+    float       time = 0.f;   // seconds along the clip
+    std::string name;
+    std::string payload;      // opaque string; script interprets
+};
+
 struct AnimClip {
     std::string              name;
     float                    duration = 0.f;
     std::vector<AnimChannel> channels;
+    std::vector<AnimEvent>   events;   // #83 P2; sorted by time
 };
 
 // ── Per-vertex skinning data (static, matches rest-pose vertex order) ─────────

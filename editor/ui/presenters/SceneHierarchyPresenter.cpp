@@ -9,6 +9,7 @@
 #include "function/scene/EntityFactory.hpp"
 #include "function/scene/SceneSerializer.hpp"
 #include "resource/AssetRegistry.hpp"
+#include "resource/loaders/ModelLoader.hpp"
 #include "core/logs/Log.hpp"
 
 #include <algorithm>
@@ -126,7 +127,8 @@ entt::entity SceneHierarchyPresenter::DuplicateEntity(entt::entity src) {
     if (auto* an = reg.try_get<AnimatorComponent>(src))         reg.emplace_or_replace<AnimatorComponent>(dst, *an);
     if (auto* sk = reg.try_get<SkinnedMeshComponent>(src)) {
         SkinnedMeshComponent skCopy{};
-        skCopy.meshAsset = sk->meshAsset;
+        skCopy.meshAsset     = sk->meshAsset;
+        skCopy.skeletonAsset = sk->skeletonAsset;   // #83 P1
         reg.emplace_or_replace<SkinnedMeshComponent>(dst, skCopy);
         scene.MarkSkinnedMeshDirty();
     }
@@ -274,6 +276,7 @@ void SceneHierarchyPresenter::Update(float /*dt*/) {
         const fs::path   assetPath = std::move(m_pendingAssetDrop.assetPath);
         const entt::entity parent  = m_pendingAssetDrop.parent;
         const glm::vec3  spawnPos  = m_pendingAssetDrop.spawnPos;
+        const glm::quat  spawnRot  = m_pendingAssetDrop.spawnRot;
         m_pendingAssetDrop = {};
 
         std::string ext = assetPath.extension().string();
@@ -282,7 +285,7 @@ void SceneHierarchyPresenter::Update(float /*dt*/) {
 
         if (ext == ".sascene") {
             if (m_ctx.onSceneLoad) m_ctx.onSceneLoad(assetPath);
-        } else if (ext == ".glb" || ext == ".gltf") {
+        } else if (Resource::ModelLoader::SupportsExtension(ext)) {
             if (!m_ctx.assetReg) {
                 SA_LOG_WARN("SceneHierarchyPresenter: no registry — cannot instantiate mesh");
             } else {
@@ -294,11 +297,13 @@ void SceneHierarchyPresenter::Update(float /*dt*/) {
                     if (m_ctx.cmdMgr) {
                         m_ctx.cmdMgr->Execute(
                             std::make_unique<CreateStaticMeshCommand>(
-                                assetPath.stem().string(), entry->id, parent, spawnPos),
+                                assetPath.stem().string(), entry->id, parent,
+                                spawnPos, spawnRot),
                             m_ctx);
                     } else {
                         entt::entity e = EntityFactory::CreateStaticMesh(
-                            scene, assetPath.stem().string(), entry->id, spawnPos);
+                            scene, assetPath.stem().string(), entry->id,
+                            spawnPos, spawnRot);
                         if (reg.valid(parent))
                             scene.SetParent(e, parent);
                         scene.MarkMaterialDirty();

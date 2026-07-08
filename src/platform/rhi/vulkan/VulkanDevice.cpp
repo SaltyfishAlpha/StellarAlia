@@ -1210,11 +1210,20 @@ void VulkanDevice::ReadbackTextureMips(RHITextureHandle              handle,
     VkImage        img    = entry.image;
     const uint32_t layers = entry.desc.arrayLayers;
 
+    // Depth formats: barrier covers all format aspects, but a buffer-image copy
+    // region must name exactly one aspect — depth is the one we read back.
+    const VkImageAspectFlags barrierAspect =
+        FormatAspectFlags(ToVkFormat(entry.desc.format));
+    const VkImageAspectFlags copyAspect =
+        (barrierAspect & VK_IMAGE_ASPECT_DEPTH_BIT) ? VK_IMAGE_ASPECT_DEPTH_BIT
+                                                    : VK_IMAGE_ASPECT_COLOR_BIT;
+
     ImmediateSubmit([&](VkCommandBuffer cmd) {
         // Transition SHADER_READ_ONLY → TRANSFER_SRC
         CmdTransitionImage(cmd, img,
                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           barrierAspect);
 
         uint64_t bufOffset = 0;
         for (uint32_t m = 0; m < static_cast<uint32_t>(mips.size()); ++m) {
@@ -1223,7 +1232,7 @@ void VulkanDevice::ReadbackTextureMips(RHITextureHandle              handle,
 
             VkBufferImageCopy region{};
             region.bufferOffset                    = bufOffset;
-            region.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.aspectMask     = copyAspect;
             region.imageSubresource.mipLevel       = m;
             region.imageSubresource.baseArrayLayer = 0;
             region.imageSubresource.layerCount     = layers;
@@ -1236,7 +1245,8 @@ void VulkanDevice::ReadbackTextureMips(RHITextureHandle              handle,
         // Transition back to SHADER_READ_ONLY
         CmdTransitionImage(cmd, img,
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                           barrierAspect);
     });
 
     // Copy from the persistently-mapped staging buffer to caller's buffers.
@@ -1249,6 +1259,65 @@ void VulkanDevice::ReadbackTextureMips(RHITextureHandle              handle,
                     m.size);
         offset += m.size;
     }
+
+    vmaDestroyBuffer(m_allocator, stagingBuf, stagingAlloc);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ReadbackTextureRegion — X-12: small-window blocking readback (mip0/layer0)
+// ─────────────────────────────────────────────────────────────────────────────
+void VulkanDevice::ReadbackTextureRegion(RHITextureHandle              handle,
+                                         const IRHIDevice::RegionReadback& region) {
+    if (!handle.IsValid() || handle.index >= m_textures.size()) return;
+    auto& entry = m_textures[handle.index];
+    if (!entry.valid || entry.swapchain) return;
+    if (region.w == 0 || region.h == 0 || !region.data) return;
+
+    VkBufferCreateInfo bci{};
+    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size  = region.size;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
+    aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+    VkBuffer      stagingBuf   = VK_NULL_HANDLE;
+    VmaAllocation stagingAlloc = VK_NULL_HANDLE;
+    vmaCreateBuffer(m_allocator, &bci, &aci, &stagingBuf, &stagingAlloc, nullptr);
+
+    VkImage img = entry.image;
+    const VkImageAspectFlags barrierAspect =
+        FormatAspectFlags(ToVkFormat(entry.desc.format));
+    const VkImageAspectFlags copyAspect =
+        (barrierAspect & VK_IMAGE_ASPECT_DEPTH_BIT) ? VK_IMAGE_ASPECT_DEPTH_BIT
+                                                    : VK_IMAGE_ASPECT_COLOR_BIT;
+
+    ImmediateSubmit([&](VkCommandBuffer cmd) {
+        CmdTransitionImage(cmd, img,
+                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           barrierAspect);
+
+        VkBufferImageCopy copy{};
+        copy.imageSubresource.aspectMask     = copyAspect;
+        copy.imageSubresource.mipLevel       = 0;
+        copy.imageSubresource.baseArrayLayer = 0;
+        copy.imageSubresource.layerCount     = 1;
+        copy.imageOffset                     = { int32_t(region.x), int32_t(region.y), 0 };
+        copy.imageExtent                     = { region.w, region.h, 1 };
+        vkCmdCopyImageToBuffer(cmd, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               stagingBuf, 1, &copy);
+
+        CmdTransitionImage(cmd, img,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                           barrierAspect);
+    });
+
+    VmaAllocationInfo allocInfo{};
+    vmaGetAllocationInfo(m_allocator, stagingAlloc, &allocInfo);
+    std::memcpy(region.data, allocInfo.pMappedData, region.size);
 
     vmaDestroyBuffer(m_allocator, stagingBuf, stagingAlloc);
 }
@@ -2040,9 +2109,10 @@ RHIMemoryStats VulkanDevice::GetMemoryStats() const {
     auto calcTexBytes = [](const RHITextureDesc& d) -> uint64_t {
         uint64_t bpp = 0;
         switch (d.format) {
-            case RHIFormat::BC1_UNORM:                            bpp = 0; break; // handled below
+            case RHIFormat::BC1_UNORM: case RHIFormat::BC1_SRGB:  bpp = 0; break; // handled below
             case RHIFormat::BC3_UNORM: case RHIFormat::BC5_UNORM:
-            case RHIFormat::BC7_UNORM:                            bpp = 0; break;
+            case RHIFormat::BC7_UNORM: case RHIFormat::BC3_SRGB:
+            case RHIFormat::BC7_SRGB:                             bpp = 0; break;
             case RHIFormat::RGBA8_UNORM: case RHIFormat::RGBA8_SRGB:
             case RHIFormat::BGRA8_UNORM: case RHIFormat::BGRA8_SRGB:
             case RHIFormat::RG16F:       case RHIFormat::R32F:
@@ -2057,7 +2127,8 @@ RHIMemoryStats VulkanDevice::GetMemoryStats() const {
         const uint32_t faces = d.cubemap ? 6u : 1u;
         if (bpp == 0) {
             // Block-compressed: 4×4 texel blocks
-            const uint64_t blockBytes = (d.format == RHIFormat::BC1_UNORM) ? 8u : 16u;
+            const uint64_t blockBytes = (d.format == RHIFormat::BC1_UNORM ||
+                                         d.format == RHIFormat::BC1_SRGB) ? 8u : 16u;
             uint64_t total = 0;
             uint32_t w = d.width, h = d.height;
             for (uint32_t m = 0; m < d.mipLevels; ++m) {

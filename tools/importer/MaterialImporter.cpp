@@ -35,8 +35,8 @@ bool CookMaterial(const Resource::MaterialData& mat,
 
     json root;
     root["version"] = 1;
-    root["type"]    = "PBR";
-    root["name"]    = mat.name;   // glTF material name; display-only
+    root["type"]    = mat.shadingModel;
+    root["name"]    = mat.name;   // source material name; display-only
 
     // Pipeline-state fields (Issue #56) — top-level, not shader params.
     root["alphaMode"]   = mat.alphaMode;      // "OPAQUE" | "MASK" | "BLEND"
@@ -59,6 +59,15 @@ bool CookMaterial(const Resource::MaterialData& mat,
     root["textures"]["t_MetallicRoughness"] = texUUID(mat.metallicRoughnessTexture.imageIndex);
     root["textures"]["t_Occlusion"]         = texUUID(mat.occlusionTexture.imageIndex);
     root["textures"]["t_Emissive"]          = texUUID(mat.emissiveTexture.imageIndex);
+
+    // Issue #108 — non-PBR pass-through. Written after the PBR block so a
+    // same-named key from the loader wins; unknown keys are ignored at load.
+    for (const auto& [key, vals] : mat.extraParams) {
+        if (vals.size() == 1) root["params"][key] = vals[0];
+        else                  root["params"][key] = vals;
+    }
+    for (const auto& [slot, ref] : mat.extraTextures)
+        root["textures"][slot] = texUUID(ref.imageIndex);
 
     std::ofstream f(outPath);
     if (!f) {

@@ -334,6 +334,29 @@ void SA_Animator_SetSpeed(uint64_t id, float speed) {
         a->speed = speed;
 }
 
+// #83 P2-5: only set clipAsset + the one-shot fade selector here; leave `time`
+// untouched so AnimationSystem::Update can capture the outgoing clip's time as
+// fadeFromTime. pendingFadeOverride: 0 = hard cut, >0 = fade seconds.
+void SA_Animator_SetClip(uint64_t id, const char* uuid) {
+    if (!g_ctx.scene || !uuid) return;
+    auto e = static_cast<entt::entity>(id);
+    if (!g_ctx.scene->Registry().valid(e)) return;
+    if (auto* a = g_ctx.scene->Registry().try_get<AnimatorComponent>(e)) {
+        a->clipAsset           = AssetID::FromString(uuid);
+        a->pendingFadeOverride = 0.f;
+    }
+}
+
+void SA_Animator_CrossfadeTo(uint64_t id, const char* uuid, float fade) {
+    if (!g_ctx.scene || !uuid) return;
+    auto e = static_cast<entt::entity>(id);
+    if (!g_ctx.scene->Registry().valid(e)) return;
+    if (auto* a = g_ctx.scene->Registry().try_get<AnimatorComponent>(e)) {
+        a->clipAsset           = AssetID::FromString(uuid);
+        a->pendingFadeOverride = fade < 0.f ? 0.f : fade;
+    }
+}
+
 // ── RigidBody ─────────────────────────────────────────────────────────────────
 
 void SA_RigidBody_GetLinearVelocity(uint64_t id, float* x, float* y, float* z) {
@@ -834,7 +857,7 @@ namespace StellarAlia {
 
 ScriptApiFunctionTable SA_Script_BuildFunctionTable() {
     return {
-        /* version              */ 7,
+        /* version              */ 8,
         /* Entity — local transform */
         SA_Entity_GetLocalPosition,
         SA_Entity_SetLocalPosition,
@@ -940,6 +963,9 @@ ScriptApiFunctionTable SA_Script_BuildFunctionTable() {
         SA_PostProcess_SetFilmGrainIntensity,
         SA_PostProcess_GetFilmGrainSize,
         SA_PostProcess_SetFilmGrainSize,
+        /* v8 — Animator clip control (Issue #83 P2-5) */
+        SA_Animator_SetClip,
+        SA_Animator_CrossfadeTo,
     };
 }
 

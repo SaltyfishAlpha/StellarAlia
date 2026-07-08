@@ -4,6 +4,7 @@
 #include "EditorSelection.hpp"
 #include "function/scene/Scene.hpp"
 #include "function/scene/EntityFactory.hpp"
+#include "resource/ResourceManager.hpp"
 
 namespace StellarAlia::Editor {
 
@@ -141,12 +142,26 @@ std::string ReparentEntityCommand::GetDescription() const {
 // ── CreateStaticMeshCommand ───────────────────────────────────────────────────
 
 CreateStaticMeshCommand::CreateStaticMeshCommand(std::string name, AssetID assetId,
-                                                 entt::entity parent, glm::vec3 spawnPos)
-    : m_name(std::move(name)), m_assetId(assetId), m_parent(parent), m_spawnPos(spawnPos) {}
+                                                 entt::entity parent, glm::vec3 spawnPos,
+                                                 glm::quat spawnRot)
+    : m_name(std::move(name)), m_assetId(assetId), m_parent(parent),
+      m_spawnPos(spawnPos), m_spawnRot(spawnRot) {}
 
 void CreateStaticMeshCommand::Execute(EditorContext& ctx) {
     Scene& scene = *ctx.scene;
-    m_entity = EntityFactory::CreateStaticMesh(scene, m_name, m_assetId, m_spawnPos);
+
+    // Issue #108: skinned assets (VRM, rigged FBX) get the skinned component
+    // set right away — a StaticMesh entity would render the bind pose and
+    // invite a conflicting hand-added SkinnedMeshComponent on top.
+    const Resource::GPUMesh* gpuMesh =
+        ctx.resMgr ? ctx.resMgr->LoadMesh(m_assetId) : nullptr;
+    if (gpuMesh && gpuMesh->IsSkinned())
+        m_entity = EntityFactory::CreateSkinnedMesh(scene, m_name, m_assetId,
+                                                    m_spawnPos, m_spawnRot);
+    else
+        m_entity = EntityFactory::CreateStaticMesh(scene, m_name, m_assetId,
+                                                   m_spawnPos, m_spawnRot);
+
     if (ctx.registry->valid(m_parent))
         scene.SetParent(m_entity, m_parent);
     scene.MarkMaterialDirty();

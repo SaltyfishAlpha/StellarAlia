@@ -184,6 +184,7 @@ void Application::Run() {
         }
 
         // ── Animation (only while simulation is running) ──────────────────────
+        m_animSystem.BeginFrameStats();   // #83 P1 observability (Perf panel)
         if (m_playState == EnginePlayState::Playing) {
             SA_PROFILE_SCOPE_N("Animation");
             Scene& active = GetActiveScene();
@@ -285,7 +286,9 @@ void Application::PrepareAnimatedEntities() {
     auto& reg = active.Registry();
     for (auto entity : reg.view<SkinnedMeshComponent>())
         m_animSystem.PrepareEntity(entity, reg, m_resMgr, m_device.get());
-    m_animSystem.EvaluateAll(0.f, reg, m_resMgr, m_device.get());
+    // t = -1: evaluate at each entity's own Animator time — PIE stop must
+    // restore the exact pre-play visual, not force everyone to clip@0.
+    m_animSystem.EvaluateAll(-1.f, reg, m_resMgr, m_device.get());
 }
 
 void Application::SetPlayState(EnginePlayState newState) {

@@ -1,8 +1,10 @@
 #include "importer/TextureImporter.hpp"
 
 #include "resource/cook/CookedTexture.hpp"
+#include "resource/loaders/DdsLoader.hpp"
 #include "resource/loaders/ImageLoader.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <iostream>
 
@@ -29,7 +31,40 @@ bool CookTexture(const AssetEntry& entry, const fs::path& cookCacheDir, bool for
     }
 
     const bool isSrgb = entry.meta.GetBool("srgb", true);
-    const bool isHdr  = entry.sourcePath.extension().string() == ".hdr";
+
+    std::string ext = entry.sourcePath.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c){ return static_cast<char>(::tolower(c)); });
+    const bool isHdr = ext == ".hdr";
+
+    // Issue #108 — DDS pass-through: blocks + authored mip chain go into the
+    // .satex verbatim (no decode/re-encode), bypassing stb entirely.
+    if (ext == ".dds") {
+        auto ddsOpt = DdsLoader::Load(entry.sourcePath.string());
+        if (!ddsOpt) {
+            std::cerr << "[Cook] FAIL  " << entry.sourcePath.filename()
+                      << " — could not parse DDS\n";
+            return false;
+        }
+        CookedTexture& cooked = ddsOpt->tex;
+        cooked.id   = entry.meta.uuid;
+        cooked.srgb = ddsOpt->forceSrgb || isSrgb;
+
+        if (!SaveCookedTexture(cooked, outPath.string())) {
+            std::cerr << "[Cook] FAIL  " << entry.sourcePath.filename()
+                      << " — could not write .satex\n";
+            return false;
+        }
+        std::cout << "[Cook] TEX   " << entry.sourcePath.filename()
+                  << "  →  " << outPath.filename()
+                  << "  (" << cooked.width << 'x' << cooked.height
+                  << " fmt=" << static_cast<uint32_t>(cooked.format)
+                  << " mips=" << cooked.mipLevels
+                  << (cooked.cubemap ? " cubemap" : "")
+                  << (cooked.srgb ? " sRGB" : " linear")
+                  << " passthrough)\n";
+        return true;
+    }
 
     const std::optional<ImageData> imgOpt = isHdr
         ? ImageLoader::LoadHDR(entry.sourcePath.string())

@@ -3,6 +3,7 @@
 #include "importer/ImportScanner.hpp"
 #include "core/asset/AssetID.hpp"
 #include <filesystem>
+#include <vector>
 
 namespace StellarAlia::Import {
 
@@ -19,8 +20,12 @@ namespace fs = std::filesystem;
 //   - Cooks per-node meshes  → cookCacheDir/<nodeId>.samesh  (static models only)
 //   - Writes .sanode manifest→ cookCacheDir/<id>.sanode
 //
-// Returns true on success.
-bool CookMesh(const AssetEntry& entry, const fs::path& cookCacheDir, bool force = false);
+// Returns true on success. outMaterialIDs (optional) receives the final
+// per-material asset IDs (derived UUIDs after mat_remap) so callers can evict
+// stale cached MaterialInstances after a re-cook (Issue #108 editor fix).
+// Left untouched when the cook is skipped as up-to-date.
+bool CookMesh(const AssetEntry& entry, const fs::path& cookCacheDir, bool force = false,
+              std::vector<AssetID>* outMaterialIDs = nullptr);
 
 // Cook a single .sanim sidecar → cookCacheDir/<uuid>.saanim.
 bool CookAnimSidecar(const AssetEntry& sanimEntry,

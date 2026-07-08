@@ -44,6 +44,9 @@ enum class RHIFormat : uint32_t {
     BC3_UNORM,
     BC5_UNORM,
     BC7_UNORM,
+    BC1_SRGB,      // Issue #108 DDS import (BC5 is data-only — no sRGB variant)
+    BC3_SRGB,
+    BC7_SRGB,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

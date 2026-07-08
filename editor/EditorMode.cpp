@@ -16,6 +16,7 @@
 #include "ui/panels/InspectorPanel.hpp"
 #include "ui/panels/SettingsPanel.hpp"
 #include "ui/panels/PerformancePanel.hpp"
+#include "ui/panels/AnimationTimelinePanel.hpp"
 #include "ui/panels/PostProcessPanel.hpp"
 #include "ui/panels/WorldSettingsPanel.hpp"
 #include "ui/panels/AssetsPanel.hpp"
@@ -33,9 +34,12 @@
 #include "core/logs/Log.hpp"
 #include "core/io/FileIO.hpp"
 #include "function/animation/AnimationSystem.hpp"
+#include "function/scene/EntityFactory.hpp"
+#include "resource/ResourceManager.hpp"
 #include "function/material/MaterialManager.hpp"
 #include "importer/MaterialImporter.hpp"
 #include "resource/MetaFile.hpp"
+#include "resource/loaders/ModelLoader.hpp"
 #include "shader_cook/ShaderCookLib.hpp"
 
 #include <nlohmann/json.hpp>
@@ -44,6 +48,7 @@
 #include "ui/drawers/TransformDrawer.hpp"
 #include "ui/drawers/CameraDrawer.hpp"
 #include "ui/drawers/LightDrawers.hpp"
+#include "ui/drawers/FogVolumeDrawer.hpp"
 #include "ui/drawers/StaticMeshDrawer.hpp"
 #include "ui/drawers/MeshRendererDrawer.hpp"
 #include "ui/drawers/AnimatorDrawer.hpp"
@@ -69,6 +74,7 @@
 #include <unordered_set>
 #include <sstream>
 #include <glm/gtc/matrix_inverse.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
 #if __has_include(<ImGuizmo.h>)
@@ -178,6 +184,7 @@ void EditorMode::OnAttach(Application& app) {
     }
     m_ui.RegisterWindow(std::make_unique<SettingsPanel>(m_ctx));
     m_ui.RegisterWindow(std::make_unique<PerformancePanel>(m_ctx));
+    m_ui.RegisterWindow(std::make_unique<AnimationTimelinePanel>(m_ctx));   // #83 (X-3)
     m_ui.RegisterWindow(std::make_unique<WorldSettingsPanel>(m_ctx, *m_worldPresenter));
     m_ui.RegisterWindow(std::make_unique<PostProcessPanel>(m_ctx, *m_ppPresenter));
     {
@@ -269,6 +276,7 @@ void EditorMode::BuildContext(Application& app) {
     m_drawerRegistry.Register(std::make_unique<PointLightDrawer>());
     m_drawerRegistry.Register(std::make_unique<SpotLightDrawer>());
     m_drawerRegistry.Register(std::make_unique<AreaLightDrawer>());
+    m_drawerRegistry.Register(std::make_unique<FogVolumeDrawer>());
     m_drawerRegistry.Register(std::make_unique<StaticMeshDrawer>());
     m_drawerRegistry.Register(std::make_unique<MeshRendererDrawer>());
     m_drawerRegistry.Register(std::make_unique<AnimatorDrawer>());
@@ -685,6 +693,68 @@ void EditorMode::DrawOverlays() {
             });
     }
 
+    // ── Fog volume OBBs (Issue #110) ──────────────────────────────────────────
+    // No billboard icon and no mesh — the wireframe is the only viewport
+    // presence, so it is always drawn (dim; selected = yellow), no toggle.
+    scene.View<FogVolumeComponent, WorldTransformComponent>().each(
+        [&](entt::entity e, const FogVolumeComponent&, const WorldTransformComponent& wt) {
+            const glm::vec3 cx(wt.matrix[0]), cy(wt.matrix[1]), cz(wt.matrix[2]);
+            const glm::vec3 halfExt = 0.5f * glm::vec3(glm::length(cx), glm::length(cy), glm::length(cz));
+            const glm::mat3 rotM(cx / std::max(glm::length(cx), 1e-6f),
+                                 cy / std::max(glm::length(cy), 1e-6f),
+                                 cz / std::max(glm::length(cz), 1e-6f));
+            const glm::vec4 color = (e == selected)
+                ? glm::vec4{1.f,  0.9f, 0.2f, 1.f}
+                : glm::vec4{0.6f, 0.75f, 0.9f, 0.4f};
+            dd.DrawBox(glm::vec3(wt.matrix[3]), halfExt, glm::quat_cast(rotM), color);
+        });
+
+    // ── Skeleton gizmo (Issue #83 / X-2) — solid octahedral bones + joint spheres ─
+    // Only for the selected skinned entity (avoids scene clutter); joint picking /
+    // per-bone editing target the same entity. Hidden in PIE via enabled.
+    if (m_overlaySettings.drawSkeletonGizmo && selected != entt::null &&
+        reg.any_of<SkinnedMeshComponent>(selected))
+    {
+        const auto* swt = reg.try_get<WorldTransformComponent>(selected);
+        if (swt) {
+            AnimationSystem& anim = m_app->GetAnimationSystem();
+            auto poses    = anim.GetBoneGlobalPoses(selected);
+            auto skeleton = anim.GetBoneSkeleton(selected);
+            if (!poses.empty()) {
+                const float     a             = m_overlaySettings.skeletonOpacity;
+                const glm::vec4 boneColor     = { 0.72f, 0.76f, 0.85f, a };
+                const glm::vec4 selectedColor = { 1.f, 0.28f, 0.22f, std::max(a, 0.85f) };
+                const glm::mat4& worldMat = swt->matrix;
+                constexpr float kJointRadius = 0.022f;
+                for (size_t bi = 0; bi < poses.size(); ++bi) {
+                    const glm::vec3 worldPos =
+                        glm::vec3(worldMat * glm::vec4(glm::vec3(poses[bi][3]), 1.f));
+                    const bool isSel = m_boneSelEntity == selected &&
+                                       m_selectedBone == static_cast<int32_t>(bi);
+                    // Joints share the bone color (a light steel); selected = red
+                    // (color alone is the highlight — no size change).
+                    dd.DrawJointSolid(worldPos, kJointRadius,
+                                      isSel ? selectedColor : boneColor);
+
+                    if (bi < skeleton.size() && skeleton[bi].parentIndex >= 0) {
+                        const int32_t pi = skeleton[bi].parentIndex;
+                        const glm::vec3 parentPos =
+                            glm::vec3(worldMat * glm::vec4(glm::vec3(poses[pi][3]), 1.f));
+                        // Solid octahedral bone parent→this. Collar width scales with
+                        // bone length, floored so short finger bones stay visible.
+                        const float boneLen = glm::length(worldPos - parentPos);
+                        const float boneW   = glm::clamp(boneLen * 0.1f, 0.004f, kJointRadius);
+                        dd.DrawBoneSolid(parentPos, worldPos, boneW,
+                                         isSel ? selectedColor : boneColor);
+                        // Selected bone gets a crisp wireframe outline on top.
+                        if (isSel)
+                            dd.DrawBoneOverlay(parentPos, worldPos, { 1.f, 1.f, 1.f, 1.f }, boneW);
+                    }
+                }
+            }
+        }
+    }
+
     // ── Selection-dependent overlays ──────────────────────────────────────────
 
     // Only request outline when the selected entity or any descendant has renderable
@@ -763,38 +833,12 @@ void EditorMode::DrawOverlays() {
         }
     }
 
-    if (m_overlaySettings.drawSkeletonGizmo &&
-        reg.any_of<SkinnedMeshComponent>(selected))
-    {
-        AnimationSystem& anim    = m_app->GetAnimationSystem();
-        auto poses    = anim.GetBoneGlobalPoses(selected);
-        auto skeleton = anim.GetBoneSkeleton(selected);
-
-        if (!poses.empty()) {
-            const glm::mat4& worldMat = wtc->matrix;
-            const glm::vec4 jointColor = { 1.f, 0.85f, 0.1f, 1.f };
-            const glm::vec4 boneColor  = { 0.8f, 0.8f, 0.8f, 1.f };
-            constexpr float kJointRadius = 0.025f;
-
-            for (size_t bi = 0; bi < poses.size(); ++bi) {
-                const glm::vec3 worldPos =
-                    glm::vec3(worldMat * glm::vec4(glm::vec3(poses[bi][3]), 1.f));
-                dd.DrawSphereOverlay(worldPos, kJointRadius, jointColor, 8);
-
-                if (bi < skeleton.size() && skeleton[bi].parentIndex >= 0) {
-                    const int32_t pi = skeleton[bi].parentIndex;
-                    const glm::vec3 parentPos =
-                        glm::vec3(worldMat * glm::vec4(glm::vec3(poses[pi][3]), 1.f));
-                    dd.DrawLineOverlay(parentPos, worldPos, boneColor);
-                }
-            }
-        }
-    }
-
 }
 
 void EditorMode::OnPlayStateChanged(EnginePlayState newState) {
     m_overlaySettings.enabled = (newState == EnginePlayState::Editing);
+    if (newState != EnginePlayState::Editing)
+        DestroyDropPreview();   // X-12: never carry a drag ghost into PIE
 
     InputSystem&                 input    = m_app->GetInputSystem();
     Platform::GLFWInputProvider& provider = m_app->GetInputProvider();
@@ -953,6 +997,8 @@ void EditorMode::LoadProject(const fs::path& saprojectPath) {
     Scene& scene = m_app->GetScene();
     scene.Clear();
     m_currentScenePath.clear();
+    m_pendingPlacement = {};  // Issue #111: drop assets belong to the old project
+    DestroyDropPreview();     // X-12: ghost entity died with the scene clear
 
     // ── Cook project .saglsl shading models (filesystem phase) ───────────────
     // Runs before GPU teardown; outputs land in cookCacheDir/shaders/.
@@ -1461,6 +1507,95 @@ void EditorMode::DrawImGuizmo() {
         ? ImGuizmo::LOCAL
         : (m_overlaySettings.gizmoWorldSpace ? ImGuizmo::WORLD : ImGuizmo::LOCAL);
 
+    // ── #83 bone editing: a selected joint redirects the gizmo to that bone ──
+    if (selected != m_boneSelEntity) m_selectedBone = -1;   // stale selection
+    if (m_selectedBone >= 0) {
+        AnimationSystem& anim  = m_app->GetAnimationSystem();
+        const auto       poses = anim.GetBoneGlobalPoses(selected);
+        const auto       skel  = anim.GetBoneSkeleton(selected);
+        if (m_selectedBone >= static_cast<int32_t>(poses.size())) {
+            m_selectedBone = -1;   // re-prepared with fewer bones
+        } else {
+            const glm::mat4 boneWorld = wtc->matrix * poses[m_selectedBone];
+
+            float viewArr[16], projArr[16], matArr[16];
+            std::memcpy(viewArr, glm::value_ptr(camData.view), sizeof(viewArr));
+            std::memcpy(projArr, glm::value_ptr(proj),         sizeof(projArr));
+            std::memcpy(matArr,  glm::value_ptr(boneWorld),    sizeof(matArr));
+
+            const ImGuiIO& gio = ImGui::GetIO();
+            ImGuizmo::BeginFrame();
+            ImGuizmo::SetOrthographic(false);
+            ImGuizmo::SetDrawlist(ImGui::GetBackgroundDrawList());
+            ImGuizmo::SetRect(0.f, 0.f, gio.DisplaySize.x, gio.DisplaySize.y);
+
+            const bool wasUsing = m_gizmoIsUsing;
+            const bool changed  = ImGuizmo::Manipulate(viewArr, projArr, op,
+                                                       ImGuizmo::LOCAL, matArr);
+            m_gizmoIsUsing = ImGuizmo::IsUsing();
+
+            if (!wasUsing && m_gizmoIsUsing) {
+                m_boneDragStart.reset();
+                if (const auto* o = reg.try_get<BonePoseOverrideComponent>(selected))
+                    if (auto it = o->bones.find(m_selectedBone); it != o->bones.end())
+                        m_boneDragStart = it->second;
+            }
+
+            if (changed) {
+                glm::mat4 newWorld;
+                std::memcpy(glm::value_ptr(newWorld), matArr, sizeof(matArr));
+                const glm::mat4 newGlobal = glm::inverse(wtc->matrix) * newWorld;
+                const int32_t   parent    = skel[m_selectedBone].parentIndex;
+                const glm::mat4 newLocal  =
+                    (parent >= 0 && parent < static_cast<int32_t>(poses.size()))
+                        ? glm::inverse(poses[parent]) * newGlobal : newGlobal;
+
+                float t[3], r[3], s[3], localArr[16];
+                std::memcpy(localArr, glm::value_ptr(newLocal), sizeof(localArr));
+                ImGuizmo::DecomposeMatrixToComponents(localArr, t, r, s);
+
+                BoneTRS trs;
+                trs.position = { t[0], t[1], t[2] };
+                trs.rotation = glm::quat(glm::radians(glm::vec3(r[0], r[1], r[2])));
+                trs.scale    = { s[0], s[1], s[2] };
+                reg.get_or_emplace<BonePoseOverrideComponent>(selected)
+                    .bones[m_selectedBone] = trs;
+                // AnimationSystem::Update only runs in Play — re-evaluate and
+                // upload the pose now so the edit is visible while Editing.
+                m_app->GetAnimationSystem().RefreshPose(
+                    selected, reg, &m_app->GetVulkanDevice());
+            }
+
+            if (wasUsing && !m_gizmoIsUsing && m_ctx.cmdMgr) {
+                std::optional<BoneTRS> now;
+                if (const auto* o = reg.try_get<BonePoseOverrideComponent>(selected))
+                    if (auto it = o->bones.find(m_selectedBone); it != o->bones.end())
+                        now = it->second;
+                const int32_t bone = m_selectedBone;
+                const auto    oldV = m_boneDragStart;
+                auto refresh = [](EditorContext& c, entt::entity e) {
+                    if (c.app)
+                        c.app->GetAnimationSystem().RefreshPose(
+                            e, *c.registry, &c.app->GetVulkanDevice());
+                };
+                m_ctx.cmdMgr->Execute(std::make_unique<CallbackCommand>(
+                    "Edit Bone Pose",
+                    [selected, bone, now, refresh](EditorContext& c) {
+                        auto& o = c.registry->get_or_emplace<BonePoseOverrideComponent>(selected);
+                        if (now) o.bones[bone] = *now; else o.bones.erase(bone);
+                        refresh(c, selected);
+                    },
+                    [selected, bone, oldV, refresh](EditorContext& c) {
+                        auto& o = c.registry->get_or_emplace<BonePoseOverrideComponent>(selected);
+                        if (oldV) o.bones[bone] = *oldV; else o.bones.erase(bone);
+                        refresh(c, selected);
+                    }),
+                    m_ctx);
+            }
+            return;
+        }
+    }
+
     float viewArr[16], projArr[16], matArr[16];
     std::memcpy(viewArr, glm::value_ptr(camData.view),  sizeof(viewArr));
     std::memcpy(projArr, glm::value_ptr(proj),          sizeof(projArr));
@@ -1552,69 +1687,57 @@ void EditorMode::HandleViewportInteraction() {
     ImGuizmo::SetAlternativeWindow(ImGui::GetCurrentWindow());
 #endif
 
-    // ── Asset drop from AssetsPanel ───────────────────────────────────────────
-    // Use BeginDragDropTargetCustom so the entire transparent overlay window acts
-    // as the drop zone — vanilla BeginDragDropTarget needs a submitted item, but
-    // this window has none.
-    ImGuiWindow* vpWin = ImGui::GetCurrentWindow();
-    if (ImGui::BeginDragDropTargetCustom(vpWin->Rect(), vpWin->ID)) {
-        if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAASSET")) {
-            if (m_hierarchyPanel && p->DataSize >= static_cast<int>(sizeof(AssetDragPayload))) {
-                const auto& pl = *static_cast<const AssetDragPayload*>(p->Data);
-                fs::path assetPath(pl.path);
-                std::string ext = assetPath.extension().string();
-                std::transform(ext.begin(), ext.end(), ext.begin(),
-                               [](unsigned char c){ return static_cast<char>(::tolower(c)); });
-                if (ext == ".glb" || ext == ".gltf") {
-                    glm::vec3 spawnPos(0.f);
-                    const Core::Ray ray = ScreenToWorldRay(io.MousePos.x, io.MousePos.y);
-                    if (!RayHitHorizontalPlane(ray, 0.f, spawnPos))
-                        spawnPos = ray.origin + ray.dir * 10.f; // fallback: 10 units in front
-                    m_hierarchyPanel->TriggerAssetDrop(assetPath, spawnPos);
-                }
-            }
-        }
-        ImGui::EndDragDropTarget();
-    }
-
-    // ── Left-click entity picking ─────────────────────────────────────────────
-    if (!m_gizmoIsUsing &&
-#ifdef SA_HAS_IMGUIZMO
-        !ImGuizmo::IsOver() &&
-#endif
-        ImGui::IsWindowHovered() &&
-        ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-    {
-        // Billboard icons (lights / cameras) are checked first — they have no mesh.
-        entt::entity hit = entt::null;
-        if (!m_billboardHits.empty()) {
-            const float radius = m_overlaySettings.billboardIconSize * 0.5f;
-            float bestDist = radius;
-            for (const auto& bh : m_billboardHits) {
-                const float dx = io.MousePos.x - bh.screenPos.x;
-                const float dy = io.MousePos.y - bh.screenPos.y;
-                const float d  = std::sqrt(dx * dx + dy * dy);
-                if (d < bestDist) { bestDist = d; hit = bh.entity; }
-            }
-        }
-        // Fall back to GPU ID picking when no billboard was hit (Issue #102):
-        // the ID pass renders this frame, the result is consumed next frame.
-        if (hit != entt::null) {
-            if (m_hierarchyPanel) m_hierarchyPanel->SetSelection(hit);
-        } else if (io.MousePos.x >= 0.f && io.MousePos.y >= 0.f) {
-            m_app->GetRenderer().RequestIdPick(
-                static_cast<uint32_t>(io.MousePos.x),
-                static_cast<uint32_t>(io.MousePos.y));
-        }
-    }
-
     // ── Issue #102: consume the ID pick result (two-level click state machine:
     // first click selects the entity, a second click on the already-selected
     // entity drills down to the clicked material slot).
+    // Issue #111: Place results complete a pending asset drop instead.
+    // X-12: this runs BEFORE the drop-target block — RequestIdPick clears any
+    // unconsumed result, so the per-hover-frame request would wipe the result
+    // resolved at the end of the previous frame and the ghost would never
+    // spawn. m_dropPreview.hoveredThisFrame still holds last frame's state
+    // here, which is exactly the frame the consumed pick was requested on.
     {
         SceneRenderer::PickResult pr;
         if (m_app->GetRenderer().TryConsumePickResult(pr)) {
-            if (!pr.hit) {
+            if (pr.purpose == SceneRenderer::PickPurpose::Place) {
+                if (m_pendingPlacement.active) {
+                    if (m_hierarchyPanel) {
+                        const Core::Ray& ray = m_pendingPlacement.fallbackRay;
+                        glm::vec3 spawnPos(0.f);
+                        glm::quat spawnRot(1.f, 0.f, 0.f, 0.f);
+                        if (pr.hasSurface) {
+                            spawnPos = pr.worldPos;
+                            if (m_overlaySettings.dropAlignSurfaceNormal)
+                                spawnRot = RotationUpTo(pr.worldNormal);
+                        } else if (!RayHitHorizontalPlane(ray, 0.f, spawnPos)) {
+                            spawnPos = ray.origin + ray.dir * 10.f; // 10 units in front
+                        }
+                        // X-12: rest the AABB bottom on the surface.
+                        spawnPos += (spawnRot * glm::vec3(0.f, 1.f, 0.f)) *
+                                    ComputeStandOffset(m_pendingPlacement.assetPath);
+                        m_hierarchyPanel->TriggerAssetDrop(
+                            m_pendingPlacement.assetPath, spawnPos, spawnRot);
+                    }
+                    m_pendingPlacement = {};
+                } else if (m_dropPreview.hoveredThisFrame) {
+                    // X-12: hover pick — spawn the ghost on the first result,
+                    // then keep it glued to the surface under the cursor.
+                    glm::vec3 pos(0.f);
+                    glm::quat rot(1.f, 0.f, 0.f, 0.f);
+                    if (pr.hasSurface) {
+                        pos = pr.worldPos;
+                        if (m_overlaySettings.dropAlignSurfaceNormal)
+                            rot = RotationUpTo(pr.worldNormal);
+                    } else {
+                        const Core::Ray ray =
+                            ScreenToWorldRay(io.MousePos.x, io.MousePos.y);
+                        if (!RayHitHorizontalPlane(ray, 0.f, pos))
+                            pos = ray.origin + ray.dir * 10.f;
+                    }
+                    UpdateDropPreview(pos, rot);
+                }
+                // Stale Place results (drag already cancelled) are dropped.
+            } else if (!pr.hit) {
                 if (m_hierarchyPanel) m_hierarchyPanel->ClearSelection();
             } else if (!m_selection.HasEntity() ||
                        m_selection.GetPrimaryEntity() != pr.entity) {
@@ -1631,6 +1754,170 @@ void EditorMode::HandleViewportInteraction() {
                 }
             }
         }
+    }
+
+    // ── Asset drop from AssetsPanel ───────────────────────────────────────────
+    // Use BeginDragDropTargetCustom so the entire transparent overlay window acts
+    // as the drop zone — vanilla BeginDragDropTarget needs a submitted item, but
+    // this window has none.
+    // X-12: AcceptBeforeDelivery peeks the payload on every hover frame so the
+    // ghost preview can follow the surface; IsDelivery() marks the release.
+    ImGuiWindow* vpWin = ImGui::GetCurrentWindow();
+    m_dropPreview.hoveredThisFrame = false;
+    if (ImGui::BeginDragDropTargetCustom(vpWin->Rect(), vpWin->ID)) {
+        if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAASSET",
+                ImGuiDragDropFlags_AcceptBeforeDelivery |
+                ImGuiDragDropFlags_AcceptNoDrawDefaultRect)) {
+            if (m_hierarchyPanel && p->DataSize >= static_cast<int>(sizeof(AssetDragPayload))) {
+                const auto& pl = *static_cast<const AssetDragPayload*>(p->Data);
+                fs::path assetPath(pl.path);
+                std::string ext = assetPath.extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                               [](unsigned char c){ return static_cast<char>(::tolower(c)); });
+                if (Resource::ModelLoader::SupportsExtension(ext)) {
+                    m_dropPreview.hoveredThisFrame = true;
+                    m_dropPreview.assetPath        = assetPath;
+                    const bool hasGhost = m_dropPreview.ghost != entt::null;
+                    // Hover frames drive the ghost; the delivery frame only
+                    // needs its own pick when no ghost exists (Issue #111
+                    // two-phase fallback: instant drop / asset not imported).
+                    if ((!p->IsDelivery() || !hasGhost) &&
+                        io.MousePos.x >= 0.f && io.MousePos.y >= 0.f) {
+                        m_app->GetRenderer().RequestIdPick(
+                            static_cast<uint32_t>(io.MousePos.x),
+                            static_cast<uint32_t>(io.MousePos.y),
+                            SceneRenderer::PickPurpose::Place);
+                    }
+                    if (p->IsDelivery()) {
+                        if (hasGhost) {
+                            // Commit below — the consume block (above) already
+                            // applied the last hover pick to the ghost.
+                            m_dropPreview.commitRequested = true;
+                        } else {
+                            m_pendingPlacement.active      = true;
+                            m_pendingPlacement.assetPath   = assetPath;
+                            m_pendingPlacement.fallbackRay =
+                                ScreenToWorldRay(io.MousePos.x, io.MousePos.y);
+                        }
+                    }
+                }
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
+
+    // ── Left-click entity picking ─────────────────────────────────────────────
+    if (!m_gizmoIsUsing &&
+#ifdef SA_HAS_IMGUIZMO
+        !ImGuizmo::IsOver() &&
+#endif
+        ImGui::IsWindowHovered() &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+    {
+        // #83 bone editing: joints of the selected entity's skeleton gizmo win
+        // over everything — a joint click selects the bone, any other click
+        // deselects it (and falls through to normal picking).
+        bool boneClicked = false;
+        if (m_overlaySettings.drawSkeletonGizmo && m_selection.HasEntity()) {
+            auto& sreg = m_app->GetScene().Registry();
+            const entt::entity sel = m_selection.GetPrimaryEntity();
+            const auto* swt = sreg.try_get<WorldTransformComponent>(sel);
+            if (swt && sreg.any_of<SkinnedMeshComponent>(sel)) {
+                const auto poses = m_app->GetAnimationSystem().GetBoneGlobalPoses(sel);
+                const auto skel  = m_app->GetAnimationSystem().GetBoneSkeleton(sel);
+                const Core::Ray ray = ScreenToWorldRay(io.MousePos.x, io.MousePos.y);
+                constexpr float kJointPick = 0.04f;  // world radius around a joint
+                constexpr float kBonePick  = 0.03f;  // world radius around a bone body
+                float   bestT    = 1e30f;
+                int32_t bestBone = -1;
+                auto worldPos = [&](size_t i) {
+                    return glm::vec3(swt->matrix * glm::vec4(glm::vec3(poses[i][3]), 1.f));
+                };
+                // Joints — pick the sphere under the cursor.
+                for (size_t bi = 0; bi < poses.size(); ++bi) {
+                    const glm::vec3 p = worldPos(bi);
+                    const float t = glm::dot(p - ray.origin, ray.dir);
+                    if (t <= 0.f || t >= bestT) continue;
+                    const glm::vec3 d = ray.origin + ray.dir * t - p;
+                    if (glm::dot(d, d) < kJointPick * kJointPick) {
+                        bestT    = t;
+                        bestBone = static_cast<int32_t>(bi);
+                    }
+                }
+                // Bone bodies — pick the octahedron via ray-vs-segment (parent→bone).
+                for (size_t bi = 0; bi < poses.size() && bi < skel.size(); ++bi) {
+                    const int32_t pi = skel[bi].parentIndex;
+                    if (pi < 0) continue;
+                    const glm::vec3 A = worldPos(static_cast<size_t>(pi));
+                    const glm::vec3 AB = worldPos(bi) - A;
+                    const float abab = glm::dot(AB, AB);
+                    if (abab < 1e-8f) continue;
+                    const glm::vec3 r     = ray.origin - A;
+                    const float     b     = glm::dot(ray.dir, AB);
+                    const float     denom = abab - b * b;          // |dir| == 1
+                    float s = (denom > 1e-6f)
+                        ? (glm::dot(AB, r) - b * glm::dot(ray.dir, r)) / denom
+                        : 0.f;
+                    s = glm::clamp(s, 0.f, 1.f);
+                    const glm::vec3 Q = A + s * AB;                // closest point on bone
+                    const float     t = glm::dot(Q - ray.origin, ray.dir);
+                    if (t <= 0.f || t >= bestT) continue;
+                    const glm::vec3 d = ray.origin + ray.dir * t - Q;
+                    if (glm::dot(d, d) < kBonePick * kBonePick) {
+                        bestT    = t;
+                        bestBone = static_cast<int32_t>(bi);
+                    }
+                }
+                if (bestBone >= 0) {
+                    m_selectedBone  = bestBone;
+                    m_boneSelEntity = sel;
+                    boneClicked     = true;
+                }
+            }
+        }
+        if (!boneClicked) m_selectedBone = -1;
+
+        // Billboard icons (lights / cameras) are checked first — they have no mesh.
+        entt::entity hit = entt::null;
+        if (!boneClicked && !m_billboardHits.empty()) {
+            const float radius = m_overlaySettings.billboardIconSize * 0.5f;
+            float bestDist = radius;
+            for (const auto& bh : m_billboardHits) {
+                const float dx = io.MousePos.x - bh.screenPos.x;
+                const float dy = io.MousePos.y - bh.screenPos.y;
+                const float d  = std::sqrt(dx * dx + dy * dy);
+                if (d < bestDist) { bestDist = d; hit = bh.entity; }
+            }
+        }
+        // Fall back to GPU ID picking when no billboard was hit (Issue #102):
+        // the ID pass renders this frame, the result is consumed next frame.
+        if (hit != entt::null) {
+            if (m_hierarchyPanel) m_hierarchyPanel->SetSelection(hit);
+        } else if (!boneClicked && io.MousePos.x >= 0.f && io.MousePos.y >= 0.f) {
+            m_app->GetRenderer().RequestIdPick(
+                static_cast<uint32_t>(io.MousePos.x),
+                static_cast<uint32_t>(io.MousePos.y));
+        }
+    }
+
+    // ── X-12: finish or cancel the drag ghost ────────────────────────────────
+    if (m_dropPreview.commitRequested) {
+        // The consume block above (which ran before the drop-target block)
+        // applied the last hover pick, so the ghost transform is final.
+        glm::vec3 pos(0.f);
+        glm::quat rot(1.f, 0.f, 0.f, 0.f);
+        if (const auto* tc = m_app->GetScene().Registry()
+                                 .try_get<TransformComponent>(m_dropPreview.ghost)) {
+            pos = tc->position;
+            rot = tc->rotation;
+        }
+        const fs::path assetPath = m_dropPreview.assetPath;
+        DestroyDropPreview();
+        if (m_hierarchyPanel)
+            m_hierarchyPanel->TriggerAssetDrop(assetPath, pos, rot);
+    } else if (m_dropPreview.ghost != entt::null && !m_dropPreview.hoveredThisFrame) {
+        // Payload left the viewport or the drag was cancelled.
+        DestroyDropPreview();
     }
 
     ImGui::End();
@@ -1665,6 +1952,77 @@ bool EditorMode::RayHitHorizontalPlane(const Core::Ray& ray, float planeY, glm::
     if (t < 0.f) return false;
     outHit = ray.origin + t * ray.dir;
     return true;
+}
+
+glm::quat EditorMode::RotationUpTo(const glm::vec3& n) {
+    constexpr glm::vec3 up{0.f, 1.f, 0.f};
+    const float d = glm::dot(up, n);
+    if (d > 0.9999f)  return glm::quat(1.f, 0.f, 0.f, 0.f);
+    if (d < -0.9999f) return glm::quat(0.f, 1.f, 0.f, 0.f); // 180° about X
+    const glm::vec3 axis = glm::normalize(glm::cross(up, n));
+    return glm::angleAxis(std::acos(glm::clamp(d, -1.f, 1.f)), axis);
+}
+
+// ── X-12: drag ghost preview ──────────────────────────────────────────────────
+
+void EditorMode::UpdateDropPreview(const glm::vec3& surfacePos, const glm::quat& rot) {
+    Scene& scene = m_app->GetScene();
+    const glm::vec3 pos =
+        surfacePos + rot * glm::vec3(0.f, m_dropPreview.standOffset, 0.f);
+
+    if (m_dropPreview.ghost == entt::null) {
+        const Resource::AssetEntry* entry = m_ctx.assetReg
+            ? m_ctx.assetReg->FindBySourcePath(m_dropPreview.assetPath) : nullptr;
+        if (!entry || !entry->id.IsValid()) return;   // not imported — no preview
+        m_dropPreview.standOffset = ComputeStandOffset(m_dropPreview.assetPath);
+        m_dropPreview.ghost = EntityFactory::CreateStaticMesh(
+            scene, m_dropPreview.assetPath.stem().string(), entry->id,
+            surfacePos + rot * glm::vec3(0.f, m_dropPreview.standOffset, 0.f), rot);
+        m_app->GetRenderer().SetPickExcluded(m_dropPreview.ghost);
+        scene.MarkMaterialDirty();
+        return;
+    }
+
+    auto* tc = scene.Registry().try_get<TransformComponent>(m_dropPreview.ghost);
+    if (!tc) { DestroyDropPreview(); return; }
+    tc->position = pos;
+    tc->rotation = rot;
+    scene.MarkDirty(m_dropPreview.ghost);
+    // Ghost jumps can span the whole scene — rebuild the culling BVH each move
+    // (drag-transient; the same rebuild a gizmo drag does once at drag-end).
+    scene.MarkMaterialDirty();
+}
+
+void EditorMode::DestroyDropPreview() {
+    if (m_dropPreview.ghost != entt::null) {
+        Scene& scene = m_app->GetScene();
+        if (scene.Registry().valid(m_dropPreview.ghost)) {
+            scene.DestroyEntity(m_dropPreview.ghost);
+            scene.MarkMaterialDirty();
+        }
+    }
+    m_app->GetRenderer().SetPickExcluded(entt::null);
+    m_dropPreview = {};
+}
+
+float EditorMode::ComputeStandOffset(const fs::path& assetPath) const {
+    if (!m_ctx.assetReg || !m_ctx.resMgr) return 0.f;
+    const Resource::AssetEntry* entry = m_ctx.assetReg->FindBySourcePath(assetPath);
+    if (!entry || !entry->id.IsValid()) return 0.f;
+    const Resource::GPUMesh* mesh = m_ctx.resMgr->LoadMesh(entry->id);
+    if (!mesh) return 0.f;
+
+    float minY = 1e30f;
+    for (const auto& sm : mesh->subMeshes) {
+        if (sm.boundsMin.x > sm.boundsMax.x) continue;   // empty bounds
+        for (int i = 0; i < 8; ++i) {
+            const glm::vec3 c{(i & 1) ? sm.boundsMax.x : sm.boundsMin.x,
+                              (i & 2) ? sm.boundsMax.y : sm.boundsMin.y,
+                              (i & 4) ? sm.boundsMax.z : sm.boundsMin.z};
+            minY = std::min(minY, (sm.localTransform * glm::vec4(c, 1.f)).y);
+        }
+    }
+    return (minY < 1e29f) ? -minY : 0.f;
 }
 
 } // namespace StellarAlia::Editor

@@ -139,6 +139,14 @@ struct PostProcessSettings {
     float     volFogHeightBase    = 0.f;    // height fog reference y (m)
     float     volFogHeightFalloff = 0.f;    // 0 = uniform; >0 exponential falloff (1/m)
     float     volFogAmbient       = 0.2f;   // SH ambient scatter factor
+    // Issue #110: temporal accumulation on the froxel media volume — makes the
+    // inject jitter converge without scene TAA.
+    bool      volFogTemporal      = true;
+    float     volFogTemporalBlend = 0.9f;   // history weight [0..0.98]
+    // Issue #110: density detail noise (2-octave value noise, wind-advected).
+    float     volFogNoiseScale    = 0.1f;   // frequency (1/m)
+    float     volFogNoiseStrength = 0.f;    // 0 = off
+    glm::vec3 volFogWind          = {0.5f, 0.f, 0.3f};  // m/s
 
     // ── Screen Effects (Issue #88) — ordered per-scene custom post-process stack ──
     // Each entry references a cooked .saeffect; only listed effects run. Grouped

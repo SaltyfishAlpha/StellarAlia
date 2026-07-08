@@ -49,10 +49,12 @@ bool MeshRendererDrawer::TryDraw(entt::registry& reg, entt::entity entity,
     }
 
     // #106: rows are per-submesh and always assignable — the slots vector is an
-    // implementation detail, so the header counts submeshes, not vector size.
-    const size_t rowCount =
-        std::max(mr->materialSlots.size(),
-                 gpuMesh ? gpuMesh->subMeshes.size() : size_t(0));
+    // implementation detail. When the mesh is resolvable the row count IS the
+    // submesh count: stale slot entries from a previously assigned mesh are
+    // ignored by BuildDrawList and must not inflate the list (#108 — switching
+    // meshAsset repeatedly made the count grow monotonically via max()).
+    const size_t rowCount = gpuMesh ? gpuMesh->subMeshes.size()
+                                    : mr->materialSlots.size();
     char slotLabel[64];
     std::snprintf(slotLabel, sizeof(slotLabel), "Material Slots (%zu)", rowCount);
 

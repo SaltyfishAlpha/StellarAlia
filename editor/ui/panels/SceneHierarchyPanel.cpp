@@ -251,7 +251,8 @@ void SceneHierarchyPanel::DrawNode(entt::entity entity, entt::registry& reg) {
             if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAASSET")) {
                 if (p->DataSize >= static_cast<int>(sizeof(AssetDragPayload))) {
                     const auto& pl = *static_cast<const AssetDragPayload*>(p->Data);
-                    m_presenter.RequestAssetDrop({ fs::path(pl.path), entity, {}, true });
+                    m_presenter.RequestAssetDrop(
+                        { fs::path(pl.path), entity, {}, {1.f, 0.f, 0.f, 0.f}, true });
                 }
             }
             ImGui::EndDragDropTarget();
@@ -292,8 +293,9 @@ void SceneHierarchyPanel::ClearSelection() {
     if (m_selectionCtx) m_selectionCtx->Clear();
 }
 
-void SceneHierarchyPanel::TriggerAssetDrop(const fs::path& assetPath, const glm::vec3& spawnPos) {
-    m_presenter.RequestAssetDrop({ assetPath, entt::null, spawnPos, true });
+void SceneHierarchyPanel::TriggerAssetDrop(const fs::path& assetPath, const glm::vec3& spawnPos,
+                                           const glm::quat& spawnRot) {
+    m_presenter.RequestAssetDrop({ assetPath, entt::null, spawnPos, spawnRot, true });
 }
 
 // ── OnDraw ─────────────────────────────────────────────────────────────────────
@@ -404,7 +406,8 @@ void SceneHierarchyPanel::OnDraw() {
             if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("SAASSET")) {
                 if (p->DataSize >= static_cast<int>(sizeof(AssetDragPayload))) {
                     const auto& pl = *static_cast<const AssetDragPayload*>(p->Data);
-                    m_presenter.RequestAssetDrop({ fs::path(pl.path), entt::null, {}, true });
+                    m_presenter.RequestAssetDrop(
+                        { fs::path(pl.path), entt::null, {}, {1.f, 0.f, 0.f, 0.f}, true });
                 }
             }
             ImGui::EndDragDropTarget();

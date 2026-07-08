@@ -1,0 +1,6 @@
+newmtl Gold
+Kd 1.0 0.86 0.57
+Ke 0.0 0.0 0.0
+Ns 200
+d 1.0
+map_Kd gold.tga

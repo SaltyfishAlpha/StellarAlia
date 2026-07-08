@@ -120,6 +120,16 @@ struct AreaLightComponent {
     float     emissiveScale = 2.f;            // visible mesh brightness = color × emissiveScale
 };
 
+// Local volumetric fog volume (Issue #110). Shape = the entity's world
+// transform applied to a unit box (scale = box extents). Density adds to the
+// global medium inside; extinction/scattering are linearly additive so albedo
+// blends by density weight.
+struct FogVolumeComponent {
+    float     density = 0.1f;               // extra extinction σt inside (1/m)
+    glm::vec3 albedo  = { 0.9f, 0.9f, 0.9f };
+    float     falloff = 0.2f;               // edge softening band, local-space ratio [0..0.5]
+};
+
 // ── Material overrides ────────────────────────────────────────────────────────
 //
 // Unified override component. When present, the render system clones the base
@@ -176,6 +186,19 @@ struct AnimatorComponent {
     float   speed    = 1.f;
     bool    looping  = true;
     bool    playing  = true;
+
+    // #83 P2 — crossfade duration used when the clip is switched via
+    // CrossfadeTo / the editor test button (0 = hard cut). Serialized.
+    float   fadeDuration    = 0.15f;
+    // #83 P2 — extract the root bone's per-frame delta into the entity
+    // TransformComponent instead of baking it into the pose (in-place playback
+    // with the character actually moving). Serialized.
+    bool    applyRootMotion = false;
+
+    // #83 P2-5 — one-shot fade selector, NOT serialized. <0 = use fadeDuration;
+    // 0 = force hard cut (SetClip); >0 = force this fade (CrossfadeTo). Consumed
+    // (reset to -1) by AnimationSystem the frame the clip swap is processed.
+    float   pendingFadeOverride = -1.f;
 };
 
 // Holds the GPU-side per-entity skinning state.
@@ -186,6 +209,10 @@ struct AnimatorComponent {
 // Shared mesh data (vertexBuffer, indexBuffer, subMeshes, skinDataBuffer) lives in GPUMesh.
 struct SkinnedMeshComponent {
     AssetID               meshAsset;
+    // #83 P1 SkeletonAsset 一级化: explicit skeleton (→ .saskelc). Invalid =
+    // legacy fallback DeriveSkinID(meshAsset, 0). Enables cross-mesh skeleton
+    // sharing and is the retarget hook for later phases.
+    AssetID               skeletonAsset;
     RHI::RHIBufferHandle  skinMatricesBuffer;        // current-frame bone matrices
     RHI::RHIBufferHandle  skinMatricesBufferPrev;    // previous-frame bone matrices (Issue #84)
     RHI::RHIDescSetHandle skinDescSet;
@@ -194,6 +221,22 @@ struct SkinnedMeshComponent {
     bool                  ready       = false;
     bool                  poseSeeded  = false;       // Issue #84: first-eval guard; cleared on PrepareEntity / clip swap
     AssetID               lastEvalClipId;            // Issue #84: detect clip swap → force prev=curr that frame
+};
+
+// ── Bone pose override (#83 bone editing; absorbed X-3) ──────────────────────
+// Editor-authored per-bone LOCAL pose replacements. AnimationSystem applies
+// them after clip sampling (override wins per bone) — or over the bind pose
+// when no clip is playing — so posing works on both static and animated
+// characters. Bones stay asset data (baked-skeleton family), NOT entities.
+
+struct BoneTRS {
+    glm::vec3 position = { 0.f, 0.f, 0.f };
+    glm::quat rotation = { 1.f, 0.f, 0.f, 0.f };
+    glm::vec3 scale    = { 1.f, 1.f, 1.f };
+};
+
+struct BonePoseOverrideComponent {
+    std::map<int32_t, BoneTRS> bones;   // boneIndex (skeleton order) → local TRS
 };
 
 // ── PrevTransform (Issue #84) ────────────────────────────────────────────────

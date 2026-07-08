@@ -1,7 +1,7 @@
     #include "resource/GltfSceneInstantiator.hpp"
 #include "function/scene/Scene.hpp"
 #include "function/scene/Components.hpp"
-#include "resource/loaders/GltfLoader.hpp"
+#include "resource/loaders/ModelLoader.hpp"
 #include "resource/types/MeshData.hpp"
 #include "resource/cook/CookedMesh.hpp"
 #include "core/logs/Log.hpp"
@@ -85,7 +85,7 @@ bool GltfSceneInstantiator::Expand(Scene&             scene,
                                     const std::string&  glbAbsPath,
                                     const AssetID&      fileId)
 {
-    auto sceneOpt = Resource::GltfLoader::Load(glbAbsPath);
+    auto sceneOpt = Resource::ModelLoader::Load(glbAbsPath);
     if (!sceneOpt) {
         SA_LOG_ERROR("GltfSceneInstantiator: cannot load '{}'", glbAbsPath);
         return false;

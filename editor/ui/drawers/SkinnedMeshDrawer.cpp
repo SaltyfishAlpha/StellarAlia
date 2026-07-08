@@ -24,6 +24,11 @@ bool SkinnedMeshDrawer::TryDraw(entt::registry& reg, entt::entity entity,
         sm->ready = false;
         scene.MarkSkinnedMeshDirty();
     }
+    // #83 P1: explicit skeleton override; empty = derived from the mesh.
+    if (DrawAssetIDField("Skeleton", sm->skeletonAsset, "Skeleton", ctx.assetReg)) {
+        sm->ready = false;
+        scene.MarkSkinnedMeshDirty();
+    }
     ImGui::LabelText("Bones",  "%u", sm->boneCount);
     ImGui::LabelText("Status", "%s", sm->ready ? "Ready" : "Pending");
     ImGui::PopID();

@@ -298,6 +298,12 @@ public:
         SA_LOG_INFO("[DEV] ReadbackTextureMips  texture={} mips={}", tex.index, mips.size());
     }
 
+    void ReadbackTextureRegion(RHITextureHandle tex,
+                               const RegionReadback& region) override {
+        SA_LOG_INFO("[DEV] ReadbackTextureRegion  texture={} rect={},{} {}x{}",
+                    tex.index, region.x, region.y, region.w, region.h);
+    }
+
     void ImmediateCompute(std::function<void(IRHICommandList*)> fn) override {
         SA_LOG_INFO("[DEV] ImmediateCompute  begin");
         fn(&m_cmd);

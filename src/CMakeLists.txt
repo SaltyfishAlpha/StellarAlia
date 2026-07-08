@@ -122,6 +122,20 @@ if(TARGET stb)
     target_link_libraries(StellarAliaRuntime PUBLIC stb)
 endif()
 
+# Issue #108 — import-format libraries (loaders live in src/resource/loaders)
+if(TARGET tinyobjloader)
+    target_link_libraries(StellarAliaRuntime PRIVATE tinyobjloader)
+endif()
+if(TARGET ufbx)
+    target_link_libraries(StellarAliaRuntime PRIVATE ufbx)
+endif()
+if(TARGET mikktspace)
+    target_link_libraries(StellarAliaRuntime PRIVATE mikktspace)
+endif()
+if(TARGET bcdec)
+    target_link_libraries(StellarAliaRuntime PRIVATE bcdec)
+endif()
+
 # Link volk if available
 if(TARGET volk::volk)
     target_link_libraries(StellarAliaRuntime

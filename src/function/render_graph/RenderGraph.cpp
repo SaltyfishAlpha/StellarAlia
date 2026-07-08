@@ -21,10 +21,10 @@ static uint64_t CalcTextureBytes(const RHI::RHITextureDesc& desc) {
         return total;
     };
     switch (desc.format) {
-        case F::BC1_UNORM: return bcBytes(8);
-        case F::BC3_UNORM: return bcBytes(16);
-        case F::BC5_UNORM: return bcBytes(16);
-        case F::BC7_UNORM: return bcBytes(16);
+        case F::BC1_UNORM: case F::BC1_SRGB: return bcBytes(8);
+        case F::BC3_UNORM: case F::BC3_SRGB: return bcBytes(16);
+        case F::BC5_UNORM:                   return bcBytes(16);
+        case F::BC7_UNORM: case F::BC7_SRGB: return bcBytes(16);
         default: break;
     }
 
@@ -69,6 +69,9 @@ static const char* FormatName(RHI::RHIFormat f) {
         case F::BC3_UNORM:    return "BC3";
         case F::BC5_UNORM:    return "BC5";
         case F::BC7_UNORM:    return "BC7";
+        case F::BC1_SRGB:     return "BC1_SRGB";
+        case F::BC3_SRGB:     return "BC3_SRGB";
+        case F::BC7_SRGB:     return "BC7_SRGB";
         default:              return "Unknown";
     }
 }
