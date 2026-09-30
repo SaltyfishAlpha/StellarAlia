@@ -1,20 +1,20 @@
 {
   "format": 1,
   "restore": {
-    "D:\\ClionProjects\\StellarAlia\\managed\\StellarAlia.Runtime\\StellarAlia.Runtime.csproj": {}
+    "/home/alia/StellarAlia/managed/StellarAlia.Runtime/StellarAlia.Runtime.csproj": {}
   },
   "projects": {
-    "D:\\ClionProjects\\StellarAlia\\managed\\StellarAlia.Runtime\\StellarAlia.Runtime.csproj": {
+    "/home/alia/StellarAlia/managed/StellarAlia.Runtime/StellarAlia.Runtime.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "D:\\ClionProjects\\StellarAlia\\managed\\StellarAlia.Runtime\\StellarAlia.Runtime.csproj",
+        "projectUniqueName": "/home/alia/StellarAlia/managed/StellarAlia.Runtime/StellarAlia.Runtime.csproj",
         "projectName": "StellarAlia.Runtime",
-        "projectPath": "D:\\ClionProjects\\StellarAlia\\managed\\StellarAlia.Runtime\\StellarAlia.Runtime.csproj",
-        "packagesPath": "C:\\Users\\19144\\.nuget\\packages\\",
-        "outputPath": "D:\\ClionProjects\\StellarAlia\\managed\\StellarAlia.Runtime\\obj\\",
+        "projectPath": "/home/alia/StellarAlia/managed/StellarAlia.Runtime/StellarAlia.Runtime.csproj",
+        "packagesPath": "/home/alia/.nuget/packages/",
+        "outputPath": "/home/alia/StellarAlia/managed/StellarAlia.Runtime/obj/",
         "projectStyle": "PackageReference",
         "configFilePaths": [
-          "C:\\Users\\19144\\AppData\\Roaming\\NuGet\\NuGet.Config"
+          "/home/alia/.nuget/NuGet/NuGet.Config"
         ],
         "originalTargetFrameworks": [
           "net8.0"
@@ -24,7 +24,6 @@
         },
         "frameworks": {
           "net8.0": {
-            "framework": "net8.0",
             "targetAlias": "net8.0",
             "projectReferences": {}
           }
@@ -33,17 +32,10 @@
           "warnAsError": [
             "NU1605"
           ]
-        },
-        "restoreAuditProperties": {
-          "enableAudit": "true",
-          "auditLevel": "low",
-          "auditMode": "direct"
-        },
-        "SdkAnalysisLevel": "10.0.300"
+        }
       },
       "frameworks": {
         "net8.0": {
-          "framework": "net8.0",
           "targetAlias": "net8.0",
           "imports": [
             "net461",
@@ -59,15 +51,7 @@
           "downloadDependencies": [
             {
               "name": "Microsoft.AspNetCore.App.Ref",
-              "version": "[8.0.28, 8.0.28]"
-            },
-            {
-              "name": "Microsoft.NETCore.App.Ref",
-              "version": "[8.0.28, 8.0.28]"
-            },
-            {
-              "name": "Microsoft.WindowsDesktop.App.Ref",
-              "version": "[8.0.28, 8.0.28]"
+              "version": "[8.0.31, 8.0.31]"
             }
           ],
           "frameworkReferences": {
@@ -75,7 +59,7 @@
               "privateAssets": "all"
             }
           },
-          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.301/PortableRuntimeIdentifierGraph.json"
+          "runtimeIdentifierGraphPath": "/usr/share/dotnet/sdk/8.0.131/PortableRuntimeIdentifierGraph.json"
         }
       }
     }

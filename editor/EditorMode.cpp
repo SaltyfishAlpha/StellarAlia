@@ -1339,7 +1339,7 @@ void EditorMode::CookProjectShaders() {
             const auto t1 = line.find('\t');
             const auto t2 = (t1 != std::string::npos) ? line.find('\t', t1 + 1)
                                                       : std::string::npos;
-            const fs::path shaderPath = (t1 != std::string::npos) ? line.substr(0, t1)
+            const fs::path shaderPath = (t1 != std::string::npos) ? fs::path(line.substr(0, t1))
                                                                   : fs::path(line);
             const std::string model   = (t2 != std::string::npos)
                                       ? line.substr(t1 + 1, t2 - t1 - 1)

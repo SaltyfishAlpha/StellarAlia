@@ -95,9 +95,9 @@ if(EXISTS ${VOLK_DIR}/volk.h AND EXISTS ${VOLK_DIR}/volk.c)
 
     if(WIN32)
         target_compile_definitions(volk PUBLIC VK_USE_PLATFORM_WIN32_KHR)
-    elseif(UNIX AND NOT APPLE)
-        target_compile_definitions(volk PUBLIC VK_USE_PLATFORM_XLIB_KHR)
     endif()
+    # Linux: no VK_USE_PLATFORM_* define — surfaces come from glfwCreateWindowSurface,
+    # and XLIB_KHR would pull <X11/Xlib.h> whose None/Always macros break RHI enums.
 
     add_library(volk::volk ALIAS volk)
     message(STATUS "volk: Using files from ${VOLK_DIR}")

@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 3,
   "targets": {
     "net8.0": {
       "Microsoft.CodeAnalysis.Analyzers/3.3.4": {
@@ -1011,19 +1011,19 @@
     ]
   },
   "packageFolders": {
-    "C:\\Users\\19144\\.nuget\\packages\\": {}
+    "/home/alia/.nuget/packages/": {}
   },
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "D:\\ClionProjects\\StellarAlia\\managed\\StellarAlia.ScriptBridge\\StellarAlia.ScriptBridge.csproj",
+      "projectUniqueName": "/home/alia/StellarAlia/managed/StellarAlia.ScriptBridge/StellarAlia.ScriptBridge.csproj",
       "projectName": "StellarAlia.ScriptBridge",
-      "projectPath": "D:\\ClionProjects\\StellarAlia\\managed\\StellarAlia.ScriptBridge\\StellarAlia.ScriptBridge.csproj",
-      "packagesPath": "C:\\Users\\19144\\.nuget\\packages\\",
-      "outputPath": "D:\\ClionProjects\\StellarAlia\\managed\\StellarAlia.ScriptBridge\\obj\\",
+      "projectPath": "/home/alia/StellarAlia/managed/StellarAlia.ScriptBridge/StellarAlia.ScriptBridge.csproj",
+      "packagesPath": "/home/alia/.nuget/packages/",
+      "outputPath": "/home/alia/StellarAlia/managed/StellarAlia.ScriptBridge/obj/",
       "projectStyle": "PackageReference",
       "configFilePaths": [
-        "C:\\Users\\19144\\AppData\\Roaming\\NuGet\\NuGet.Config"
+        "/home/alia/.nuget/NuGet/NuGet.Config"
       ],
       "originalTargetFrameworks": [
         "net8.0"
@@ -1033,11 +1033,10 @@
       },
       "frameworks": {
         "net8.0": {
-          "framework": "net8.0",
           "targetAlias": "net8.0",
           "projectReferences": {
-            "D:\\ClionProjects\\StellarAlia\\managed\\StellarAlia.Runtime\\StellarAlia.Runtime.csproj": {
-              "projectPath": "D:\\ClionProjects\\StellarAlia\\managed\\StellarAlia.Runtime\\StellarAlia.Runtime.csproj"
+            "/home/alia/StellarAlia/managed/StellarAlia.Runtime/StellarAlia.Runtime.csproj": {
+              "projectPath": "/home/alia/StellarAlia/managed/StellarAlia.Runtime/StellarAlia.Runtime.csproj"
             }
           }
         }
@@ -1046,17 +1045,10 @@
         "warnAsError": [
           "NU1605"
         ]
-      },
-      "restoreAuditProperties": {
-        "enableAudit": "true",
-        "auditLevel": "low",
-        "auditMode": "direct"
-      },
-      "SdkAnalysisLevel": "10.0.300"
+      }
     },
     "frameworks": {
       "net8.0": {
-        "framework": "net8.0",
         "targetAlias": "net8.0",
         "dependencies": {
           "Microsoft.CodeAnalysis.CSharp": {
@@ -1078,15 +1070,7 @@
         "downloadDependencies": [
           {
             "name": "Microsoft.AspNetCore.App.Ref",
-            "version": "[8.0.28, 8.0.28]"
-          },
-          {
-            "name": "Microsoft.NETCore.App.Ref",
-            "version": "[8.0.28, 8.0.28]"
-          },
-          {
-            "name": "Microsoft.WindowsDesktop.App.Ref",
-            "version": "[8.0.28, 8.0.28]"
+            "version": "[8.0.31, 8.0.31]"
           }
         ],
         "frameworkReferences": {
@@ -1094,7 +1078,7 @@
             "privateAssets": "all"
           }
         },
-        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.301/PortableRuntimeIdentifierGraph.json"
+        "runtimeIdentifierGraphPath": "/usr/share/dotnet/sdk/8.0.131/PortableRuntimeIdentifierGraph.json"
       }
     }
   }

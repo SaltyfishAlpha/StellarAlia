@@ -7,7 +7,7 @@ namespace StellarAlia::Editor {
 
 ProjectBrowserPresenter::ProjectBrowserPresenter(EditorContext& ctx)
     : m_ctx(ctx)
-    , m_engineAssetsDir(ctx.app ? ctx.app->GetDesc().engineAssetsDir : std::filesystem::path{})
+    , m_engineAssetsDir(ctx.app ? std::filesystem::path(ctx.app->GetDesc().engineAssetsDir) : std::filesystem::path{})
 {}
 
 void ProjectBrowserPresenter::Update(float /*dt*/) {

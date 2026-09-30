@@ -1,12 +1,10 @@
 {
   "version": 2,
-  "dgSpecHash": "vEVMwSva98k=",
+  "dgSpecHash": "BAaTnd5xTr4B6gEK42xC+/TdI2qpcMk4nHQSeCCzv5TLsljVpXpO5iZh1eTE7hfQIwchjPYrgsEuYIwDRBihmg==",
   "success": true,
-  "projectFilePath": "D:\\ClionProjects\\StellarAlia\\managed\\StellarAlia.Runtime\\StellarAlia.Runtime.csproj",
+  "projectFilePath": "/home/alia/StellarAlia/managed/StellarAlia.Runtime/StellarAlia.Runtime.csproj",
   "expectedPackageFiles": [
-    "C:\\Users\\19144\\.nuget\\packages\\microsoft.netcore.app.ref\\8.0.28\\microsoft.netcore.app.ref.8.0.28.nupkg.sha512",
-    "C:\\Users\\19144\\.nuget\\packages\\microsoft.windowsdesktop.app.ref\\8.0.28\\microsoft.windowsdesktop.app.ref.8.0.28.nupkg.sha512",
-    "C:\\Users\\19144\\.nuget\\packages\\microsoft.aspnetcore.app.ref\\8.0.28\\microsoft.aspnetcore.app.ref.8.0.28.nupkg.sha512"
+    "/home/alia/.nuget/packages/microsoft.aspnetcore.app.ref/8.0.31/microsoft.aspnetcore.app.ref.8.0.31.nupkg.sha512"
   ],
   "logs": []
 }
